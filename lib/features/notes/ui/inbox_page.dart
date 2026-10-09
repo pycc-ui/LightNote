@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 // 隐藏 Drift 的 Card 类（由 cards 表生成），避免与 Flutter 的 Card 组件冲突。
 import '../../../core/db/app_database.dart' hide Card;
 import '../../../core/theme/dimens.dart';
+import '../../../core/ui/log_bar.dart';
 import '../../../core/util/text_utils.dart';
 import '../../folders/data/folder_repository.dart';
 import '../data/note_repository.dart';
@@ -23,11 +24,6 @@ class InboxPage extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('轻笔记')),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _createQuickNote(context, notes),
-        icon: const Icon(Icons.edit_outlined),
-        label: const Text('记一笔'),
-      ),
       body: StreamBuilder<List<Note>>(
         stream: notes.watchInbox(),
         builder: (context, snapshot) {
@@ -62,12 +58,6 @@ class InboxPage extends StatelessWidget {
     );
   }
 
-  Future<void> _createQuickNote(BuildContext context, NoteRepository repo) async {
-    final note = await repo.createInbox();
-    if (!context.mounted) return;
-    await _open(context, note.id);
-  }
-
   Future<void> _open(BuildContext context, String noteId) async {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => NoteEditorPage(noteId: noteId)),
@@ -87,16 +77,13 @@ class InboxPage extends StatelessWidget {
 
     if (!context.mounted) return;
     final name = (await folders.byId(folderId))?.name ?? '目录';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('已加入「$name」'),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: () {
-            context.read<NoteRepository>().moveToInbox(note.id);
-          },
-        ),
-      ),
+    LogBar.action(
+      context,
+      '已加入「$name」',
+      actionLabel: '撤销',
+      onAction: () {
+        context.read<NoteRepository>().moveToInbox(note.id);
+      },
     );
   }
 

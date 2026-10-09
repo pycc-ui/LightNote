@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/seed/seed_data.dart';
 import '../../../core/theme/dimens.dart';
+import '../../../core/ui/log_bar.dart';
 import '../../../services/preferences_service.dart';
 import '../../folders/data/folder_repository.dart';
 import '../../notes/data/note_repository.dart';
@@ -347,9 +348,7 @@ class _AiPageState extends State<AiPage> {
     if (!mounted) return;
 
     if (candidates.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('还没有可选的笔记')),
-      );
+      LogBar.info(context, '还没有可选的笔记');
       return;
     }
 
@@ -436,9 +435,7 @@ class _AiPageState extends State<AiPage> {
     final text = _inputController.text.trim();
     if (text.isEmpty || _sending) return;
     if (!_privacyAccepted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先阅读并同意上方的数据说明')),
-      );
+      LogBar.info(context, '请先阅读并同意上方的数据说明');
       return;
     }
 
@@ -460,8 +457,7 @@ class _AiPageState extends State<AiPage> {
           );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('发送失败：$e')));
+        LogBar.error(context, '发送失败：$e');
       }
     } finally {
       if (mounted) {

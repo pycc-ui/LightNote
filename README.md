@@ -4,10 +4,16 @@ Flutter + Dart + SQLite(Drift) + DeepSeek API 的**本地优先**笔记应用。
 
 核心链路：**速记 → 加入笔记库（归目录）→ AI 整理 → 记忆卡片 → 间隔复习 → 沉浸阅读**
 
-> 界面规格见 [docs/界面设计.md](docs/界面设计.md)，
+> **日常开发怎么循环 → [docs/开发流程.md](docs/开发流程.md)**
 > 实施对照与偏差说明见 [docs/03-界面设计实施说明.md](docs/03-界面设计实施说明.md)，
 > 技术选型见 [docs/01-技术选型与架构设计.md](docs/01-技术选型与架构设计.md)，
 > 数据模型见 [docs/02-数据模型设计.md](docs/02-数据模型设计.md)。
+>
+> `docs/界面设计.md`（原始界面规格）已被作者删除——设计已脱离项目，
+> 其中仍有效的信息都吸收进了上面三份文档。
+
+**如果你只想记住一件事**：改完代码双击 `rebuild-and-run.cmd`。数据不会丢，
+原因和"什么情况才会丢"都写在 [docs/开发流程.md](docs/开发流程.md)。
 
 ### 关于命名（唯一的例外）
 
@@ -294,14 +300,32 @@ Android :  /data/data/<包名>/files/LightNote/qing_notes.sqlite
 | 2 | 用户在设置里指定的工作目录 | 存在 `storage.json`（不在数据库里，否则先有鸡还是先有蛋） |
 | 3 | `getApplicationSupportDirectory()/LightNote` | **默认** |
 | 4 | `getApplicationDocumentsDirectory()/LightNote` | 第 3 步目录建不出来时的备选 |
-| 5 | `%USERPROFILE%\LightNote` | 最后备选 |
+| 5 | `%USERPROFILE%\LightNote` | 用户主目录 |
+| 6 | `<exe 所在目录>\.lightnote-data` | **最后兜底**，见下 |
 
 - **刻意不把「系统临时目录」列为候选**：临时目录会被系统清理，
-  把笔记库放进去等于埋一个"过几天数据没了"的定时炸弹。宁可报错也不要静默丢数据。
+  把笔记库放进去等于埋一个"过几天数据没了"的定时炸弹。
 - 任何降级都会：① 控制台打印原因；② 在设置页「存储位置」卡片上如实展示，
   带一个红色提示条说明"你指定的目录这次没用上"。
 - 全部候选都失败时，启动页会显示诊断页（列出每个候选各自的错误），
   而不是留一个转圈的空白壳。
+
+#### 为什么最后要兜到「exe 旁边」
+
+第 4、5 条曾经是尽头，走到头就抛异常、只显示错误页。**那是个设计缺陷**：
+App 会变成一块完全不能用的砖头，而用户什么也做不了。
+
+现在第 6 条用「程序所在目录」兜底——只要能启动 App，它所在目录几乎一定可读，
+也通常可写。这样 App **永远不会因为"存不下"而变成砖头**，同时降级事实会
+明确打印并显示在设置页，不会静默。
+
+这个兜底真实生效过：本项目的自动化会话里，App 子进程被沙箱拦住了
+AppData / 文档 / 主目录的写入（实测只有工作区内可写），加上这一条之后
+App 正常启动、正常建库，而不是显示错误页。
+
+> 目录名以 `.` 开头（`.lightnote-data`），不干扰浏览，也天然被各种清理工具忽略。
+> **注意它在 `build\` 下面**，所以 `flutter clean` 或手工删 `build\` 会连数据一起删掉。
+> 出现这个降级时，第一件事应该是到「设置 → 存储位置」把库换到正经位置。
 
 ### 更换工作目录（设置 → 存储位置 → 更换工作目录）
 
@@ -399,18 +423,43 @@ foreach ($d in 'mdpi','hdpi','xhdpi','xxhdpi','xxxhdpi') {
 
 ```powershell
 cd C:\Users\43720\Downloads\LightNote\smart_notes
-. .\tool\flutter_env.ps1          # 载入环境（点源，当前会话生效）
+.\rebuild-and-run.cmd             # ← 日常：编译 + 启动（失败会 pause）
+.\tool\run.cmd                    # 同上，不停留
+.\tool\run.cmd build              # 只构建 debug
+.\tool\run.cmd release            # 构建 release
+.\tool\run.cmd test               # 75 个测试
+.\tool\run.cmd analyze            # 静态分析
+.\tool\run.cmd pubget             # flutter pub get
+.\tool\run.cmd flutterrun         # 需要热重载时用（见下面注意事项）
+.\tool\run.cmd doctor             # 环境自检
+
+. .\tool\flutter_env.ps1          # 手动载入环境（点源，当前会话生效）
                                   # 注意：执行策略会拦 .ps1，用 run.cmd 更省事
 
-flutter analyze                   # 静态分析，当前零问题
-flutter test                      # 75 个测试
-flutter run -d windows            # 桌面调试
-flutter devices                   # 查看真机
-flutter run -d <device-id>        # 真机运行
 dart run build_runner build       # 改过表结构（tables.dart）后重新生成 Drift 代码
 ```
 
 平台目录（`android/`、`windows/`）已由 `flutter create` 生成完毕，无需再跑。
+
+### ⚠️ 为什么日常不用 `flutter run`
+
+`run.cmd` 的默认模式**不用 `flutter run`**，而是「`flutter build` + 直接启动 exe」。
+三个原因，都是真实踩到的：
+
+1. **环境会被继承给 App**。`flutter_env.ps1` 为了绕开"dart.exe 写不了真实 AppData"
+   把 `APPDATA` 重定向到了 `tools\appdata`。`flutter run` 启动的 App 会继承它，
+   于是**`run.cmd` 跑出来的 App 和双击 exe 跑出来的 App 读写的是两个不同的数据库**
+   ——用户会以为"设置丢了""笔记没了"。
+2. **想还原也不行**：flutter 工具自己要在 `%APPDATA%\.flutter_tool_state` 写状态，
+   还原成真实 AppData 后它直接崩（实测报 `Flutter failed to write to a file`）。
+   父进程和子进程的要求正好相反，同一个环境里没法两全。
+3. **它占着终端不返回**，改一行代码就得重来一遍。
+
+直接启动 exe 则：环境干净（还原成你的真实环境）、立刻返回、与双击完全等效。
+代价是没有热重载——本项目这个迭代节奏用不上。
+
+真需要热重载时跑 `.\tool\run.cmd flutterrun`，但要清楚**那时 App 的数据库
+在假 AppData 下**（`tools\appdata\Roaming\LightNote\...`），跟平时看到的不是同一份。
 
 **改了数据库表结构之后**：
 

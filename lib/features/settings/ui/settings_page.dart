@@ -10,6 +10,7 @@ import '../../../core/db/app_database.dart' hide Card;
 import '../../../core/db/database_location.dart';
 import '../../../core/secure/secure_store.dart';
 import '../../../core/theme/dimens.dart';
+import '../../../core/ui/log_bar.dart';
 import '../../../services/backup/app_restart.dart';
 import '../../../services/backup/backup_models.dart';
 import '../../../services/backup/backup_service.dart';
@@ -96,11 +97,15 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 数据库路径取的是 `AppDatabase.databasePath`（打开时记下的真实路径），
   /// 而不是在这里重新解析一次——两处各自解析可能给出不同答案，
   /// 那样设置页就会"说得和做得不一样"。
+  ///
+  /// 用 [DatabaseLocation.describeSafe]：它保证不抛异常。
+  /// 设置页只是展示信息，绝不能因为解析位置失败就整页打崩。
   Future<void> _refreshStorageInfo() async {
     try {
-      final info = await DatabaseLocation.describe();
+      final info = await DatabaseLocation.describeSafe();
       final db = context.read<AppDatabase>();
       final backups = await context.read<BackupService>().listAutoBackups();
+      // 诊断文本是按需展开的，这里先不算，点"查看详情"时再算
       if (!mounted) return;
       setState(() {
         _location = info;
@@ -111,6 +116,34 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!mounted) return;
       debugPrint('读取存储信息失败：$e');
     }
+  }
+
+  /// 弹出完整的位置解析过程，供排查"数据到底在哪"。
+  Future<void> _showDiagnostics() async {
+    final text = await DatabaseLocation.diagnose();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('数据库位置诊断'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            text,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12, height: 1.5),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('复制用说明：选中文字即可复制'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _setBusy(String label) => setState(() {
@@ -492,8 +525,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final isPrivate = loc?.isPrivate ?? true;
     final envOverridden = loc?.isEnvOverridden ?? false;
     final rootUnavailable = loc?.privateRootUnavailable ?? false;
+    final degradedToProgramDir = loc?.isDegradedToProgramDir ?? false;
 
     final (IconData icon, String title) = switch (true) {
+      _ when degradedToProgramDir =>
+        (Icons.error_outline, '临时位置（有丢失风险）'),
       _ when envOverridden => (Icons.terminal, '环境变量指定（调试）'),
       _ when rootUnavailable => (Icons.warning_amber_outlined, '自定义位置（私有目录不可用）'),
       _ when isPrivate => (Icons.lock_outline, 'App 私有目录（默认）'),
@@ -530,6 +566,11 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: AppSpacing.sm),
             Text(
               switch (true) {
+                _ when degradedToProgramDir =>
+                  '所有常规位置都写不进去（AppData、文档目录、用户主目录），'
+                      '所以数据落在了**程序所在目录**里。'
+                      '这个位置在 build\\ 下面，一次 flutter clean 或手工删 build\\ '
+                      '就会连数据一起删掉。请尽快用下面的「更换工作目录」挪到安全位置。',
                 _ when envOverridden =>
                   '数据库位置由环境变量 $kDbDirEnvOverride 指定，'
                       '这是调试/CI 用的开关，正常使用时不会有这一行。',
@@ -542,6 +583,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 _ =>
                   '笔记库是一个单独的 SQLite 文件，放在 App 私有目录里，'
                       '不会出现在相册或文件管理器里。'
+                      '重新编译、删 build 目录、flutter clean 都不会影响它。'
                       '想拿到别处、或想在电脑上直接打开，用下面的「导出备份包」。',
               },
               style: theme.textTheme.bodySmall?.copyWith(
@@ -549,7 +591,37 @@ class _SettingsPageState extends State<SettingsPage> {
                 height: 1.6,
               ),
             ),
-            if (loc?.isFallback == true) ...[
+            if (degradedToProgramDir) ...[
+              const SizedBox(height: AppSpacing.sm),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '⚠️ 数据在 build\\ 目录里，有丢失风险',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '原因：${loc?.degradedNote ?? '常规位置均不可写'}\n\n'
+                      '建议：点下面的「更换工作目录」选一个安全目录，'
+                      'App 会把数据复制过去并重启。',
+                      style: theme.textTheme.bodySmall?.copyWith(height: 1.5),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (loc?.isFallback == true && !degradedToProgramDir) ...[
               const SizedBox(height: AppSpacing.sm),
               Container(
                 width: double.infinity,
@@ -585,6 +657,12 @@ class _SettingsPageState extends State<SettingsPage> {
                     icon: const Icon(Icons.drive_file_move_outline, size: 18),
                     label: Text(isPrivate ? '更换工作目录' : '更换目录'),
                   ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _showDiagnostics,
+                  icon: const Icon(Icons.troubleshoot, size: 18),
+                  label: const Text('诊断'),
                 ),
               ],
             ),
@@ -734,11 +812,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _saveKey() async {
     final key = _keyController.text.trim();
     if (key.isEmpty) {
-      _toast('请输入 API Key');
+      LogBar.info(context, '请输入 API Key');
       return;
     }
     if (!key.startsWith('sk-')) {
-      _toast('看起来不像 DeepSeek 的 Key（通常以 sk- 开头），仍会保存。');
+      LogBar.info(context, '看起来不像 DeepSeek 的 Key（通常以 sk- 开头），仍会保存。');
     }
     setState(() => _savingKey = true);
     await context.read<AiRepository>().saveApiKey(key);
@@ -748,7 +826,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _hasKey = true;
       _keyController.clear();
     });
-    _toast('已保存');
+    LogBar.info(context, '已保存');
   }
 
   Future<void> _clearKey() async {
@@ -777,7 +855,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _hasKey = false;
       _testResult = null;
     });
-    _toast('已删除');
+    LogBar.info(context, '已删除');
   }
 
   Future<void> _test() async {
@@ -833,12 +911,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (ok != true || !mounted) return;
     await context.read<AppDatabase>().clearAiHistory();
     if (!mounted) return;
-    _toast('已清空');
-  }
-
-  void _toast(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    LogBar.info(context, '已清空');
   }
 
   // ==========================================================================
@@ -857,7 +930,7 @@ class _SettingsPageState extends State<SettingsPage> {
         suggestedName: BackupService.defaultArchiveName(),
       );
     } catch (e) {
-      _toast('打开保存对话框失败：$e');
+      LogBar.error(context, '打开保存对话框失败：$e');
       return;
     }
 
@@ -880,7 +953,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('导出失败：$e');
+      LogBar.error(context, '导出失败：$e');
     }
   }
 
@@ -933,7 +1006,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       archive = await dialogs.pickArchiveToImport();
     } catch (e) {
-      _toast('打开文件选择器失败：$e');
+      LogBar.error(context, '打开文件选择器失败：$e');
       return;
     }
     if (archive == null || !mounted) return;
@@ -950,7 +1023,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('备份包无法使用：$e');
+      LogBar.error(context, '备份包无法使用：$e');
       return;
     }
     if (!mounted) return;
@@ -971,7 +1044,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('写入待导入标记失败：$e');
+      LogBar.error(context, '写入待导入标记失败：$e');
       return;
     }
     if (!mounted) return;
@@ -1074,7 +1147,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _pickWorkingDirectory() async {
     if (!FileDialogs.directoryPickerIsReliable) {
-      _toast('当前平台的目录选择器给不出可写路径，请改用导出/导入备份包。');
+      LogBar.info(context, '当前平台的目录选择器给不出可写路径，请改用导出/导入备份包。');
       return;
     }
 
@@ -1105,7 +1178,7 @@ class _SettingsPageState extends State<SettingsPage> {
       privateRoot = null;
     }
     if (target == null && privateRoot == null) {
-      _toast('App 私有目录当前不可用，无法恢复默认位置。');
+      LogBar.info(context, 'App 私有目录当前不可用，无法恢复默认位置。');
       return;
     }
 
@@ -1114,7 +1187,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final current = _location?.activeDir;
 
     if (current != null && p.equals(p.normalize(current), targetDir.path)) {
-      _toast('已经是当前目录了');
+      LogBar.info(context, '已经是当前目录了');
       return;
     }
 
@@ -1132,7 +1205,7 @@ class _SettingsPageState extends State<SettingsPage> {
         } catch (e) {
           if (!mounted) return;
           _clearBusy();
-          _toast('写入配置失败：$e');
+          LogBar.error(context, '写入配置失败：$e');
           return;
         }
         if (!mounted) return;
@@ -1162,7 +1235,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('切换失败：$e');
+      LogBar.error(context, '切换失败：$e');
       return;
     }
     if (!mounted) return;
@@ -1231,12 +1304,12 @@ class _SettingsPageState extends State<SettingsPage> {
     );
 
     if (confirmed != true) {
-      _toast('已记录。请手动关闭并重新打开 App 完成切换。');
+      LogBar.info(context, '已记录。请手动关闭并重新打开 App 完成切换。');
       return;
     }
     final ok = await AppRestart.restart();
     if (!ok && mounted) {
-      _toast('当前平台不支持自动重启，请手动关闭再打开 App。');
+      LogBar.info(context, '当前平台不支持自动重启，请手动关闭再打开 App。');
     }
   }
 
@@ -1275,7 +1348,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('导出失败：$e');
+      LogBar.error(context, '导出失败：$e');
     }
   }
 }

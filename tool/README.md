@@ -59,9 +59,18 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `run.cmd <模式>` | **主入口**。模式：`run`（默认，构建+运行）/ `build` / `release` / `test` / `analyze` / `doctor` / `pubget` / `raw <参数>` |
+| `run.cmd <模式>` | **主入口**。模式：`run`（默认，构建+启动 exe）/ `build` / `release` / `test` / `analyze` / `doctor` / `pubget` / `flutterrun` / `raw <参数>` |
 | `run.ps1` | `run.cmd` 调用的实际逻辑，单独调用无效（环境变量会丢） |
 | `flutter_env.ps1` | 环境重定向 + PATH。被上面两个点源调用；也可 `. .\tool\flutter_env.ps1` 手动载入当前会话 |
+
+**`run` 模式为什么不是 `flutter run`**：见 [README](../README.md) 第五节。
+简述：`flutter run` 会把重定向过的环境继承给 App，导致 App 去假 AppData 里
+读写数据库（和双击 exe 不是同一份数据）；而还原环境又会让 flutter 工具自己崩。
+所以 `run` 模式改成「`flutter build` + 直接启动 exe」。
+需要热重载时用 `flutterrun` 模式，但要知道那时的数据库位置不一样。
+
+`flutter_env.ps1` 里存了一份原始环境变量（`LIGHTNOTE_ORIG_*`），
+`Restore-RuntimeEnv` 函数用它在启动 App 前还原成用户的真实环境。
 
 ### 排查问题
 

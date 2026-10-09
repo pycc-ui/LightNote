@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -5,6 +8,7 @@ import 'core/app_info.dart';
 import 'core/db/app_database.dart';
 import 'core/db/database_location.dart';
 import 'core/theme/app_theme.dart';
+import 'core/ui/log_bar.dart';
 import 'features/ai/data/deepseek_client.dart';
 import 'features/ai/domain/ai_chat_repository.dart';
 import 'features/ai/domain/ai_repository.dart';
@@ -42,8 +46,49 @@ Future<void> main() async {
     gStartupImport = null;
   }
 
+  // 把数据库的真实位置写出来给构建脚本读。
+  // 目的：让「编译 + 启动」时能直接在终端看到数据在哪，
+  // 不用去翻日志或猜 AppData 的目录名。
+  // 失败不影响启动，静默即可。
+  unawaited(_publishDbLocation());
+
   runApp(const LightNoteApp());
 }
+
+/// 把数据库位置摘要写到 **App 工作目录**（= exe 所在目录）下的
+/// `.lightnote-storage.txt`。
+///
+/// 这不是给 App 用的，是给 `tool\run.ps1` 读的：
+/// 启动 App 之后脚本会去 exe 目录读这个文件，把"数据到底在哪"打印出来。
+///
+/// 为什么写在工作目录而不是工程根目录：App 不该知道自己被放在
+/// 工程的哪个位置（Release 版会被整个拷到别处单独运行）。
+/// 工作目录是启动方决定的，脚本正好知道它（就是 exe 所在目录）。
+Future<void> _publishDbLocation() async {
+  try {
+    final info = await DatabaseLocation.describeSafe();
+    final lines = <String>[
+      'path=${info.activeDir}',
+      'private=${info.isPrivate}',
+      'unusable=${info.isUnusable}',
+      if (info.isFallback) 'fallback=${info.fallbackNote ?? ''}',
+      if (info.isDegradedToProgramDir) 'degradedProgramDir=true',
+      if (info.isEnvOverridden) 'envOverride=true',
+    ];
+    // 先写临时文件再改名：脚本可能正好在这一刻去读，
+    // 直接覆盖会读到写了一半的内容（脚本会当成解析失败）。
+    final tmp = File('$kLocationReportFile.tmp');
+    await tmp.writeAsString(lines.join('\n'), flush: true);
+    final target = File(kLocationReportFile);
+    if (target.existsSync()) await target.delete();
+    await tmp.rename(target.path);
+  } catch (_) {
+    // 写不出来无所谓，只是个提示信息
+  }
+}
+
+/// 位置报告的文件名（相对 App 工作目录）。
+const kLocationReportFile = '.lightnote-storage.txt';
 
 class LightNoteApp extends StatelessWidget {
   const LightNoteApp({super.key});
@@ -123,19 +168,11 @@ class _AppShellState extends State<_AppShell> {
     if (result == null) return;
     gStartupImport = null;
 
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 8),
-        content: Text(
-          '已从备份恢复：${result.stats.summary}'
-          '${result.previousBackupPath == null ? '' : '\n旧数据已留档：${result.previousBackupPath}'}',
-        ),
-        action: SnackBarAction(
-          label: '知道了',
-          onPressed: messenger.hideCurrentSnackBar,
-        ),
-      ),
+    LogBar.action(
+      context,
+      '已从备份恢复：${result.stats.summary}'
+      '${result.previousBackupPath == null ? '' : '\n旧数据已留档：${result.previousBackupPath}'}',
+      actionLabel: '知道了',
     );
     // 提示只该出现一次
     clearLastImportNote();
@@ -211,8 +248,7 @@ class _StartupGateState extends State<_StartupGate> {
         }
         if (snap.hasError) {
           return _StartupErrorScreen(error: snap.error!);
-        }
-        return widget.child;
+        }        return widget.child;
       },
     );
   }

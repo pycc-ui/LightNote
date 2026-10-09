@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import '../../../core/db/models.dart';
 import '../../../core/secure/secure_store.dart';
 import '../../../core/theme/dimens.dart';
+import '../../../core/ui/log_bar.dart';
 import '../../../services/markdown_export_service.dart';
 import '../../../services/preferences_service.dart';
 import '../../ai/domain/ai_repository.dart';
@@ -21,9 +22,10 @@ enum SaveState { idle, dirty, saving, saved, failed }
 
 /// 笔记编辑页（设计稿 §5.4 / 线框图 4.4）
 class NoteEditorPage extends StatefulWidget {
-  const NoteEditorPage({required this.noteId, super.key});
+  const NoteEditorPage({required this.noteId,this.startInPreview = true,super.key});
 
   final String noteId;
+  final bool startInPreview;
 
   @override
   State<NoteEditorPage> createState() => _NoteEditorPageState();
@@ -37,7 +39,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   Timer? _debounce;
   Note? _note;
   bool _loaded = false;
-  bool _preview = false;
+  late bool _preview;
   bool _autoSave = true;
   double _fontScale = 1.0;
   SaveState _saveState = SaveState.idle;
@@ -48,6 +50,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   @override
   void initState() {
     super.initState();
+    _preview = widget.startInPreview;
     _load();
   }
 
@@ -210,38 +213,57 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       ),
     );
   }
-
   Widget _buildPreview(ThemeData theme) {
-    return Markdown(
-      data: _contentController.text.isEmpty
-          ? '_（正文为空）_'
-          : _contentController.text,
+    final title = _titleController.text.trim();
+    final content = _contentController.text;
+  
+    return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
-          AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xl),
-      selectable: true,
-      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-        p: theme.textTheme.bodyLarge
-            ?.copyWith(height: 1.75, fontSize: 16 * _fontScale),
-        h1: theme.textTheme.headlineMedium?.copyWith(
-            fontWeight: FontWeight.w700, fontSize: 26 * _fontScale),
-        h2: theme.textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w700, fontSize: 21 * _fontScale),
-        h3: theme.textTheme.titleMedium
-            ?.copyWith(fontWeight: FontWeight.w600, fontSize: 18 * _fontScale),
-        code: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 14 * _fontScale,
-          backgroundColor: theme.colorScheme.surfaceContainerHighest,
-        ),
-        blockquoteDecoration: BoxDecoration(
-          color:
-              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: AppRadius.cardRadius,
-        ),
+        AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (title.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+              child: Text(
+                title,
+                style: theme.textTheme.headlineMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 26 * _fontScale,
+                ),
+              ),
+            ),
+          Markdown(
+            data: content.isEmpty ? '_（正文为空）_' : content,
+            selectable: true,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+              p: theme.textTheme.bodyLarge
+                  ?.copyWith(height: 1.75, fontSize: 16 * _fontScale),
+              h1: theme.textTheme.headlineMedium?.copyWith(
+                  fontWeight: FontWeight.w700, fontSize: 26 * _fontScale),
+              h2: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w700, fontSize: 21 * _fontScale),
+              h3: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600, fontSize: 18 * _fontScale),
+              code: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 14 * _fontScale,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest,
+              ),
+              blockquoteDecoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest
+                    .withValues(alpha: 0.5),
+                borderRadius: AppRadius.cardRadius,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
-
   /// 格式工具栏（线框图 4.4 底部：B I U • ☑ # 🏷 AI）
   Widget _formatToolbar(ThemeData theme) {
     return Container(
@@ -412,9 +434,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('该笔记的 Markdown 已复制到剪贴板')),
-    );
+    LogBar.info(context, '该笔记的 Markdown 已复制到剪贴板');
   }
 
   Future<void> _copyAll() async {
@@ -425,9 +445,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       ClipboardData(text: MarkdownExportService.buildCopyText(note)),
     );
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已复制全文')),
-    );
+    LogBar.info(context, '已复制全文');
   }
 
   Future<void> _moveFolder() async {
@@ -575,16 +593,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
     final content = _contentController.text.trim();
     if (content.isEmpty) {
-      _toast('正文为空，先写点内容再让 AI 整理。');
+      LogBar.info(context, '正文为空，先写点内容再让 AI 整理。');
       return;
     }
     if (!await SecureStore.hasApiKey()) {
       if (!mounted) return;
-      _toast('还没配置 API Key，请到「设置」里填写。');
+      LogBar.info(context, '还没配置 API Key，请到「设置」里填写。');
       return;
     }
 
-    _showBusy('正在整理笔记…');
+    final busy = LogBar.busy(context, '正在整理笔记…');
     try {
       final thinking = await SecureStore.readThinkingEnabled();
       final result = await context.read<AiRepository>().summarize(
@@ -592,7 +610,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
             deepThinking: thinking,
           );
       if (!mounted) return;
-      _hideBusy();
+      busy.close();
 
       final refreshed = await context.read<NoteRepository>().byId(widget.noteId);
       if (mounted) setState(() => _note = refreshed);
@@ -606,8 +624,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       );
     } catch (e) {
       if (!mounted) return;
-      _hideBusy();
-      _toast('整理失败：$e');
+      busy.close();
+      LogBar.error(context, '整理失败：$e');
     }
   }
 
@@ -616,24 +634,25 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     if (!mounted) return;
 
     if (_contentController.text.trim().isEmpty) {
-      _toast('正文为空，无法生成卡片。');
+      LogBar.info(context, '正文为空，无法生成卡片。');
       return;
     }
     if (!await SecureStore.hasApiKey()) {
       if (!mounted) return;
-      _toast('还没配置 API Key，请到「设置」里填写。');
+      LogBar.info(context, '还没配置 API Key，请到「设置」里填写。');
       return;
     }
 
-    _showBusy('正在生成记忆卡片…（这一步用 pro 模型，耗时较长）');
+    final busy =
+        LogBar.busy(context, '正在生成记忆卡片…（这一步用 pro 模型，耗时较长）');
     try {
       final drafts =
           await context.read<AiRepository>().generateCards(widget.noteId);
       if (!mounted) return;
-      _hideBusy();
+      busy.close();
 
       if (drafts.isEmpty) {
-        _toast('这篇笔记没能生成有效卡片，内容可能太短或过于零散。');
+        LogBar.info(context, '这篇笔记没能生成有效卡片，内容可能太短或过于零散。');
         return;
       }
       await showModalBottomSheet<void>(
@@ -647,35 +666,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       );
     } catch (e) {
       if (!mounted) return;
-      _hideBusy();
-      _toast('生成失败：$e');
+      busy.close();
+      LogBar.error(context, '生成失败：$e');
     }
-  }
-
-  void _showBusy(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            const SizedBox(width: AppSpacing.md),
-            Expanded(child: Text(message)),
-          ],
-        ),
-        duration: const Duration(minutes: 5),
-      ),
-    );
-  }
-
-  void _hideBusy() => ScaffoldMessenger.of(context).hideCurrentSnackBar();
-
-  void _toast(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
   }
 }
 

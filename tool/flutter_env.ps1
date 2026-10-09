@@ -91,6 +91,16 @@ foreach ($d in @(
 }
 
 # ---- 重定向（仅本进程）----
+#
+# 先把原值存下来：`flutter run` 启动的 App 会**继承这些变量**，
+# 那样 App 会跑到假的 AppData 里读写，跟双击 exe 跑出来的 App
+# 用的不是同一个数据库（表现为"设置怎么没了"）。
+# run.ps1 在真正跑 App 之前会用这几个变量把环境还原回去。
+$env:LIGHTNOTE_ORIG_APPDATA      = $env:APPDATA
+$env:LIGHTNOTE_ORIG_LOCALAPPDATA = $env:LOCALAPPDATA
+$env:LIGHTNOTE_ORIG_TEMP         = $env:TEMP
+$env:LIGHTNOTE_ORIG_TMP          = $env:TMP
+
 $env:APPDATA      = "$fakeAppData\Roaming"
 $env:LOCALAPPDATA = "$fakeAppData\Local"
 $env:PUB_CACHE    = $pubCache
@@ -125,4 +135,15 @@ if ($Command) {
   Write-Host "执行: $Command" -ForegroundColor Cyan
   Invoke-Expression $Command
   exit $LASTEXITCODE
+}
+
+# 供 run.ps1 在"真正启动 App"之前还原运行期环境用
+function Restore-RuntimeEnv {
+  if ($env:LIGHTNOTE_ORIG_APPDATA) {
+    $env:APPDATA = $env:LIGHTNOTE_ORIG_APPDATA
+    $env:LOCALAPPDATA = $env:LIGHTNOTE_ORIG_LOCALAPPDATA
+    $env:TEMP = $env:LIGHTNOTE_ORIG_TEMP
+    $env:TMP = $env:LIGHTNOTE_ORIG_TMP
+    Write-Host '已还原运行期环境（App 会用真实的 AppData，而不是构建用的假目录）' -ForegroundColor DarkGray
+  }
 }

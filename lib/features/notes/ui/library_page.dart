@@ -185,7 +185,7 @@ class LibraryPage extends StatelessWidget {
 
     if (!context.mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => NoteEditorPage(noteId: note.id)),
+      MaterialPageRoute(builder: (_) => NoteEditorPage(noteId: note.id,startInPreview: false)),
     );
   }
 

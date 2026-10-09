@@ -61,6 +61,31 @@ Future<int> _noteCount(AppDatabase db) async {
   return rows.first.read<int>('c');
 }
 
+/// 清掉所有配置锚点里的 `storage.json`。
+///
+/// 为什么测试必须做这件事（两个原因，都很实际）：
+///
+/// 1. **测试之间会互相污染**。配置锚点之一是「程序所在目录」，
+///    而在测试进程里 `Platform.resolvedExecutable` 指向 dart SDK 的
+///    `bin\dart.exe`——那里的 `storage.json` 会**跨测试用例、跨 test 进程
+///    一直留着**。上个用例写的 workingDir 会被下个用例读到，
+///    表现为莫名其妙的断言失败（实际发生过）。
+///
+/// 2. **绝不能污染开发者的真实配置**。跑测试时如果往 dart SDK 目录
+///    写了个指向临时目录的 `storage.json`，而某次又用那个 SDK 跑了 App，
+///    就会莫名其妙用错工作目录。
+Future<void> _clearAllConfigAnchors() async {
+  for (final f in await DatabaseLocation.configFileCandidates()) {
+    try {
+      if (f.existsSync()) f.deleteSync();
+      final tmp = File('${f.path}.tmp');
+      if (tmp.existsSync()) tmp.deleteSync();
+    } catch (_) {
+      // 清不掉就算了（只读目录本来就写不进去）
+    }
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -71,11 +96,15 @@ void main() {
     privateRoot = await _newFakePrivateRoot('private');
     PathProviderPlatform.instance = _FakePathProvider(privateRoot);
     DatabaseLocation.resetCacheForTesting();
+    await _clearAllConfigAnchors();
 
     workDir = await Directory.systemTemp.createTemp('lightnote-work-');
   });
 
   tearDown(() async {
+    // 先清配置再清目录：否则残留的 storage.json 会指向已被删除的临时目录，
+    // 影响下一个用例（以及万一用到同一个 dart SDK 的其它东西）
+    await _clearAllConfigAnchors();
     DatabaseLocation.resetCacheForTesting();
     for (final path in [privateRoot, workDir.path]) {
       try {
@@ -93,7 +122,7 @@ void main() {
       final dir = await DatabaseLocation.resolveDirectory();
       expect(p.normalize(dir.path), p.normalize(p.join(privateRoot, 'LightNote')));
 
-      final info = await DatabaseLocation.describe();
+      final info = await DatabaseLocation.describeSafe();
       expect(info.isPrivate, isTrue);
       expect(info.configuredDir, isNull);
       expect(info.isFallback, isFalse);
@@ -110,7 +139,7 @@ void main() {
       final dir = await DatabaseLocation.resolveDirectory();
       expect(p.normalize(dir.path), p.normalize(p.join(privateRoot, 'LightNote')));
 
-      final info = await DatabaseLocation.describe();
+      final info = await DatabaseLocation.describeSafe();
       expect(info.isPrivate, isTrue);
       expect(info.isFallback, isTrue);
       expect(info.fallbackNote, isNotNull);
@@ -123,9 +152,58 @@ void main() {
       final dir = await DatabaseLocation.resolveDirectory();
       expect(p.normalize(dir.path), p.normalize(workDir.path));
 
-      final info = await DatabaseLocation.describe();
+      final info = await DatabaseLocation.describeSafe();
       expect(info.isPrivate, isFalse);
       expect(info.isFallback, isFalse);
+    });
+
+    // 这一组针对一个真实踩过的 bug：
+    // 原实现把配置存在「私有根目录」下，而私有根目录是**按优先级逐档试出来**的
+    // （AppData → 文档 → 主目录 → 程序目录）。于是配置的存放点会随环境漂移：
+    // 这次写在 AppData，下次 AppData 建不出来降级到文档目录，
+    // App 就去文档目录找配置——找不到，静默退回默认位置。
+    // 用户的体感是「我明明改过存储位置，怎么又没了」。
+    test('配置写在稳定的锚点（程序目录），不随数据目录漂移', () async {
+      final anchors = await DatabaseLocation.configFileCandidates();
+      expect(anchors, isNotEmpty);
+
+      // 第一个锚点必须是程序所在目录（Android 除外），
+      // 因为那是唯一"只要能启动就一定能定位到"的位置
+      if (!Platform.isAndroid) {
+        final exeDir = File(Platform.resolvedExecutable).parent;
+        expect(p.normalize(anchors.first.path),
+            p.normalize(p.join(exeDir.path, 'storage.json')));
+      }
+    });
+
+    test('即使某个锚点不可写，配置仍然能存能读', () async {
+      // 测试进程里 resolvedExecutable 指向 dart.exe，
+      // 它所在的 SDK bin 通常不可写——正好用来模拟"某个锚点写不了"。
+      // 要求：写操作不能整体失败，至少要落到一个能写的锚点上。
+      final written = await DatabaseLocation.writeConfiguredDir(workDir.path);
+      expect(written, isNotEmpty, reason: '至少要有一个锚点能写');
+
+      expect(await DatabaseLocation.readConfiguredDir(),
+          p.normalize(workDir.path));
+    });
+
+    test('配置内容在所有能写的锚点上保持一致', () async {
+      await DatabaseLocation.writeConfiguredDir(workDir.path);
+      final anchors = await DatabaseLocation.configFileCandidates();
+      // 都写一份的目的：以后某个锚点变不可用、换了地方找配置，
+      // 仍然能读到同一份设置，而不是静默退回默认位置。
+      var checked = 0;
+      for (final a in anchors) {
+        if (!a.existsSync()) continue;
+        // 必须解析 JSON 再比：JSON 里反斜杠是转义的（\\），
+        // 直接对原始文本做 contains 会永远匹配不上。
+        final decoded = jsonDecode(await a.readAsString()) as Map;
+        expect(p.normalize(decoded['workingDir'] as String),
+            p.normalize(workDir.path),
+            reason: '锚点 ${a.path} 里的配置和预期不一致');
+        checked++;
+      }
+      expect(checked, greaterThan(0), reason: '至少应该有一个锚点写成功');
     });
   });
 

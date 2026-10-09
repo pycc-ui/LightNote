@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/db/models.dart';
+import '../../../core/ui/log_bar.dart';
 import '../../ai/domain/ai_repository.dart';
 
 /// 卡片确认面板。
@@ -205,14 +206,11 @@ class _CardReviewSheetState extends State<CardReviewSheet> {
       );
       if (!mounted) return;
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已加入 $count 张卡片，可到「复习」页开始学习。')),
-      );
+      LogBar.success(context, '已加入 $count 张卡片，可到「复习」页开始学习。');
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('写入失败：$e')));
+      LogBar.error(context, '写入失败：$e');
     }
   }
 }

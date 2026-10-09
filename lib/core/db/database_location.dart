@@ -22,6 +22,11 @@ const kCurrentSchemaVersion = 1;
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';
 
+/// 最后一档兜底时，在程序目录下用的数据目录名。
+///
+/// 以 `.` 开头：不干扰浏览，也天然被各种清理工具忽略。
+const kProgramDirDataFolder = '.lightnote-data';
+
 /// 存放"数据库位置"配置的文件名（放在私有目录，不是数据库里）。
 const _configFileName = 'storage.json';
 
@@ -38,6 +43,10 @@ class DatabaseLocationInfo {
     required this.fallbackNote,
     this.isEnvOverridden = false,
     this.privateRootUnavailable = false,
+    this.isUnusable = false,
+    this.unusableReason,
+    this.isDegradedToProgramDir = false,
+    this.degradedNote,
   });
 
   /// 本次运行实际使用的目录。
@@ -60,6 +69,21 @@ class DatabaseLocationInfo {
 
   /// 私有目录完全不可用（连候选位置都建不出来）。
   final bool privateRootUnavailable;
+
+  /// 所有候选位置都不可用，数据库根本打不开。
+  final bool isUnusable;
+
+  /// [isUnusable] 为 true 时的原因全文（含每个候选各自的错误）。
+  final String? unusableReason;
+
+  /// 是否降级到了「程序所在目录」（在 `build\` 下面）。
+  ///
+  /// 这种情况要**重点警告**：数据在，但它在 `build\` 里，
+  /// 一次 `flutter clean` 就会连数据一起删掉。
+  final bool isDegradedToProgramDir;
+
+  /// [isDegradedToProgramDir] 为 true 时，为什么其他位置都不可用。
+  final String? degradedNote;
 }
 
 /// 工作目录的解析与切换。
@@ -135,8 +159,7 @@ class DatabaseLocation {
     // 走到这里说明前两个系统目录都建不出来（企业策略、受限令牌、漫游配置损坏）。
     // 用户主目录在这种环境下通常仍然可写，而且**不会被系统清理**。
     // 刻意不把「系统临时目录」列为候选：临时目录会在重启或磁盘清理时被删掉，
-    // 把用户的笔记库放进去等于埋一个"过几天数据没了"的定时炸弹——
-    // 报错让用户知道，永远好过静默丢数据。
+    // 把用户的笔记库放进去等于埋一个"过几天数据没了"的定时炸弹。
     final home = Platform.environment['USERPROFILE'] ??
         Platform.environment['HOME'] ??
         '';
@@ -145,6 +168,27 @@ class DatabaseLocation {
         label: '用户主目录',
         dir: Directory(p.join(home.trim(), kPrivateFolderName)),
       ));
+    }
+
+    // 第四候选（最后兜底）：可执行文件旁边。
+    //
+    // 走到这里说明 AppData、文档目录、用户主目录**全都建不出来**
+    // （企业策略、应用虚拟化、受限令牌、只读漫游配置……）。
+    // 与其让 App 变成一块只显示错误页的砖头，不如退到"程序自己所在的地方"：
+    // 只要 App 能启动，它所在目录几乎一定是可读的，也通常可写。
+    //
+    // Android 排除：那里 resolvedExecutable 指向原生库目录（只读）。
+    if (!Platform.isAndroid) {
+      try {
+        final exeDir = File(Platform.resolvedExecutable).parent;
+        // 目录名以 . 开头：不干扰用户浏览，也天然被各种构建/清理工具忽略
+        out.add((
+          label: '程序所在目录',
+          dir: Directory(p.join(exeDir.path, kProgramDirDataFolder)),
+        ));
+      } catch (_) {
+        // resolvedExecutable 拿不到就算了
+      }
     }
 
     return out;
@@ -186,10 +230,65 @@ class DatabaseLocation {
   /// 已确定的私有根目录缓存。
   static Directory? _privateRoot;
 
-  /// 配置文件的绝对路径。总是位于私有目录，不随工作目录改变。
+  /// 配置文件的**锚点**候选，按优先级排列。
+  ///
+  /// 这是个踩过坑的设计。原实现把 `storage.json` 放在「私有根目录」下，
+  /// 而私有根目录是**按优先级逐档试出来的**：AppData → 文档 → 主目录 → 程序目录。
+  /// 于是配置的存放点会随环境漂移：
+  ///
+  ///   · 这次 AppData 能写 → 配置写在 AppData
+  ///   · 下次 AppData 写不进去（权限变了、被清理了）→ 降级到文档目录，
+  ///     它去**文档目录**找配置，而配置明明在 AppData 里 → 读不到 → 静默用默认位置
+  ///
+  /// 表现就是用户说的「我明明改过存储位置，怎么又没了」。**配置的存放点
+  /// 必须唯一且稳定，不能跟着数据目录一起漂。**
+  ///
+  /// 所以现在按优先级在这些固定锚点找/写配置：
+  ///   1. **程序所在目录**——只要能启动 App 就一定能定位到，最可靠。
+  ///      放在 `build\windows\x64\runner\Debug\storage.json`，
+  ///      人一眼能找到，删了也知道删的是什么。
+  ///   2. App 私有目录——Android 上用这个（exe 目录只读）；
+  ///      桌面端作为兼容老位置的兜底。
+  ///
+  /// 读的时候逐个找（取第一个存在的），写的时候写第一个能写的。
+  static Future<List<File>> configFileCandidates() async {
+    final out = <File>[];
+
+    // 1) 程序所在目录
+    if (!Platform.isAndroid) {
+      try {
+        final exeDir = File(Platform.resolvedExecutable).parent;
+        out.add(File(p.join(exeDir.path, _configFileName)));
+      } catch (_) {
+        // resolvedExecutable 拿不到就跳过
+      }
+    }
+
+    // 2) App 私有目录（Android 的主力，桌面端的兼容位）
+    try {
+      final root = await privateRoot();
+      final f = File(p.join(root.path, _configFileName));
+      // 避免和上面重复
+      if (!out.any((e) => p.equals(e.path, f.path))) out.add(f);
+    } catch (_) {
+      // 私有目录也拿不到就算了
+    }
+
+    return out;
+  }
+
+  /// 读取配置文件：按锚点优先级返回**第一个存在**的。
+  ///
+  /// 找不到时返回第一个锚点的路径，让调用方（诊断页）知道"该放哪"。
   static Future<File> configFile() async {
-    final root = await privateRoot();
-    return File(p.join(root.path, _configFileName));
+    final candidates = await configFileCandidates();
+    if (candidates.isEmpty) {
+      throw StateError('找不到任何可用于存放配置的位置');
+    }
+    for (final f in candidates) {
+      if (f.existsSync()) return f;
+    }
+    return candidates.first;
   }
 
   /// 目标数据库文件的绝对路径（在给定目录下）。
@@ -198,45 +297,81 @@ class DatabaseLocation {
 
   /// 读取已配置的工作目录；没配置或文件损坏都返回 null。
   static Future<String?> readConfiguredDir() async {
+    List<File> candidates;
     try {
-      final f = await configFile();
-      if (!f.existsSync()) return null;
-      final raw = await f.readAsString();
-      if (raw.trim().isEmpty) return null;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final value = decoded['workingDir'];
-      if (value is! String || value.trim().isEmpty) return null;
-      return p.normalize(value.trim());
+      candidates = await configFileCandidates();
     } catch (_) {
-      // 配置文件坏了就当作"没配置"，退回私有目录。
-      // 这里绝不能抛异常：否则 App 直接打不开数据库。
       return null;
     }
+
+    // 逐个锚点找，取第一个能解析出内容的
+    for (final f in candidates) {
+      try {
+        if (!f.existsSync()) continue;
+        final raw = await f.readAsString();
+        if (raw.trim().isEmpty) continue;
+        final decoded = jsonDecode(raw);
+        if (decoded is! Map) continue;
+        final value = decoded['workingDir'];
+        if (value is! String || value.trim().isEmpty) continue;
+        return p.normalize(value.trim());
+      } catch (_) {
+        // 这个锚点的文件坏了，试下一个；
+        // 绝不能抛异常：否则 App 直接打不开数据库。
+        continue;
+      }
+    }
+    return null;
   }
 
   /// 写入/清除工作目录配置。
   ///
   /// [dir] 传 null 表示恢复默认（App 私有目录）。
-  static Future<void> writeConfiguredDir(String? dir) async {
-    final root = await privateRoot();
-    if (!root.existsSync()) root.createSync(recursive: true);
-    final f = File(p.join(root.path, _configFileName));
-    if (dir == null || dir.trim().isEmpty) {
-      if (f.existsSync()) f.deleteSync();
-      return;
+  ///
+  /// 会**写到所有能写的锚点**：这样即使以后某个锚点变不可写、
+  /// App 换了地方去找配置，也仍然能读到同一份设置。
+  /// 返回实际写成功的路径（用于诊断展示）。
+  static Future<List<String>> writeConfiguredDir(String? dir) async {
+    final candidates = await configFileCandidates();
+    final written = <String>[];
+
+    for (final f in candidates) {
+      try {
+        final parent = f.parent;
+        if (!parent.existsSync()) parent.createSync(recursive: true);
+
+        if (dir == null || dir.trim().isEmpty) {
+          if (f.existsSync()) f.deleteSync();
+          written.add('${f.path}（已清除）');
+          continue;
+        }
+
+        final payload = jsonEncode({
+          'version': 1,
+          'workingDir': p.normalize(dir.trim()),
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+        // 先写临时文件再改名：避免写一半掉电留下半个 JSON，
+        // 下次启动就变成"配置损坏"，用户会以为数据丢了。
+        final tmp = File('${f.path}.tmp');
+        tmp.writeAsStringSync(payload, flush: true);
+        if (f.existsSync()) f.deleteSync();
+        tmp.renameSync(f.path);
+        written.add(f.path);
+      } catch (_) {
+        // 这个锚点写不了（只读目录等），继续试下一个。
+        // 至少有一个成功就够用。
+        continue;
+      }
     }
-    final payload = jsonEncode({
-      'version': 1,
-      'workingDir': p.normalize(dir.trim()),
-      'updatedAt': DateTime.now().toUtc().toIso8601String(),
-    });
-    // 先写临时文件再改名：避免写一半掉电留下半个 JSON，
-    // 下次启动就变成"配置损坏"，用户会以为数据丢了。
-    final tmp = File('${f.path}.tmp');
-    tmp.writeAsStringSync(payload, flush: true);
-    if (f.existsSync()) f.deleteSync();
-    tmp.renameSync(f.path);
+
+    if (written.isEmpty) {
+      throw StateError(
+        '无法写入配置，已尝试：\n'
+        '${candidates.map((f) => '  · ${f.path}').join('\n')}',
+      );
+    }
+    return written;
   }
 
   /// 试写一个探针文件，返回 null 表示可写，否则返回失败原因。
@@ -302,11 +437,27 @@ class DatabaseLocation {
 
   /// 汇总当前状态，供设置页展示。
   ///
-  /// 注意这里**不能假设 privateRoot() 一定成功**：在私有目录全不可写的环境里，
-  /// 数据库是靠 [envOverride] 跑起来的，此时 privateRoot() 会抛异常。
-  /// 设置页只是"展示信息"，绝不能因此把整页打崩——所以每一段都单独容错。
-  static Future<DatabaseLocationInfo> describe() async {
-    final active = await resolveDirectory();
+  /// **永远不抛异常**：设置页、启动提示都只是"展示信息"，
+  /// 绝不能因为解析位置失败就把界面打崩。
+  /// 连候选目录全都不可用时也会返回一个 `isUnusable = true` 的结果。
+  static Future<DatabaseLocationInfo> describeSafe() async {
+    Directory active;
+    try {
+      active = await resolveDirectory();
+    } catch (e) {
+      // 一个都写不进去：返回一个"不可用"的结果，
+      // 真正的诊断文字由调用方从 error 里取
+      return DatabaseLocationInfo(
+        activeDir: '(不可用)',
+        configuredDir: await readConfiguredDir(),
+        isPrivate: false,
+        isFallback: false,
+        fallbackNote: null,
+        isUnusable: true,
+        unusableReason: e.toString(),
+      );
+    }
+
     final configured = await readConfiguredDir();
 
     // 环境变量覆盖优先级最高，且它一定不是"私有目录"
@@ -323,19 +474,35 @@ class DatabaseLocation {
     }
 
     final isPrivate = priv != null && p.equals(active.path, priv.path);
+    final isFallback = configured != null && !p.equals(active.path, configured);
     return DatabaseLocationInfo(
       activeDir: active.path,
       configuredDir: configured,
       isPrivate: isPrivate,
-      isFallback: configured != null && !p.equals(active.path, configured),
+      isFallback: isFallback,
       // 只有"配置了工作目录却没生效"才叫降级。
       // 环境变量覆盖是调试手段，不该出现在正常用户的界面上。
-      fallbackNote: (configured != null && !p.equals(active.path, configured))
-          ? lastFallbackNote
-          : null,
+      fallbackNote: isFallback ? lastFallbackNote : null,
       isEnvOverridden: hasEnvOverride && !isPrivate,
       privateRootUnavailable: priv == null,
+      isDegradedToProgramDir: isFallbackToProgramDir(active),
+      degradedNote: isFallback ? lastFallbackNote : null,
     );
+  }
+
+  /// 判断是否降级到了「程序所在目录」（最后兜底，在 build\ 下面）。
+  ///
+  /// 这种情况必须**显式警告**：数据虽然在，但它在 `build\` 里，
+  /// 一次 `flutter clean` 或手工删 `build\` 就会连数据一起没。
+  static bool isFallbackToProgramDir(Directory dir) {
+    if (Platform.isAndroid) return false;
+    try {
+      final exeDir = File(Platform.resolvedExecutable).parent;
+      final marker = p.join(exeDir.path, kProgramDirDataFolder);
+      return p.equals(p.normalize(dir.path), p.normalize(marker));
+    } catch (_) {
+      return false;
+    }
   }
 
   /// 判断某个路径是否位于 App 私有目录内。
@@ -345,5 +512,92 @@ class DatabaseLocation {
     final priv = await privateRoot();
     final rel = p.relative(path, from: priv.path);
     return !rel.startsWith('..') && !p.isAbsolute(rel);
+  }
+
+  // ==========================================================================
+  // 诊断
+  // ==========================================================================
+
+  /// 把「数据库位置是怎么定下来的」整条链摊开成可读文本。
+  ///
+  /// 为什么需要它：位置解析有好几档（环境变量 → 用户配置 → 三个系统目录 →
+  /// 程序目录），**每一档都可能失败**。出问题时只给一个最终路径根本没法判断
+  /// 问题出在哪一段——是配置文件没读到？还是目录建不出来？
+  /// 之前排查"数据到底在哪"就卡在这里。
+  ///
+  /// 这个方法把每一档的实际路径、试写结果、是否被采用全列出来，
+  /// 出错页与设置页直接展示它。
+  static Future<String> diagnose() async {
+    final b = StringBuffer();
+    final adopted = _resolved;
+
+    b.writeln('数据库位置解析过程');
+    b.writeln('');
+
+    void verdict(String label, String path, String? err, bool used) {
+      final mark = used
+          ? '✅ 采用'
+          : (err == null ? '·  可用但未采用' : '❌ 失败');
+      b.writeln('$mark  $label');
+      b.writeln('      $path');
+      if (err != null) b.writeln('      $err');
+    }
+
+    // 1) 环境变量
+    final env = Platform.environment[envOverride]?.trim();
+    if (env == null || env.isEmpty) {
+      b.writeln('·  未设置环境变量 $envOverride');
+    } else {
+      final dir = Directory(p.normalize(env));
+      final err = probeWritable(dir);
+      verdict('环境变量 $envOverride', dir.path, err,
+          adopted != null && p.equals(adopted.path, dir.path));
+    }
+    b.writeln('');
+
+    // 2) 用户配置的工作目录
+    String? configured;
+    String? cfgPath;
+    try {
+      final f = await configFile();
+      cfgPath = f.path;
+      configured = await readConfiguredDir();
+    } catch (e) {
+      b.writeln('❌ 读取配置文件失败：$e');
+    }
+    if (cfgPath != null) {
+      b.writeln('配置文件：$cfgPath');
+      b.writeln('  存在：${File(cfgPath).existsSync()}');
+    }
+    if (configured == null) {
+      b.writeln('·  未配置工作目录（用默认位置）');
+    } else {
+      final dir = Directory(configured);
+      final err = probeWritable(dir);
+      verdict('用户配置的工作目录', dir.path, err,
+          adopted != null && p.equals(adopted.path, dir.path));
+    }
+    b.writeln('');
+
+    // 3) 各私有目录候选
+    b.writeln('私有目录候选（按顺序试写）：');
+    try {
+      for (final c in await _privateRootCandidates()) {
+        final err = probeWritable(c.dir);
+        verdict(c.label, c.dir.path, err,
+            adopted != null && p.equals(adopted.path, c.dir.path));
+      }
+    } catch (e) {
+      b.writeln('  ❌ 枚举候选时失败：$e');
+    }
+
+    b.writeln('');
+    b.writeln('最终采用：${adopted?.path ?? '(尚未解析)'}');
+    final note = lastFallbackNote;
+    if (note != null) {
+      b.writeln('');
+      b.writeln('降级原因：$note');
+    }
+    return b.toString();
   }
 }
