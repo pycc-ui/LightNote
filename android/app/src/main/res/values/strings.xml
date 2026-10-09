@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面图标下面显示的名字。产品名用英文 LightNote（唯一的命名例外），
+         其余标识（包名、数据库文件名、目录名）一律不改，避免老用户数据丢失。 -->
+    <string name="app_name">LightNote</string>
+</resources>

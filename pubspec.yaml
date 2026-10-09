@@ -1,0 +1,70 @@
+name: smart_notes
+description: 智能笔记 App —— 笔记 + DeepSeek AI 整理 + 记忆卡片(SM-2) + 沉浸阅读
+publish_to: "none"
+version: 1.1.0+2
+
+environment:
+  # 注意：drift 2.33+ 要求 Dart >= 3.10.0。
+  # 若本机 Flutter 版本低于 3.35（Dart 3.10），请先升级 Flutter，否则依赖无法解析。
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ---------- 本地数据库 ----------
+  drift: ^2.32.0          # 2.32 起自带 SQLite，无需 sqlite3_flutter_libs
+  sqlite3: ^3.0.0         # 通过 build hooks 自动打包原生 SQLite
+  path_provider: ^2.1.0
+  path: ^1.9.0
+  uuid: ^4.5.0
+
+  # ---------- 状态管理 ----------
+  provider: ^6.1.0
+
+  # ---------- 网络 ----------
+  dio: ^5.7.0
+
+  # ---------- 安全存储 ----------
+  flutter_secure_storage: ^9.2.0
+
+  # ---------- UI ----------
+  flutter_markdown: ^0.7.0   # 注意：该包已停止维护，见 README「已知风险」
+
+  cupertino_icons: ^1.0.8
+
+  # ---------- 备份 / 恢复 ----------
+  # 备份包就是普通 zip，用 archive 在 Dart 侧读写：
+  # 不依赖平台压缩库，Windows 与 Android 行为完全一致，测试里也能直接跑。
+  archive: ^4.0.0
+  # 选文件/选目录：用 Flutter 官方的 file_selector（不是 file_picker）。
+  # 官方插件在 Windows 走 IFileDialog、Android 走 SAF，两边的"选位置"体验一致，
+  # 且不需要申请存储权限。
+  file_selector: ^1.0.3
+  # 备份包内每个文件的 SHA-256，导入时校验完整性
+  crypto: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  drift_dev: ^2.32.0
+  build_runner: ^2.4.0
+
+  # 测试里要替换 path_provider 的实现，需要用到这两个接口包。
+  # 它们本来就是 path_provider 的传递依赖，显式列出只是为了不触发
+  # depend_on_referenced_packages 这条 lint
+  # （直接 import 传递依赖是脆弱写法，版本一变就编译不过）。
+  path_provider_platform_interface: ^2.1.0
+  plugin_platform_interface: ^2.1.0
+
+# 已知风险：drift_dev 依赖 analyzer，build_runner 生态对版本很敏感。
+# 如果 `flutter pub get` 报 analyzer / build_runner_core 冲突，
+# 先试 `flutter pub upgrade`，仍失败再放开下面这段并填入冲突提示要求的版本：
+#
+# dependency_overrides:
+#   analyzer: 8.0.0
+#   build_runner_core: 9.2.0
+
+flutter:
+  uses-material-design: true
