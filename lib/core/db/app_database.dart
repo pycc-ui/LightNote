@@ -1,28 +1,28 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:uuid/uuid.dart';
 
 import 'database_location.dart';
+import 'models.dart';
 import 'tables.dart';
 
 part 'app_database.g.dart';
 
 @DriftDatabase(
   tables: [
-    Folders,
+    Notebooks,
     Notes,
-    Tags,
-    NoteTags,
-    CardDecks,
-    Cards,
-    Reviews,
-    NoteSummaries,
     AiCalls,
     AiConversations,
     AiMessages,
-    Settings,
+    AppKv,
+    AiNoteSummaries,
+    FeedReserve,
+    NoteChunks,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -67,14 +67,265 @@ class AppDatabase extends _$AppDatabase {
           // 每次改表后请执行：
           //   dart run drift_dev schema dump lib/core/db/app_database.dart drift_schemas/
           // 并补一条迁移测试。
+
+          // ---- 1 -> 2：笔记消费流 ----
+          if (from < 2) {
+            // `note_feed_state` 原先在这里用 `m.createTable(noteFeedState)` 建出。
+            // 那张表**已在 v8 删除**（连 Dart 表定义一起移除了，见下面的 7 -> 8），
+            // 所以这一支不再建它：建了也会在同一次迁移里被删掉，最终状态完全一样
+            // （drift 的 onUpgrade 永远一次升到最新版，不存在"停在 v2"的库）。
+
+            // 存量数据修正（必须做，否则这部分笔记会"消失"）：
+            //
+            // 「轻笔记」区块筛的是 is_inbox = true。而 v1 期间
+            // NoteRepository.createLibrary() 写的是
+            // `isInbox = false, notebookId = null`——一条"已归档但没笔记库"的笔记。
+            // 改成按 is_inbox 筛选后，这类笔记既不在任何笔记库下、
+            // 也不满足 is_inbox = true，**两个入口都看不到，等于丢失**。
+            //
+            // 同一类问题还出现在 softDeleteNotebook 把笔记移出笔记库时。
+            // 这条 UPDATE 一并修正：
+            await customStatement(
+              'UPDATE notes SET is_inbox = 1 '
+              'WHERE is_inbox = 0 AND folder_id IS NULL AND deleted_at IS NULL',
+            );
+          }
+
+          // ---- 2 -> 3：笔记库化 + 去掉层级 ----
+          if (from < 3) {
+            // ⚠️ 这一段踩了两个坑，都记下来免得再犯。
+            //
+            // 坑 1（列名）：最初以为在 tables.dart 给字段加
+            //   `@JsonKey('folder_id')` 就能让 SQL 列名保持不变。
+            //   **不能**——`@JsonKey` 只作用于 Drift 的 JSON 序列化
+            //   （toJson/fromJson），不参与建表；真正控制列名的是
+            //   `named('...')`。于是 drift 按字段名生成了 `notebook_id`，
+            //   而老库还是 `folder_id`，查询报 `no such column: notebook_id`。
+            //
+            // 坑 2（探测）：想用 `PRAGMA table_info(notebooks)` 或查
+            //   `sqlite_master` 来判断"是不是老库"，**在 onUpgrade 里
+            //   都拿不到结果**（drift 的 customSelect 在这个阶段返回空）。
+            //   据此判断会漏掉改名步骤。
+            //
+            // 所以这里**不做探测**：直接执行改名，若目标已经不存在就忽略错误。
+            // 对全新库（onCreate 已建好新结构）来说，下面每条都会以
+            // "no such table / no such column" 失败——那正是预期，吃掉即可。
+            Future<void> trySql(String sql) async {
+              try {
+                await customStatement(sql);
+              } catch (_) {
+                // 目标不存在 = 已经是最新结构，无需迁移
+              }
+            }
+
+            // 1) 表改名（老库叫 folders）
+            await trySql('ALTER TABLE folders RENAME TO notebooks');
+
+            // 2) 列改名（老库用 folder_id / workspace_folder_id）
+            await trySql(
+              'ALTER TABLE notes RENAME COLUMN folder_id TO notebook_id',
+            );
+            await trySql(
+              'ALTER TABLE ai_conversations '
+              'RENAME COLUMN workspace_folder_id TO workspace_notebook_id',
+            );
+
+            // 3) 去掉层级。
+            //
+            //    SQLite 3.35+ 支持 DROP COLUMN。老版本会失败，
+            //    退一步把值清空——宁可留一个恒为 NULL 的列
+            //    （drift 不会再读它，留着无害），也不要让迁移整个失败。
+            try {
+              await customStatement(
+                'ALTER TABLE notebooks DROP COLUMN parent_id',
+              );
+            } catch (_) {
+              await trySql('UPDATE notebooks SET parent_id = NULL');
+            }
+
+            // 4) parent_id 的索引已随层级一起没意义
+            await trySql('DROP INDEX IF EXISTS idx_folders_parent');
+
+            // 5) 建新的笔记库排序索引（两条路径都需要）
+            await customStatement(
+              'CREATE INDEX IF NOT EXISTS idx_notebooks_order '
+              'ON notebooks(sort_order, name)',
+            );
+          }
+
+          // ---- 3 -> 4：每篇笔记的 AI 摘要 ----
+          if (from < 4) {
+            // 纯新增表，不动现有数据：老库升级不会丢任何东西。
+            //
+            // ⚠️ 这里**不要**紧跟 CREATE INDEX。
+            // `m.createTable()` 的 DDL 是**延迟到迁移回调结束后**才执行的，
+            // 所以在同一个回调里建索引会报
+            // `no such table: main.ai_note_summaries`（实测踩过）。
+            // 索引统一放到下面 `onUpgrade` 的末尾。
+            //
+            // 同一批建的 `note_ai_tags`（每篇笔记的 AI 标签）**已在 v8 删除**：
+            // 它只写不读——卡片上那个标签来自卡片自己的 tags
+            // （`FeedDraft.tags` / `displayTag`），与这张表无关。
+            //
+            // 表名在 v9 从 `note_ai_summaries` 改成了 `ai_note_summaries`。
+            // 这里直接用新表定义即可：v9 那条 RENAME 会以"表不存在"失败并被
+            // 吃掉，最终状态与老库升级完全一致。
+            await m.createTable(aiNoteSummaries);
+          }
+
+          // ---- 4 -> 5：轻笔记跨启动预留 ----
+          if (from < 5) {
+            // 纯新增表，不动现有数据。
+            // 索引同样交给下面的 `_createIndexes()`（原因见上）。
+            await m.createTable(feedReserve);
+          }
+
+          // ---- 5 -> 6：删除记忆卡片相关表 ----
+          if (from < 6) {
+            // 轻笔记（卡片流）替代了记忆卡片复习，这三张表不再有任何读写方。
+            //
+            // **这是不可逆的**：老库升级后其中的卡片与复习记录会消失。
+            // 但那正是产品决策——功能去掉了，数据留着也没人能看。
+            //
+            // 顺序：先删 reviews（它外键指向 cards）再删 cards，最后 decks。
+            // 用 raw SQL 而不是 drift 的 delete()：delete 需要表还在
+            // schema 里注册，而我们已经把它们从 `@DriftDatabase` 移除了。
+            //
+            // `IF EXISTS` 让"本来就没这张表"也不报错，所以不需要额外 try/catch。
+            for (final t in const ['reviews', 'cards', 'card_decks']) {
+              await customStatement('DROP TABLE IF EXISTS $t');
+            }
+          }
+
+          // ---- 6 -> 7：删除「AI 整理要点」的落库表 ----
+          if (from < 7) {
+            // 编辑页那个 ✨ 菜单已移除。它会把整理结果写进 `note_summaries`，
+            // 但**从来没有任何界面读它**（读侧 `watchLatestSummary` 一直没人调），
+            // 也就是说这张表只写不读——功能去掉后就是纯死表。
+            //
+            // 同样不可逆；内容只是 AI 摘要，需要时还能重新生成。
+            await customStatement('DROP TABLE IF EXISTS note_summaries');
+          }
+
+          // ---- 7 -> 8：清理两张无用表 ----
+          if (from < 8) {
+            // 两张表都已没有任何读写方，留着只是死重量：
+            //
+            //   · `note_feed_state`：卡片流"复习已有笔记"时代的调度状态
+            //     （到期时间 / 间隔天数 / 难度因子 / 收藏）。卡片改成
+            //     **AI 新生成**之后不复用同一条笔记，这套状态就没意义了，
+            //     repository 里的读写方法早已删干净。
+            //   · `note_ai_tags`：每篇笔记的 AI 标签。它**只写不读**——
+            //     读侧链路（`NoteAiAssetRepository.get` → `FeedRepository.tagsOf`）
+            //     零调用方，v8 已把那条链路连同 `NoteAiAsset.tags` 字段一起删掉；
+            //     卡片上显示的那个标签来自卡片自己的 tags
+            //     （`FeedDraft.tags` → `displayTag`），与这张表无关。
+            //
+            // 用 raw SQL 而不是 drift 的 delete()：两张表已经从
+            // `@DriftDatabase` 移除，schema 里不再有它们。
+            // `IF EXISTS` 让"本来就没这张表"也不报错，所以不需要 try/catch。
+            for (final t in const ['note_feed_state', 'note_ai_tags']) {
+              await customStatement('DROP TABLE IF EXISTS $t');
+            }
+          }
+
+          // ---- 8 -> 9：删手动标签表 + 两个表改名 ----
+          if (from < 9) {
+            // 1) 删「用户手动标签」整条链路。
+            //
+            //    它是个闭环：写入只有编辑页那个标签弹窗，读取只有那个弹窗
+            //    自己 + Markdown 导出里一行 `> 标签：`。产品确认不要了，
+            //    `usageCount` 那个反范式计数器也只服务 `watchTags` 的
+            //    ORDER BY，而 `watchTags` 零调用方。
+            //
+            //    顺序：先删连接表 `note_tags`（它外键指向 `tags`），再删主表。
+            //    `IF EXISTS` 让"本来就没这两张表"（全新库）也不报错。
+            //
+            //    注意这与卡片上的标签**无关**：卡片标签来自卡片自己的
+            //    `FeedDraft.tags`，存在 `feed_reserve.tags` 列里，一行不动。
+            for (final t in const ['note_tags', 'tags']) {
+              await customStatement('DROP TABLE IF EXISTS $t');
+            }
+
+            // 2) 两个表改名。做法与 v2→v3 的 `folders` → `notebooks` 完全一致：
+            //    改类名会让 drift 认为"旧表不存在"，**必须**显式 RENAME，
+            //    否则老库升级会丢掉这两张表的全部数据。
+            //
+            //    onUpgrade 里读不到探测结果（drift 的 customSelect 在迁移阶段
+            //    返回空），所以不做探测：直接执行，失败就吃掉。
+            //    全新库（onCreate 已按新名建好）必然会失败——那正是预期。
+            Future<void> trySql(String sql) async {
+              try {
+                await customStatement(sql);
+              } catch (_) {
+                // 目标不存在 = 已经是最新结构，无需迁移
+              }
+            }
+
+            await trySql(
+              'ALTER TABLE note_ai_summaries RENAME TO ai_note_summaries',
+            );
+            await trySql('ALTER TABLE settings RENAME TO app_kv');
+          }
+
+          // ---- 9 -> 10：笔记切片表 ----
           //
-          // 本次改动（尚未发布过任何版本，因此仍在 schemaVersion 1 内调整）：
+          // 只建表，**不在迁移里回填**。
+          //
+          // 为什么不在迁移里回填：drift 的 `customSelect` 在迁移回调里拿不到数据
+          // （见上面 8→9 那段注释里踩过的同一个坑），而回填需要读全部笔记正文。
+          // 硬凑出来的话，几万条笔记会在升级那一刻卡住启动，而且**中断了就只
+          // 回填了一半**，很难判断哪些补过哪些没补。
+          //
+          // 改成**懒回填**：`NoteChunkRepository` 在真正要用某篇笔记的切片时
+          // 发现"一片都没有"就当场切一遍写回（毫秒级）。老库升级后
+          // 第一次搜到某篇笔记时才为它建切片，用户完全无感，也不会卡启动。
+          if (from < 10) {
+            await m.createTable(noteChunks);
+          }
+
+          // ---- 10 -> 11：工作区从"一个笔记库 id"变成"范围" ----
+          //
+          // 用 `ALTER TABLE ADD COLUMN`（纯新增、不动数据、不重建表）：
+          // 这是最不容易出错的一种迁移，而这次改的只是一个会话级设置。
+          //
+          // 顺手把老值搬过去：原来存的是**单个**笔记库 id，
+          // 对应新形状的 `pick` + 一个目录 + 不含轻笔记。
+          // （老的空值 = 未选择 → 留空串，读取时按 `none` 处理。）
+          //
+          // ⚠️ 这条 UPDATE 只在 `from < 11` 时跑，也就是**老库**才有
+          // `workspace_notebook_id` 这一列；全新库的表里已经没有它了，
+          // 所以这里不会因为列不存在而报错。
+          if (from < 11) {
+            await customStatement(
+              'ALTER TABLE ai_conversations '
+              "ADD COLUMN workspace_scope TEXT NOT NULL DEFAULT ''",
+            );
+            await customStatement(
+              "UPDATE ai_conversations SET workspace_scope = "
+              "'{\"mode\":\"pick\",\"notebookIds\":[\"' || workspace_notebook_id "
+              "|| '\"],\"includeUnfiled\":false}' "
+              'WHERE workspace_notebook_id IS NOT NULL',
+            );
+          }
+
+          // 升级路径的索引统一在这里补。
+          //
+          // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
+          // 建的表这时才真正存在。全部是 `CREATE INDEX IF NOT EXISTS`，
+          // 重复执行安全。
+          //
+          // 这也顺带修了一个真实缺陷：`_createIndexes()` 原先只在
+          // onCreate（全新库）里调用，于是从老版本升级上来的库永远拿不到
+          // 后来新增的索引（idx_ai_summaries_updated……），
+          // 大库上会明显变慢，而且很难发现。
+          await _createIndexes();
+
+          // 本次（v1 内部，未发布）的调整记录，保留作历史参考：
           //   notes: archived        -> is_inbox
           //   notes: content_format  -> source（默认值 markdown -> local）
           //   notes: 新增 folder_id
-          //   新增: folders / ai_conversations / ai_messages / settings
-          //
-          // 一旦对外发布，改动必须新增版本号，不能改写这里。
+          //   新增: notebooks / ai_conversations / ai_messages / settings
         },
         beforeOpen: (details) async {
           // 外键约束在 SQLite 中默认关闭，必须显式打开，否则 CASCADE/SET NULL 不生效。
@@ -91,41 +342,42 @@ class AppDatabase extends _$AppDatabase {
     await customStatement(
       'CREATE INDEX IF NOT EXISTS idx_notes_inbox ON notes(is_inbox, updated_at DESC)',
     );
-    // 目录详情页
+    // 笔记库详情页
     await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder_id, updated_at DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_notes_notebook ON notes(notebook_id, updated_at DESC)',
     );
     await customStatement(
       'CREATE INDEX IF NOT EXISTS idx_notes_deleted ON notes(deleted_at)',
     );
+    // 笔记库：平铺列表按排序 + 名字（原先的 idx_notebooks_order 已随层级一起删除）
     await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id, sort_order)',
+      'CREATE INDEX IF NOT EXISTS idx_notebooks_order ON notebooks(sort_order, name)',
     );
+    // 笔记切片：卡片流取"最近没用过的片"时按它排序
     await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(suspended, due_at)',
-    );
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_cards_note ON cards(note_id)',
-    );
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, reviewed_at DESC)',
-    );
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_summaries_note ON note_summaries(note_id, created_at DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_chunks_used ON note_chunks(last_used_at)',
     );
     await customStatement(
       'CREATE INDEX IF NOT EXISTS idx_ai_messages_conv ON ai_messages(conversation_id, created_at)',
     );
+    // AI 摘要：按更新时间排序（"哪些笔记的摘要最久没刷新"这类查询要用）
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_ai_summaries_updated '
+      'ON ai_note_summaries(updated_at DESC)',
+    );
   }
 
   // ==========================================================================
-  // folders 目录
+  // notebooks 笔记库
+  //
+  // **平铺，没有层级。** 原先叫 folders（目录）且支持父子嵌套，
+  // 改成「笔记库」语义时一并去掉了 parent_id —— 用数据库而非文件系统
+  // 本来就是为了不模仿目录树。
   // ==========================================================================
 
-  /// 全部未删除目录，按 (层级, 排序, 名称) 排序。
-  /// 目录数量通常很少（几十个），一次读全量在内存里组树比递归查询简单可靠。
-  Stream<List<Folder>> watchFolders() {
-    return (select(folders)
+  /// 全部未删除笔记库，按 (排序, 名称)。
+  Stream<List<Notebook>> watchNotebooks() {
+    return (select(notebooks)
           ..where((t) => t.deletedAt.isNull())
           ..orderBy([
             (t) => OrderingTerm(expression: t.sortOrder),
@@ -134,8 +386,8 @@ class AppDatabase extends _$AppDatabase {
         .watch();
   }
 
-  Future<List<Folder>> allFolders() {
-    return (select(folders)
+  Future<List<Notebook>> allNotebooks() {
+    return (select(notebooks)
           ..where((t) => t.deletedAt.isNull())
           ..orderBy([
             (t) => OrderingTerm(expression: t.sortOrder),
@@ -144,58 +396,57 @@ class AppDatabase extends _$AppDatabase {
         .get();
   }
 
-  Future<Folder?> getFolder(String id) {
-    return (select(folders)..where((t) => t.id.equals(id))).getSingleOrNull();
+  Future<Notebook?> getNotebook(String id) {
+    return (select(notebooks)..where((t) => t.id.equals(id))).getSingleOrNull();
   }
 
-  Future<int> folderNoteCount(String folderId) async {
+  Future<int> notebookNoteCount(String notebookId) async {
     final expr = notes.id.count();
     final q = selectOnly(notes)
       ..addColumns([expr])
-      ..where(notes.folderId.equals(folderId) & notes.deletedAt.isNull());
+      ..where(
+          notes.notebookId.equals(notebookId) & notes.deletedAt.isNull());
     final row = await q.getSingle();
     return row.read(expr) ?? 0;
   }
 
-  Future<void> upsertFolder(FoldersCompanion entry) {
-    return into(folders).insertOnConflictUpdate(entry);
+  Future<void> upsertNotebook(NotebooksCompanion entry) {
+    return into(notebooks).insertOnConflictUpdate(entry);
   }
 
-  /// 目录重命名
-  Future<void> renameFolder(String id, String name) {
-    return (update(folders)..where((t) => t.id.equals(id))).write(
-      FoldersCompanion(
+  /// 笔记库重命名
+  Future<void> renameNotebook(String id, String name) {
+    return (update(notebooks)..where((t) => t.id.equals(id))).write(
+      NotebooksCompanion(
         name: Value(name.trim()),
         updatedAt: Value(DateTime.now().toUtc()),
       ),
     );
   }
 
-  /// 删除目录（逻辑删除）。
+  /// 删除笔记库（逻辑删除）。
   ///
-  /// 关键行为：**目录里的笔记不删**，而是回到轻笔记（收件箱），
+  /// 关键行为：**笔记库里的笔记不删**，而是回到「我的轻笔记」，
   /// 由用户决定去处。直接连笔记一起删掉是数据丢失事故。
   /// 外键的 SET NULL 会把 folder_id 置空，这里再补上 is_inbox = true。
-  Future<void> softDeleteFolder(String id) {
+  ///
+  /// 不再有"子目录上浮"这一步——笔记库是平的，不存在子库。
+  Future<void> softDeleteNotebook(String id) {
     return transaction(() async {
       await (update(notes)
-            ..where((t) => t.folderId.equals(id) & t.deletedAt.isNull()))
+            ..where((t) =>
+                t.notebookId.equals(id) & t.deletedAt.isNull()))
           .write(
-        NotesCompanion(
-          folderId: const Value(null),
+        NotesCompanion(notebookId: const Value(null),
           isInbox: const Value(true),
           updatedAt: Value(DateTime.now().toUtc()),
         ),
       );
-      // 子目录上浮为顶层，避免出现指向已删除目录的孤儿
-      await (update(folders)..where((t) => t.parentId.equals(id))).write(
-        FoldersCompanion(
-          parentId: const Value(null),
+      await (update(notebooks)..where((t) => t.id.equals(id))).write(
+        NotebooksCompanion(
+          deletedAt: Value(DateTime.now().toUtc()),
           updatedAt: Value(DateTime.now().toUtc()),
         ),
-      );
-      await (update(folders)..where((t) => t.id.equals(id))).write(
-        FoldersCompanion(deletedAt: Value(DateTime.now().toUtc())),
       );
     });
   }
@@ -210,7 +461,7 @@ class AppDatabase extends _$AppDatabase {
           ..where((t) =>
               t.deletedAt.isNull() &
               t.isInbox.equals(true) &
-              t.folderId.isNull())
+              t.notebookId.isNull())
           ..orderBy([
             (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
             (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
@@ -228,10 +479,25 @@ class AppDatabase extends _$AppDatabase {
         .watch();
   }
 
-  /// 目录详情页：该目录内的笔记
-  Stream<List<Note>> watchNotesInFolder(String folderId) {
+  /// 笔记库页的「轻笔记」区块：未归档笔记（原收件箱内容），最新在前。
+  ///
+  /// 与 [watchInboxNotes] 的区别：这里**不额外要求 `notebookId IS NULL`**。
+  /// 数据一致性上未归档笔记就不该有笔记库，但迁移修正过的历史数据
+  /// 万一有残留，也不该让它从两个入口都看不见。
+  Stream<List<Note>> watchUnfiledNotes() {
     return (select(notes)
-          ..where((t) => t.deletedAt.isNull() & t.folderId.equals(folderId))
+          ..where((t) => t.deletedAt.isNull() & t.isInbox.equals(true))
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
+            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
+          ]))
+        .watch();
+  }
+
+  /// 笔记库详情页：该笔记库内的笔记
+  Stream<List<Note>> watchNotesInNotebook(String notebookId) {
+    return (select(notes)
+          ..where((t) => t.deletedAt.isNull() & t.notebookId.equals(notebookId))
           ..orderBy([
             (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
             (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
@@ -281,12 +547,7 @@ class AppDatabase extends _$AppDatabase {
   static final _backslash = String.fromCharCode(0x5C);
 
   Stream<List<Note>> searchNotes(String keyword) {
-    final escaped = keyword
-        .trim()
-        .replaceAll(_backslash, '$_backslash$_backslash')
-        .replaceAll('%', '$_backslash%')
-        .replaceAll('_', '${_backslash}_');
-    final k = '%$escaped%';
+    final k = _likePattern(keyword);
     return (select(notes)
           ..where((t) =>
               t.deletedAt.isNull() &
@@ -298,15 +559,243 @@ class AppDatabase extends _$AppDatabase {
         .watch();
   }
 
+  /// **限定在某个笔记库内**搜索。
+  ///
+  /// 与 [searchNotes]（全局）分开：笔记库详情页的搜索图标应当只在这个库内找，
+  /// 否则用户在一个库里搜却看到别的库的结果，会以为搜索坏了。
+  Stream<List<Note>> searchNotesInNotebook(String notebookId, String keyword) {
+    final k = _likePattern(keyword);
+    return (select(notes)
+          ..where((t) =>
+              t.deletedAt.isNull() &
+              t.notebookId.equals(notebookId) &
+              (t.title.like(k, escapeChar: _backslash) |
+                  t.content.like(k, escapeChar: _backslash)))
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
+          ]))
+        .watch();
+  }
+
+  /// 构造 LIKE 模式串，并转义 `%` 与 `_`。
+  ///
+  /// 不转义的话搜 "100%" 会变成"匹配任意串"，搜 "_" 会匹配任意单字符。
+  String _likePattern(String keyword) {
+    final escaped = keyword
+        .trim()
+        .replaceAll(_backslash, '$_backslash$_backslash')
+        .replaceAll('%', '$_backslash%')
+        .replaceAll('_', '${_backslash}_');
+    return '%$escaped%';
+  }
+
+  /// 只按**标题**匹配的笔记（搜索页的「笔记」类）。
+  ///
+  /// 与 [searchNotes] 分开是因为搜索页要把结果**分两类展示**：
+  /// 「笔记」= 标题命中（整篇相关），「笔记内容」= 正文命中（要定位到某一片）。
+  /// 合并成一个查询再在内存里分类，等于要读全部正文来判断命中的是哪一类。
+  Future<List<Note>> notesWithTitleLike(
+    String keyword, {
+    List<String>? notebookIds,
+    bool includeUnfiled = true,
+    int limit = 50,
+  }) =>
+      _notesLike(
+        titleOnly: true,
+        keyword: keyword,
+        notebookIds: notebookIds,
+        includeUnfiled: includeUnfiled,
+        limit: limit,
+      );
+
+  /// 只按**正文**匹配的笔记（搜索页的「笔记内容」类）。
+  ///
+  /// [limit] 是**真实的上限**：调用方（`SearchService`）还要为每篇笔记算出
+  /// "命中哪一片"，那需要先有切片。命中几千篇时不能每篇都切一遍，所以这里
+  /// 先按更新时间取最近的若干篇。
+  Future<List<Note>> notesWithContentLike(
+    String keyword, {
+    List<String>? notebookIds,
+    bool includeUnfiled = true,
+    int limit = 50,
+  }) =>
+      _notesLike(
+        titleOnly: false,
+        keyword: keyword,
+        notebookIds: notebookIds,
+        includeUnfiled: includeUnfiled,
+        limit: limit,
+      );
+
+  /// "在哪些笔记库里"的过滤条件。
+  ///
+  /// [notebookIds] 为 **null = 不限目录**；空列表 = 一个目录都不含
+  /// （此时只可能靠 [includeUnfiled] 命中轻笔记）。
+  ///
+  /// 「轻笔记」= `notebook_id IS NULL`（没有归入任何库）。
+  Expression<bool> _scopeOf(List<String>? notebookIds, bool includeUnfiled) {
+    if (notebookIds == null) {
+      // 不限目录：要么全要，要么只要已归档的（不含轻笔记）
+      return includeUnfiled
+          ? const Constant(true)
+          : notes.notebookId.isNotNull();
+    }
+    var e = notes.notebookId.isIn(notebookIds);
+    if (includeUnfiled) e = e | notes.notebookId.isNull();
+    return e;
+  }
+
+  /// 只要 **id 与标题** 的笔记列表（AI 的 `listNotes` 用它）。
+  ///
+  /// 用 `selectOnly` 而不是 `select`：后者的工具描述里写着"只要 id 和标题时
+  /// 用它，比 searchNotes 省钱"——**那就得真的省钱**。
+  /// 读整行会把每篇笔记的正文都取出来，几百篇就是几百 KB，
+  /// 只为了拿两个短字段。
+  Future<List<({String id, String title})>> noteBriefs({
+    List<String>? notebookIds,
+    bool includeUnfiled = true,
+    int limit = 50,
+  }) async {
+    final q = selectOnly(notes)
+      ..addColumns([notes.id, notes.title])
+      ..where(notes.deletedAt.isNull() &
+          _scopeOf(notebookIds, includeUnfiled))
+      ..orderBy([
+        OrderingTerm(expression: notes.updatedAt, mode: OrderingMode.desc),
+      ])
+      ..limit(limit);
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (id: r.read(notes.id) ?? '', title: r.read(notes.title) ?? ''),
+    ];
+  }
+
+  /// 按**范围**取笔记（完整行）。给 AI 页的「+ → 选择笔记」用。
+  ///
+  /// 与 [noteBriefs] 的区别只是"要整行还是要两个字段"；范围语义完全一样，
+  /// 都走 [_scopeOf] —— 分成两套过滤条件是"某一边漏了"的经典来源。
+  Future<List<Note>> notesInScope({
+    List<String>? notebookIds,
+    bool includeUnfiled = true,
+    int limit = 200,
+  }) {
+    return (select(notes)
+          ..where((t) =>
+              t.deletedAt.isNull() & _scopeOf(notebookIds, includeUnfiled))
+          ..orderBy([
+            (t) =>
+                OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
+          ])
+          ..limit(limit))
+        .get();
+  }
+
+  Future<List<Note>> _notesLike({
+    required bool titleOnly,
+    required String keyword,
+    required List<String>? notebookIds,
+    required bool includeUnfiled,
+    required int limit,
+  }) {
+    final k = _likePattern(keyword);
+    final q = select(notes)
+      ..where((t) {
+        final hit = titleOnly
+            ? t.title.like(k, escapeChar: _backslash)
+            : t.content.like(k, escapeChar: _backslash);
+        return t.deletedAt.isNull() &
+            hit &
+            _scopeOf(notebookIds, includeUnfiled);
+      })
+      ..orderBy([
+        (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
+      ])
+      ..limit(limit);
+    return q.get();
+  }
+
   Future<void> upsertNote(NotesCompanion entry) {
     return into(notes).insertOnConflictUpdate(entry);
   }
+
+  // ==========================================================================
+  // 卡片流（轻笔记）的素材查询
+  //
+  // 卡片流的内容是 AI 从素材里**新生成**的，不是已有笔记的视图。
+  // 所以这里只需要"取素材"，不再需要原来那套笔记消费状态
+  // （到期时间 / 间隔天数 / 难度因子 / 收藏）——那是为"复习已有笔记"
+  // 设计的，卡片换成 AI 新内容之后就不适用了。
+  //
+  // 已删除的旧方法（连同 note_feed_state 表的使用）：
+  //   getFeedState / feedStatesFor / upsertFeedState / deleteFeedState
+  //   newFeedCandidates / dueFeedCandidates
+  //   recordFeedShown / recordFeedOpened / markFeedNotInterested
+  //   setFeedStarred / countFeedStates / latestSummaryOneLiners
+  //
+  // 那张 `note_feed_state` 表本身也已在 **v8 删除**（连同 idx_feed_due /
+  // idx_feed_starred 两条索引），这一段只留作历史说明。
+  // ==========================================================================
+
+  /// 随机取卡片流的素材笔记。
+  ///
+  /// [notebookIds] 为用户勾选的笔记库；[includeUnfiled] 为是否带上
+  /// 未归档的「我的轻笔记」。只取正文非空的——空笔记当素材没意义。
+  ///
+  /// **为什么随机**：每次都用同样几条素材拼 prompt，生成的卡片会高度雷同。
+  ///
+  /// **为什么走 `customSelect`**：drift 的类型化 `orderBy` 只接受列表达式，
+  /// 而随机排序要 `ORDER BY RANDOM()`（一个函数）。`LIMIT` 很小（默认 8），
+  /// 全表扫描的代价可以接受。
+  Future<List<Note>> notesForFeed({
+    required List<String> notebookIds,
+    required bool includeUnfiled,
+    int limit = 8,
+  }) async {
+    final hasNotebooks = notebookIds.isNotEmpty;
+    if (!hasNotebooks && !includeUnfiled) return const [];
+
+    final clauses = <String>['deleted_at IS NULL', "content != ''"];
+    final vars = <Variable<Object>>[];
+
+    if (includeUnfiled && hasNotebooks) {
+      final ph = List.filled(notebookIds.length, '?').join(',');
+      clauses.add('(notebook_id IN ($ph) OR is_inbox = 1)');
+      vars.addAll(notebookIds.map(Variable<String>.new));
+    } else if (includeUnfiled) {
+      clauses.add('is_inbox = 1');
+    } else {
+      final ph = List.filled(notebookIds.length, '?').join(',');
+      clauses.add('notebook_id IN ($ph)');
+      vars.addAll(notebookIds.map(Variable<String>.new));
+    }
+
+    final sql = 'SELECT * FROM notes WHERE ${clauses.join(' AND ')} '
+        'ORDER BY RANDOM() LIMIT $limit';
+    final rows = await customSelect(sql, variables: vars, readsFrom: {notes}).get();
+    return rows.map((r) => notes.map(r.data)).toList(growable: false);
+  }
+
 
   /// 逻辑删除：保留数据，可做回收站与增量同步
   Future<void> softDeleteNote(String id) {
     return (update(notes)..where((t) => t.id.equals(id))).write(
       NotesCompanion(
         deletedAt: Value(DateTime.now().toUtc()),
+        updatedAt: Value(DateTime.now().toUtc()),
+      ),
+    );
+  }
+
+  /// 撤销逻辑删除。
+  ///
+  /// 左滑删除走的是"乐观删除 + 撤销"（见 [SwipeToDelete] 的说明），
+  /// 所以必须有恢复入口。逻辑删除的好处正在这里：`deletedAt` 清空即可，
+  /// 笔记内容与关联（卡片流摘要）都还在。
+  Future<void> restoreNote(String id) {
+    return (update(notes)..where((t) => t.id.equals(id))).write(
+      NotesCompanion(
+        deletedAt: const Value(null),
         updatedAt: Value(DateTime.now().toUtc()),
       ),
     );
@@ -321,232 +810,20 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
-  /// 轻笔记 → 笔记库：指定目录即完成归档。
-  /// 传 null 表示「移出目录，回到轻笔记」。
-  Future<void> moveNoteToFolder(String noteId, String? folderId) {
+  /// 轻笔记 → 笔记库：指定笔记库即完成归档。
+  /// 传 null 表示「移出笔记库，回到我的轻笔记」。
+  Future<void> moveNoteToNotebook(String noteId, String? notebookId) {
     return (update(notes)..where((t) => t.id.equals(noteId))).write(
-      NotesCompanion(
-        folderId: Value(folderId),
-        isInbox: Value(folderId == null),
+      NotesCompanion(notebookId: Value(notebookId),
+        isInbox: Value(notebookId == null),
         updatedAt: Value(DateTime.now().toUtc()),
       ),
     );
   }
 
-  Future<void> saveReadingProgress(String id, double progress, int seconds) {
-    return (update(notes)..where((t) => t.id.equals(id))).write(
-      NotesCompanion(
-        readingProgress: Value(progress.clamp(0.0, 1.0)),
-        readingSeconds: Value(seconds),
-      ),
-    );
-  }
-
-  // ==========================================================================
-  // tags
-  // ==========================================================================
-
-  /// 按 normalizedName 复用已有标签，不存在才新建。返回 tagId。
-  Future<String> ensureTag(String tagId, String name) async {
-    final normalized =
-        name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-    if (normalized.isEmpty) {
-      throw ArgumentError('标签名不能为空');
-    }
-    final existing = await (select(tags)
-          ..where((t) => t.normalizedName.equals(normalized)))
-        .getSingleOrNull();
-    if (existing != null) return existing.id;
-
-    await into(tags).insert(
-      TagsCompanion.insert(
-        id: tagId,
-        name: name.trim(),
-        normalizedName: normalized,
-        createdAt: DateTime.now().toUtc(),
-      ),
-    );
-    return tagId;
-  }
-
-  Future<void> attachTag(String noteId, String tagId) async {
-    // 不能用 insert 的返回值判断"是否真的插入了"：
-    // 即使 InsertMode.insertOrIgnore 因复合主键冲突而忽略，返回的也是
-    // **尝试写入的行数 1**，不是实际插入行数。用它做条件会让 usageCount
-    // 在重复关联时被反复累加（真实 bug，已被测试抓出）。
-    // 因此先显式查一次存在性。
-    final already = await (select(noteTags)
-          ..where((t) => t.noteId.equals(noteId) & t.tagId.equals(tagId))
-          ..limit(1))
-        .getSingleOrNull();
-    if (already != null) return;
-
-    await into(noteTags).insert(
-      NoteTagsCompanion.insert(
-        noteId: noteId,
-        tagId: tagId,
-        createdAt: DateTime.now().toUtc(),
-      ),
-      mode: InsertMode.insertOrIgnore,
-    );
-    await customStatement(
-      'UPDATE tags SET usage_count = usage_count + 1 WHERE id = ?',
-      [tagId],
-    );
-  }
-
-  Future<void> detachTag(String noteId, String tagId) async {
-    final n = await (delete(noteTags)
-          ..where((t) => t.noteId.equals(noteId) & t.tagId.equals(tagId)))
-        .go();
-    if (n > 0) {
-      await customStatement(
-        'UPDATE tags SET usage_count = MAX(usage_count - 1, 0) WHERE id = ?',
-        [tagId],
-      );
-    }
-  }
-
-  Stream<List<Tag>> watchTags() {
-    return (select(tags)
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.usageCount, mode: OrderingMode.desc),
-            (t) => OrderingTerm(expression: t.name),
-          ]))
-        .watch();
-  }
-
-  Future<List<Tag>> tagsOfNote(String noteId) {
-    final query = select(tags).join([
-      innerJoin(noteTags, noteTags.tagId.equalsExp(tags.id)),
-    ])
-      ..where(noteTags.noteId.equals(noteId));
-    return query.map((row) => row.readTable(tags)).get();
-  }
-
-  // ==========================================================================
-  // cards
-  // ==========================================================================
-
-  /// 今日待复习：到期的旧卡 + 限量新卡。
-  ///
-  /// 新卡限量在 Dart 层做，避免 SQL 里写窗口函数导致难维护。
-  Stream<List<Card>> watchDueCards({int newCardLimit = 15}) {
-    final endOfToday = _endOfTodayUtc();
-    return (select(cards)
-          ..where((t) =>
-              t.suspended.equals(false) &
-              t.deletedAt.isNull() &
-              t.dueAt.isSmallerOrEqualValue(endOfToday))
-          ..orderBy([(t) => OrderingTerm(expression: t.dueAt)]))
-        .watch()
-        .map((rows) {
-      final dueReviews = <Card>[];
-      final fresh = <Card>[];
-      for (final c in rows) {
-        if (c.repetitions == 0) {
-          fresh.add(c);
-        } else {
-          dueReviews.add(c);
-        }
-      }
-      fresh.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      return [...dueReviews, ...fresh.take(newCardLimit)];
-    });
-  }
-
-  Future<int> dueCount() async {
-    final endOfToday = _endOfTodayUtc();
-    final expr = cards.id.count();
-    final q = selectOnly(cards)
-      ..addColumns([expr])
-      ..where(cards.suspended.equals(false) &
-          cards.deletedAt.isNull() &
-          cards.dueAt.isSmallerOrEqualValue(endOfToday));
-    final row = await q.getSingle();
-    return row.read(expr) ?? 0;
-  }
-
-  Future<List<Card>> cardsOfNote(String noteId) {
-    return (select(cards)
-          ..where((t) => t.noteId.equals(noteId) & t.deletedAt.isNull())
-          ..orderBy([(t) => OrderingTerm(expression: t.createdAt)]))
-        .get();
-  }
-
-  Future<void> upsertCard(CardsCompanion entry) {
-    return into(cards).insertOnConflictUpdate(entry);
-  }
-
-  /// 复习一次：写调度状态 + 追加一条流水。
-  ///
-  /// 两件事必须在同一个事务里，否则中断会出现「调度变了但没有流水」的不一致。
-  Future<void> applyReview({
-    required String cardId,
-    required double easeAfter,
-    required int intervalAfter,
-    required int repetitionsAfter,
-    required int lapsesAfter,
-    required DateTime dueAt,
-    required int quality,
-    required double easeBefore,
-    required int intervalBefore,
-    required int elapsedMs,
-    required String reviewId,
-  }) {
-    return transaction(() async {
-      await (update(cards)..where((t) => t.id.equals(cardId))).write(
-        CardsCompanion(
-          ease: Value(easeAfter),
-          intervalDays: Value(intervalAfter),
-          repetitions: Value(repetitionsAfter),
-          lapses: Value(lapsesAfter),
-          dueAt: Value(dueAt),
-          lastReviewedAt: Value(DateTime.now().toUtc()),
-          updatedAt: Value(DateTime.now().toUtc()),
-          reviewCount: Value(await _reviewCountPlusOne(cardId)),
-        ),
-      );
-      await into(reviews).insert(
-        ReviewsCompanion.insert(
-          id: reviewId,
-          cardId: cardId,
-          quality: quality,
-          easeBefore: easeBefore,
-          easeAfter: easeAfter,
-          intervalBefore: intervalBefore,
-          intervalAfter: intervalAfter,
-          elapsedMs: Value(elapsedMs),
-          reviewedAt: DateTime.now().toUtc(),
-        ),
-      );
-    });
-  }
-
-  Future<int> _reviewCountPlusOne(String cardId) async {
-    final c = await (select(cards)..where((t) => t.id.equals(cardId)))
-        .getSingleOrNull();
-    return (c?.reviewCount ?? 0) + 1;
-  }
-
   // ==========================================================================
   // AI 结果与审计
   // ==========================================================================
-
-  Future<void> insertSummary(NoteSummariesCompanion entry) {
-    return into(noteSummaries).insert(entry);
-  }
-
-  /// 笔记最近一次 AI 整理结果
-  Stream<NoteSummary?> watchLatestSummary(String noteId) {
-    return (select(noteSummaries)
-          ..where((t) => t.noteId.equals(noteId))
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
-          ])
-          ..limit(1))
-        .watchSingleOrNull();
-  }
 
   Future<void> markNoteAiDone(String noteId) {
     return (update(notes)..where((t) => t.id.equals(noteId))).write(
@@ -566,12 +843,11 @@ class AppDatabase extends _$AppDatabase {
         .map((row) => row.read(total) ?? 0.0);
   }
 
-  Future<void> clearAiHistory() {
-    return transaction(() async {
-      await delete(aiCalls).go();
-      await delete(noteSummaries).go();
-    });
-  }
+  /// 清空 AI 调用审计。
+  ///
+  /// 早先这里还顺手删 `note_summaries`（「AI 整理要点」的落库结果）。
+  /// 该功能移除后表也没了，所以只剩调用记录要清。
+  Future<void> clearAiHistory() => delete(aiCalls).go();
 
   // ==========================================================================
   // AI 会话（设计稿 §6.3）
@@ -625,37 +901,236 @@ class AppDatabase extends _$AppDatabase {
     );
   }
 
+  /// 写入/清除某条消息的**挂起动作**（`ai_messages.pendingAction`）。
+  ///
+  /// 这一列项目里早就有、至今零引用。`askUser` 的"持久化挂起"正需要它：
+  /// 把"等你回答"写进**数据库**而不是内存，于是用户三小时后回答、
+  /// 甚至重启 App 之后回答，都能从这条记录接着跑。
+  ///
+  /// [json] 传 null 表示清掉挂起（用户已答 / 主动取消整个对话）。
+  Future<void> setPendingAction(String messageId, String? json) {
+    return (update(aiMessages)..where((t) => t.id.equals(messageId)))
+        .write(AiMessagesCompanion(pendingAction: Value(json)));
+  }
+
+  /// 按 id 取一条 AI 消息（回答挂起后要继续写同一条，得先读它现在的内容）。
+  Future<AiMessage?> aiMessageById(String id) {
+    return (select(aiMessages)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+  }
+
+  /// 找出某个会话里**正在等回答**的那条消息（没有就返回 null）。
+  /// 从数据库找而不是从内存找，正是"杀掉 App 重开还能继续回答"的实现方式：
+  /// 挂起状态本来就是持久化的，冷启动后照样能恢复。
+  Future<AiMessage?> pendingAskMessage(String conversationId) {
+    return (select(aiMessages)
+          ..where((t) =>
+              t.conversationId.equals(conversationId) &
+              t.pendingAction.isNotNull())
+          ..orderBy([(t) => OrderingTerm(expression: t.createdAt)])..limit(1))
+        .getSingleOrNull();
+  }
+
   // ==========================================================================
-  // settings（key-value）
+  // app_kv（key-value）
   // ==========================================================================
 
   Future<String?> readSetting(String key) async {
-    final row = await (select(settings)..where((t) => t.key.equals(key)))
+    final row = await (select(appKv)..where((t) => t.key.equals(key)))
         .getSingleOrNull();
     return row?.value;
   }
 
   Stream<String?> watchSetting(String key) {
-    return (select(settings)..where((t) => t.key.equals(key)))
+    return (select(appKv)..where((t) => t.key.equals(key)))
         .watchSingleOrNull()
         .map((row) => row?.value);
   }
 
   Future<void> writeSetting(String key, String value) {
-    return into(settings).insertOnConflictUpdate(
-      SettingsCompanion.insert(key: key, value: value),
+    return into(appKv).insertOnConflictUpdate(
+      AppKvCompanion.insert(key: key, value: value),
     );
   }
 
   Future<void> deleteSetting(String key) {
-    return (delete(settings)..where((t) => t.key.equals(key))).go();
+    return (delete(appKv)..where((t) => t.key.equals(key))).go();
   }
 
-  static DateTime _endOfTodayUtc() {
-    final now = DateTime.now();
-    final endLocal = DateTime(now.year, now.month, now.day, 23, 59, 59);
-    return endLocal.toUtc();
+  // ==========================================================================
+  // 笔记切片（note_chunks）
+  //
+  // 只存"原文的哪一段"（偏移），**不存正文**：读片时从 `notes.content` 现取，
+  // 于是永远和正文一致。代价是正文改了偏移会失效 —— 由 `contentHash` 检出、
+  // 由 `NoteChunkRepository` 当场重切（自愈）。
+  //
+  // 这一层**只碰数据库**：切片器（`NoteChunker`）与领域类型（`NoteChunk`）
+  // 都在 `features/note/` 下，`core/` 不能反向依赖它们，所以这里收的是
+  // 现成的 `NoteChunksCompanion`。
+  // ==========================================================================
+
+  /// 换掉某篇笔记的全部切片：**先删后插，同一个事务**。
+  ///
+  /// 事务是必须的：分两步做的话，中间那一瞬读到的会是"旧片已删、新片没插"的
+  /// 空表，搜索/卡片流刚好撞上就会以为这篇笔记没内容。
+  Future<void> replaceNoteChunks(
+    String noteId,
+    List<NoteChunksCompanion> rows,
+  ) {
+    return transaction(() async {
+      await (delete(noteChunks)..where((t) => t.noteId.equals(noteId))).go();
+      if (rows.isEmpty) return;
+      await batch((b) => b.insertAll(noteChunks, rows));
+    });
   }
+
+  /// 某篇笔记的切片，按 [NoteChunks.idx] 升序。
+  Future<List<NoteChunkRow>> chunksOf(String noteId) {
+    return (select(noteChunks)
+          ..where((t) => t.noteId.equals(noteId))
+          ..orderBy([(t) => OrderingTerm(expression: t.idx)]))
+        .get();
+  }
+
+  /// 某篇笔记有几片。
+  ///
+  /// **懒回填的判据**：0 片 = 还没切过（老库升级上来的笔记就是这样），
+  /// 调到 0 就当场切一遍写回。
+  Future<int> chunkCount(String noteId) async {
+    final c = countAll();
+    final q = selectOnly(noteChunks)
+      ..addColumns([c])
+      ..where(noteChunks.noteId.equals(noteId));
+    final row = await q.getSingle();
+    return row.read(c) ?? 0;
+  }
+
+  /// 取某一片。没有返回 null（调用方据此触发重切）。
+  Future<NoteChunkRow?> chunkAt(String noteId, int idx) {
+    return (select(noteChunks)
+          ..where((t) => t.noteId.equals(noteId) & t.idx.equals(idx)))
+        .getSingleOrNull();
+  }
+
+  /// 记一次「这片被卡片流用掉了」，并把窗口轮换位推进到 [nextWindowStart]。
+  Future<void> markChunkUsed(
+    String noteId,
+    int idx, {
+    required DateTime at,
+    required int nextWindowStart,
+  }) {
+    return (update(noteChunks)
+          ..where((t) => t.noteId.equals(noteId) & t.idx.equals(idx)))
+        .write(NoteChunksCompanion(
+      lastUsedAt: Value(at),
+      nextWindowStart: Value(nextWindowStart),
+    ));
+  }
+
+  /// 还没切过片的笔记 id（删掉的笔记不算）。
+  ///
+  /// 给"后台慢慢补切片"用：不做成全量回填是因为**几万条笔记会在升级那一刻
+  /// 卡住启动**，而且中断了只补一半、很难判断谁补过谁没补。
+  Future<List<String>> noteIdsWithoutChunks({int limit = 50}) {
+    return customSelect(
+      'SELECT n.id AS id FROM notes n '
+      'LEFT JOIN note_chunks c ON c.note_id = n.id '
+      'WHERE n.deleted_at IS NULL AND c.note_id IS NULL '
+      'LIMIT ?',
+      variables: [Variable<int>(limit)],
+      readsFrom: {notes, noteChunks},
+    ).map((r) => r.read<String>('id')).get();
+  }
+
+  // ==========================================================================
+  // 轻笔记的跨启动预留（feed_reserve）
+  //
+  // 语义：几张"已经生成好、留给下次打开先看"的卡片。
+  // 取出即清（消费掉），写入即替换（只保留最近一批）。
+  //
+  // **注意它只决定"进来时先拿哪 6 张"**，不参与列表的增删——
+  // 列表行为在 UI 层（`InboxPage._loadBatch`：首次替换、下拉前向追加）。
+  // ==========================================================================
+
+  /// 取出全部预留（按 position 顺序）并**立刻清空表**。
+  ///
+  /// 取与清在**同一个事务**里：否则两个并发取用可能都拿到同一批
+  /// （读到之后、删除之前），导致同一张卡片被展示两次。
+  Future<List<FeedDraft>> takeFeedReserve() async {
+    return transaction(() async {
+      final rows = await (select(feedReserve)
+            ..orderBy([(t) => OrderingTerm.asc(t.position)]))
+          .get();
+
+      if (rows.isNotEmpty) {
+        await delete(feedReserve).go();
+      }
+
+      final out = <FeedDraft>[];
+      for (final r in rows) {
+        final d = FeedDraft(
+          title: r.title,
+          body: r.body,
+          tags: _decodeTagList(r.tags),
+        );
+        if (d.isValid) out.add(d);
+      }
+      return out;
+    });
+  }
+
+  /// 用 [drafts] **替换**整张预留表。
+  ///
+  /// 替换而不是追加：语义是"最近一批留给下次的"，累积起来会让下次打开
+  /// 看到一堆旧内容。
+  Future<void> replaceFeedReserve(List<FeedDraft> drafts) async {
+    await transaction(() async {
+      await delete(feedReserve).go();
+      if (drafts.isEmpty) return;
+
+      final now = DateTime.now().toUtc();
+      const uuid = Uuid();
+      for (var i = 0; i < drafts.length; i++) {
+        final d = drafts[i];
+        await into(feedReserve).insert(
+          FeedReserveCompanion.insert(
+            id: uuid.v4(),
+            title: d.title,
+            body: d.body,
+            tags: Value(jsonEncode(d.tags)),
+            position: i,
+            createdAt: now,
+          ),
+        );
+      }
+    });
+  }
+
+  /// 预留里有几张（测试与诊断用）。
+  Future<int> feedReserveCount() async {
+    final c = countAll();
+    final row = await (selectOnly(feedReserve)..addColumns([c])).getSingle();
+    return row.read(c) ?? 0;
+  }
+
+  /// 标签 JSON 解析：损坏就当空，不让它把页面搞崩。
+  static List<String> _decodeTagList(String raw) {
+    if (raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+      }
+    } catch (_) {
+      // 忽略：标签只是锦上添花
+    }
+    return const [];
+  }
+
+
 }
 
 /// 当前数据库文件。

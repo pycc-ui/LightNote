@@ -1,11 +1,11 @@
 name: smart_notes
 description: 智能笔记 App —— 笔记 + DeepSeek AI 整理 + 记忆卡片(SM-2) + 沉浸阅读
 publish_to: "none"
-version: 1.1.0+2
+version: 1.0.0+2
 
 environment:
   # 注意：drift 2.33+ 要求 Dart >= 3.10.0。
-  # 若本机 Flutter 版本低于 3.35（Dart 3.10），请先升级 Flutter，否则依赖无法解析。
+  # 若本地 Flutter 版本低于 3.35（Dart 3.10），请先升级 Flutter，否则依赖无法解析。
   sdk: ^3.10.0
 
 dependencies:

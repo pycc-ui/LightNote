@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 
 import '../../../core/db/models.dart';
+import '../domain/tool_types.dart';
 import 'deepseek_config.dart';
 
 /// DeepSeek 客户端：只负责「发请求 + 解析 SSE + 映射错误」。
@@ -83,9 +84,77 @@ class DeepSeekClient {
       body['response_format'] = {'type': 'json_object'};
     }
 
+    yield* _runStream(body: body, model: model, cancelToken: cancelToken);
+  }
+
+  /// **带工具的多轮对话**（function calling）。
+  ///
+  /// 与 [streamChat] 的区别只有两处，所以 SSE 解析完全共用 [_runStream]：
+  ///   · `messages` 是**完整消息列表**（不是 system + user 两段），
+  ///     tool calling 要求把历史、assistant 的工具提议、工具结果按序都放进来；
+  ///   · `tools` 非空时会带上工具定义，模型可能**只提工具不回答**
+  ///     （此时 [AiDone.toolCalls] 非空、`fullText` 为空）。
+  ///
+  /// 调用方拿到 [AiDone.toolCalls] 后要：执行工具 → 用 [AgentMessage.tool]
+  /// 回灌 → **再发一轮**，直到模型不再提工具。那个循环在 `AiAgentLoop` 里，
+  /// 本方法**只负责一轮**。
+  Stream<AiEvent> streamAgent({
+    required String systemPrompt,
+    required List<AgentMessage> messages,
+    List<ToolSpec> tools = const [],
+    String model = DeepSeekConfig.modelFlash,
+    bool thinking = false,
+    String reasoningEffort = 'high',
+    int? maxTokens,
+    CancelToken? cancelToken,
+  }) async* {
+    if (!hasApiKey) {
+      yield const AiError(
+        '未配置 API Key，请到「设置」中填写 DeepSeek API Key。',
+        code: 'no_api_key',
+      );
+      return;
+    }
+
+    final body = <String, dynamic>{
+      'model': model,
+      'messages': [
+        {'role': 'system', 'content': systemPrompt},
+        for (final m in messages) m.toJson(),
+      ],
+      'stream': true,
+      'thinking': {'type': thinking ? 'enabled' : 'disabled'},
+      if (maxTokens != null) 'max_tokens': maxTokens,
+      if (tools.isNotEmpty) 'tools': [for (final t in tools) t.toJson()],
+      // 交给模型自己决定调不调。不要设成 "required"，否则它会为了调用而调用。
+      if (tools.isNotEmpty) 'tool_choice': 'auto',
+    };
+
+    if (thinking) {
+      body['reasoning_effort'] = reasoningEffort;
+    }
+
+    yield* _runStream(body: body, model: model, cancelToken: cancelToken);
+  }
+
+  /// SSE 解析的**唯一实现**：发请求、逐行解析、聚合 tool_calls、算成本。
+  ///
+  /// 抽出来是因为 [streamChat] 与 [streamAgent] 的差别只在**请求体**，
+  /// 而下面这段有太多容易写错的地方（流式分片、usage 只在最后一块、
+  /// 错误藏在流中间……），复制一份必然慢慢走样。
+  Stream<AiEvent> _runStream({
+    required Map<String, dynamic> body,
+    required String model,
+    CancelToken? cancelToken,
+  }) async* {
     final stopwatch = Stopwatch()..start();
     final buffer = StringBuffer();
     final reasoningBuffer = StringBuffer();
+
+    /// tool_calls 是**分片**来的：同一个 `index` 可能分好几块，
+    /// `arguments` 尤其会被切成小段。所以按 index 聚合，最后再拼。
+    final toolAcc = <int, _ToolCallAcc>{};
+
     var promptTokens = 0;
     var cachedTokens = 0;
     var completionTokens = 0;
@@ -175,6 +244,9 @@ class DeepSeekClient {
             reasoningBuffer.write(reasoning);
             yield AiReasoning(reasoning);
           }
+
+          // ---- 工具调用增量 ----
+          _accumulateToolCalls(delta['tool_calls'], toolAcc);
         }
 
         final u = json['usage'];
@@ -188,8 +260,13 @@ class DeepSeekClient {
 
       stopwatch.stop();
 
-      // 空正文 + 未收到 [DONE]：多半是服务端异常或 JSON 模式偶发空返回
-      if (buffer.isEmpty && !finished) {
+      final toolCalls = _finishToolCalls(toolAcc);
+
+      // 空正文 + 未收到 [DONE]：多半是服务端异常或 JSON 模式偶发空返回。
+      //
+      // ⚠️ **但"只提工具、没有正文"是完全正常的**（模型决定先调工具再回答），
+      // 不能当成空内容报错——那样整个 tool calling 会在第一轮就死掉。
+      if (buffer.isEmpty && toolCalls.isEmpty && !finished) {
         yield const AiError('服务端返回了空内容，请重试。', code: 'empty_content');
         return;
       }
@@ -206,12 +283,59 @@ class DeepSeekClient {
         completionTokens: usage.completionTokens,
         costCents: DeepSeekPricing.estimateCostCents(model: model, usage: usage),
         latencyMs: stopwatch.elapsedMilliseconds,
+        toolCalls: toolCalls,
       );
     } on DioException catch (e) {
       yield _mapDioError(e);
     } catch (e) {
       yield AiError('请求失败：$e', code: 'unknown');
     }
+  }
+
+  /// 把一块 `delta.tool_calls` 并进累加器。
+  ///
+  /// 分片形状（同一 index 可能来多块，后面几块只有 `arguments`）：
+  /// ```json
+  /// {"index":0,"id":"call_1","type":"function","function":{"name":"listNotebooks","arguments":""}}
+  /// {"index":0,"function":{"arguments":"{\"que"}}
+  /// {"index":0,"function":{"arguments":"ry\":\"x\"}"}}
+  /// ```
+  static void _accumulateToolCalls(Object? raw, Map<int, _ToolCallAcc> acc) {
+    if (raw is! List) return;
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final idx = (item['index'] as num?)?.toInt() ?? 0;
+      final slot = acc.putIfAbsent(idx, _ToolCallAcc.new);
+
+      final id = item['id'];
+      if (id is String && id.isNotEmpty) slot.id = id;
+
+      final fn = item['function'];
+      if (fn is Map) {
+        final name = fn['name'];
+        if (name is String && name.isNotEmpty) slot.name = name;
+        final args = fn['arguments'];
+        if (args is String && args.isNotEmpty) slot.args.write(args);
+      }
+    }
+  }
+
+  /// 收尾：按 index 排序，拼成完整的 [ToolCall] 列表。
+  ///
+  /// 丢掉"没名字"的残片——那多半是解析出错，让模型下一轮重来比执行一个
+  /// 名字为空的工具安全得多。
+  static List<ToolCall> _finishToolCalls(Map<int, _ToolCallAcc> acc) {
+    if (acc.isEmpty) return const [];
+    final sorted = acc.entries.toList()..sort((a, b) => a.key.compareTo(b.key));
+    return [
+      for (final e in sorted)
+        if (e.value.name.isNotEmpty)
+          ToolCall(
+            id: e.value.id.isEmpty ? 'call_${e.key}' : e.value.id,
+            name: e.value.name,
+            arguments: e.value.args.toString(),
+          ),
+    ];
   }
 
   /// 非流式调用，用于 JSON Output 类任务。
@@ -379,4 +503,14 @@ class DeepSeekException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// `tool_calls` 分片聚合用的小袋子。
+///
+/// 流式下同一个调用会被切成多块：第一块带 `id` 和 `name`，
+/// 后面几块只带 `arguments` 的片段。所以按 `index` 聚合、把片段拼起来。
+class _ToolCallAcc {
+  String id = '';
+  String name = '';
+  final args = StringBuffer();
 }

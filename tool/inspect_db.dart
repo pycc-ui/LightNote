@@ -4,10 +4,17 @@ import 'package:sqlite3/sqlite3.dart';
 
 /// 用 sqlite3 包直接读取 App 建出来的数据库，验证表结构与种子数据。
 /// 本文件应放在 smart_notes 项目内执行（需要 package:sqlite3）。
+///
+/// 用法：dart run tool/inspect_db.dart <库文件路径>
 void main(List<String> args) {
-  final path = args.isNotEmpty
-      ? args.first
-      : r'C:\Users\43720\Downloads\py\appdata_test\轻笔记\qing_notes.sqlite';
+  // 不写死任何绝对路径：库的位置随平台与用户而变，
+  // 一律以 App 内「设置 → 存储位置」显示的路径为准，用参数传进来。
+  final path = args.isNotEmpty ? args.first : r'<库文件路径>';
+  if (args.isEmpty) {
+    stdout.writeln('用法: dart run tool/inspect_db.dart <库文件路径>');
+    stdout.writeln('（Windows 上库在 %APPDATA% 下的应用私有目录，'
+        '具体路径见 App 的「设置 → 存储位置」）');
+  }
 
   final file = File(path);
   stdout.writeln('数据库: $path');

@@ -4,27 +4,25 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'app/app_shell.dart';
+import 'app/seed_bootstrap.dart';
 import 'core/app_info.dart';
+import 'core/backup/backup_models.dart';
+import 'core/backup/backup_service.dart';
+import 'core/backup/file_dialogs.dart';
+import 'core/backup/pending_import.dart';
 import 'core/db/app_database.dart';
 import 'core/db/database_location.dart';
+import 'core/prefs/preferences_service.dart';
 import 'core/theme/app_theme.dart';
-import 'core/ui/log_bar.dart';
+import 'core/widgets/log_bar.dart';
 import 'features/ai/data/deepseek_client.dart';
 import 'features/ai/domain/ai_chat_repository.dart';
 import 'features/ai/domain/ai_repository.dart';
-import 'features/ai/ui/ai_page.dart';
-import 'features/cards/domain/card_repository.dart';
-import 'features/folders/data/folder_repository.dart';
-import 'features/notes/data/note_repository.dart';
-import 'features/notes/ui/inbox_page.dart';
-import 'features/notes/ui/library_page.dart';
-import 'features/settings/ui/settings_page.dart';
-import 'services/backup/backup_models.dart';
-import 'services/backup/backup_service.dart';
-import 'services/backup/file_dialogs.dart';
-import 'services/backup/pending_import.dart';
-import 'services/markdown_export_service.dart';
-import 'services/preferences_service.dart';
+import 'features/note/data/feed_repository.dart';
+import 'features/note/data/notebook_repository.dart';
+import 'features/note/data/note_repository.dart';
+import 'features/note/data/search_service.dart';
 
 /// 启动时是否有待处理的导入。
 ///
@@ -58,12 +56,12 @@ Future<void> main() async {
 /// 把数据库位置摘要写到 **App 工作目录**（= exe 所在目录）下的
 /// `.lightnote-storage.txt`。
 ///
-/// 这不是给 App 用的，是给 `tool\run.ps1` 读的：
-/// 启动 App 之后脚本会去 exe 目录读这个文件，把"数据到底在哪"打印出来。
+/// 这不是给 App 用的，是给**启动它的外部程序**读的：
+/// 启动之后，外部程序可以去 exe 目录读这个文件，把"数据到底在哪"打印出来。
 ///
 /// 为什么写在工作目录而不是工程根目录：App 不该知道自己被放在
 /// 工程的哪个位置（Release 版会被整个拷到别处单独运行）。
-/// 工作目录是启动方决定的，脚本正好知道它（就是 exe 所在目录）。
+/// 工作目录是启动方决定的，启动方正好知道它（就是 exe 所在目录）。
 Future<void> _publishDbLocation() async {
   try {
     final info = await DatabaseLocation.describeSafe();
@@ -71,9 +69,13 @@ Future<void> _publishDbLocation() async {
       'path=${info.activeDir}',
       'private=${info.isPrivate}',
       'unusable=${info.isUnusable}',
+      'degradedProgramDir=${info.isDegradedToProgramDir}',
       if (info.isFallback) 'fallback=${info.fallbackNote ?? ''}',
-      if (info.isDegradedToProgramDir) 'degradedProgramDir=true',
       if (info.isEnvOverridden) 'envOverride=true',
+      // 这几个是排查"degraded 标记为什么没置上"用的，正常看不出问题就删掉
+      'exeDir=${File(Platform.resolvedExecutable).parent.path}',
+      'exePath=${Platform.resolvedExecutable}',
+      'privateUnavailable=${info.privateRootUnavailable}',
     ];
     // 先写临时文件再改名：脚本可能正好在这一刻去读，
     // 直接覆盖会读到写了一半的内容（脚本会当成解析失败）。
@@ -82,8 +84,9 @@ Future<void> _publishDbLocation() async {
     final target = File(kLocationReportFile);
     if (target.existsSync()) await target.delete();
     await tmp.rename(target.path);
-  } catch (_) {
+  } catch (e) {
     // 写不出来无所谓，只是个提示信息
+    debugPrint('写位置报告失败：$e');
   }
 }
 
@@ -107,20 +110,18 @@ class LightNoteApp extends StatelessWidget {
         Provider<FileDialogs>(create: (_) => FileDialogs.instance),
 
         // ---- 仓储层 ----
-        ProxyProvider<AppDatabase, FolderRepository>(
-          update: (_, db, previous) => previous ?? FolderRepository(db),
+        ProxyProvider<AppDatabase, NotebookRepository>(
+          update: (_, db, previous) => previous ?? NotebookRepository(db),
         ),
         ProxyProvider<AppDatabase, NoteRepository>(
           update: (_, db, previous) => previous ?? NoteRepository(db),
         ),
-        ProxyProvider<AppDatabase, CardRepository>(
-          update: (_, db, previous) => previous ?? CardRepository(db),
+        // 统一搜索：搜索页与 AI 的 searchNotes 工具共用同一个实例
+        ProxyProvider<AppDatabase, SearchService>(
+          update: (_, db, previous) => previous ?? SearchService(db),
         ),
         ProxyProvider<AppDatabase, PreferencesService>(
           update: (_, db, previous) => previous ?? PreferencesService(db),
-        ),
-        ProxyProvider<AppDatabase, MarkdownExportService>(
-          update: (_, db, previous) => previous ?? MarkdownExportService(db),
         ),
         ProxyProvider<AppDatabase, BackupService>(
           update: (_, db, previous) => previous ?? BackupService(db),
@@ -128,6 +129,13 @@ class LightNoteApp extends StatelessWidget {
         ProxyProvider2<AppDatabase, DeepSeekClient, AiRepository>(
           update: (_, db, client, previous) =>
               previous ?? AiRepository(db: db, client: client),
+        ),
+        // FeedRepository 依赖 AiRepository，**必须排在它后面**。
+        // Provider 是惰性解析的：写在前面会在第一次读取时抛
+        // "Could not find the correct Provider<AiRepository>"（实测踩过）。
+        ProxyProvider2<AppDatabase, AiRepository, FeedRepository>(
+          update: (_, db, ai, previous) =>
+              previous ?? FeedRepository(db, ai),
         ),
         ProxyProvider2<AppDatabase, AiRepository, AiChatRepository>(
           update: (_, db, ai, previous) =>
@@ -173,6 +181,11 @@ class _AppShellState extends State<_AppShell> {
       '已从备份恢复：${result.stats.summary}'
       '${result.previousBackupPath == null ? '' : '\n旧数据已留档：${result.previousBackupPath}'}',
       actionLabel: '知道了',
+      // 这条**要保持常驻**：内容里有"旧数据留档在哪个路径"，
+      // 用户可能要照着这个路径去找文件，3 秒自动消失等于没告诉。
+      // LogBar.action 的默认值就是 persist: true，这里显式写出来，
+      // 免得以后有人顺手改成 false。
+      persist: true,
     );
     // 提示只该出现一次
     clearLastImportNote();
@@ -234,6 +247,19 @@ class _StartupGateState extends State<_StartupGate> {
     // 这样失败会在这里被抓住，而不是在某个页面的 StreamBuilder 里炸开。
     final db = context.read<AppDatabase>();
     await db.customSelect('SELECT 1').get();
+
+    // 示例数据必须在**任何页面构建之前**写好。
+    //
+    // 它以前挂在 AI 页的 _bootstrap 里，只有打开 AI 页才写。改动后
+    // 轻笔记页是消费流、要从库里抽卡片，首屏就需要笔记库已存在——
+    // 挂到页面上会让首屏看起来是空的。示例数据属于启动职责。
+    //
+    // 写失败不抛（SeedBootstrap 内部已 try/catch）：宁可空库也要能启动。
+    await SeedBootstrap.run(
+      notes: context.read<NoteRepository>(),
+      notebooks: context.read<NotebookRepository>(),
+      prefs: context.read<PreferencesService>(),
+    );
   }
 
   @override
@@ -319,64 +345,6 @@ class _StartupErrorScreen extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// 底部导航：轻笔记 / 笔记库 / AI / 设置（设计稿 §2）
-///
-/// 第 5 个入口「复习」是从最初需求里的记忆卡片功能来的，
-/// 设计稿没有它，但删掉会丢掉 SM-2 复习这个核心能力，
-/// 所以放在「笔记库」页的入口里，而不是挤进底部导航。
-class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
-
-  @override
-  State<HomeShell> createState() => _HomeShellState();
-}
-
-class _HomeShellState extends State<HomeShell> {
-  int _index = 0;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      // IndexedStack 保留各页滚动位置与输入状态，切标签不会丢失上下文
-      body: IndexedStack(
-        index: _index,
-        children: const [
-          InboxPage(),
-          LibraryPage(),
-          AiPage(),
-          SettingsPage(),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.bolt_outlined),
-            selectedIcon: Icon(Icons.bolt),
-            label: '轻笔记',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.library_books_outlined),
-            selectedIcon: Icon(Icons.library_books),
-            label: '笔记库',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.auto_awesome_outlined),
-            selectedIcon: Icon(Icons.auto_awesome),
-            label: 'AI',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: '设置',
-          ),
-        ],
       ),
     );
   }

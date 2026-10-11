@@ -49,6 +49,21 @@ class TextUtils {
     return '${plain.substring(0, max)}…';
   }
 
+  /// 组装「复制全文」的内容：标题（若有）+ 正文，便于粘到别处。
+  ///
+  /// **只收字符串、不收 `Note`**：这里是纯文本工具，不该反向依赖数据库模型。
+  ///
+  /// > 早先它在 `core/export/markdown_export_service.dart` 里（那个文件同时
+  /// > 管 Markdown 导出）。导出功能删除后只剩这一个函数有用，就搬到这里。
+  static String noteCopyText({
+    required String title,
+    required String content,
+  }) {
+    final t = title.trim();
+    if (t.isEmpty) return content;
+    return '$t\n\n$content';
+  }
+
   /// 中文阅读速度约 300 字/分钟（保守取值，便于估算阅读时长）
   static Duration estimatedReadingTime(int words) {
     final minutes = (words / 300).ceil();
@@ -61,6 +76,56 @@ class TextUtils {
     final h = d.inHours;
     final m = d.inMinutes % 60;
     return m == 0 ? '$h 小时' : '$h 小时 $m 分钟';
+  }
+}
+
+/// 搜索结果里高亮关键词时用的文本切片工具。
+///
+/// 它和 [TextUtils] 一样是纯文本处理，所以放在这里；早先它和 Markdown 导出
+/// 挤在同一个文件里（`core/export/markdown_export_service.dart`），
+/// 导出功能删除后搬了过来。
+class HighlightUtils {
+  HighlightUtils._();
+
+  /// 把文本按关键词切成若干片段，供 RichText 拼装高亮。
+  /// 返回 (片段, 是否命中) 的列表。大小写不敏感。
+  static List<(String, bool)> split(String text, String keyword) {
+    if (keyword.trim().isEmpty) return [(text, false)];
+    final lowerText = text.toLowerCase();
+    final lowerKey = keyword.trim().toLowerCase();
+
+    final out = <(String, bool)>[];
+    var start = 0;
+    while (true) {
+      final idx = lowerText.indexOf(lowerKey, start);
+      if (idx < 0) break;
+      if (idx > start) out.add((text.substring(start, idx), false));
+      out.add((text.substring(idx, idx + lowerKey.length), true));
+      start = idx + lowerKey.length;
+    }
+    if (start < text.length) out.add((text.substring(start), false));
+    return out.isEmpty ? [(text, false)] : out;
+  }
+
+  /// 从正文里截一段包含关键词的上下文，用于结果列表展示
+  static String snippet(String content, String keyword, {int radius = 40}) {
+    final plain = TextUtils.toPlainText(content).replaceAll('\n', ' ');
+    if (keyword.trim().isEmpty) {
+      return plain.length > radius * 2
+          ? '${plain.substring(0, radius * 2)}…'
+          : plain;
+    }
+    final idx = plain.toLowerCase().indexOf(keyword.trim().toLowerCase());
+    if (idx < 0) {
+      return plain.length > radius * 2
+          ? '${plain.substring(0, radius * 2)}…'
+          : plain;
+    }
+    final from = (idx - radius).clamp(0, plain.length);
+    final to = (idx + keyword.length + radius).clamp(0, plain.length);
+    final prefix = from > 0 ? '…' : '';
+    final suffix = to < plain.length ? '…' : '';
+    return '$prefix${plain.substring(from, to)}$suffix';
   }
 }
 
@@ -85,11 +150,3 @@ String formatRelativeTime(DateTime utc, {DateTime? now}) {
   return '${local.year} 年 ${local.month} 月 ${local.day} 日';
 }
 
-/// 复习间隔的人类可读形式
-String formatInterval(int days) {
-  if (days <= 0) return '现在';
-  if (days == 1) return '1 天后';
-  if (days < 30) return '$days 天后';
-  if (days < 365) return '${(days / 30).round()} 个月后';
-  return '${(days / 365).toStringAsFixed(1)} 年后';
-}

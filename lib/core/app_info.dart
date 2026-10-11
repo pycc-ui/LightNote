@@ -19,7 +19,7 @@ const kAppDisplayNameZh = 'LightNote 轻笔记';
 
 /// 版本号。改这里时**必须同步改** pubspec.yaml 的 version，
 /// 以及 windows/runner/Runner.rc 里的版本信息（构建脚本不会自动同步）。
-const kAppVersion = '1.1.0';
+const kAppVersion = '1.0.0';
 
 /// 包名 / applicationId
 const kAppPackageId = 'com.example.smart_notes';

@@ -17,7 +17,29 @@ const kDatabaseFileName = 'qing_notes.sqlite';
 /// 的前提下知道版本号，才能判断一个备份包是否兼容。
 /// **改 `AppDatabase.schemaVersion` 时必须同步改这里**，
 /// 两处不一致会导致"能导入但打不开"。
-const kCurrentSchemaVersion = 1;
+///
+/// 版本历史：
+///   1  初版
+///   2  新增 note_feed_state（笔记消费流）；修正 is_inbox=false 且无笔记库的笔记
+///   3  `folders` 改名 `notebooks` 并**去掉层级**（删 parent_id）；
+///      `notes.folder_id` 改名 `notebook_id`（语义改为"所属笔记库"）
+///   4  新增 note_ai_summaries（每篇笔记的 AI 摘要，持久化）；
+///      同批建的 note_ai_tags 已在 v8 删除
+///   5  新增 feed_reserve（轻笔记跨启动预留：上次留几张给下次秒出）
+///   6  **删除记忆卡片相关表**（card_decks / cards / reviews）——
+///      轻笔记卡片流取代了记忆卡片复习，这三张表已无任何读写方
+///   7  **删除 note_summaries**（「AI 整理要点」的落库表）——
+///      编辑页那个入口已移除；这张表一直只写不读，没有任何界面用它
+///   8  **删除 note_feed_state / note_ai_tags** 两张死表——
+///      前者是卡片流"复习已有笔记"时代的调度状态（改成 AI 生成新卡片后
+///      就不适用了），后者是每篇笔记的 AI 标签（只写不读，卡片上显示的
+///      标签其实来自卡片自己的 `FeedDraft.tags`）
+///   9  **删除 tags / note_tags**（用户手动标签整条链路：写入只有编辑页那个
+///      弹窗，读取只有它自己 + Markdown 导出里一行 `> 标签：`，产品确认不要）；
+///      并改名两张表：`note_ai_summaries` → `ai_note_summaries`（跟同族的
+///      ai_calls / ai_conversations 对齐）、`settings` → `app_kv`
+///      （它 10 个 key 里有 6 个不是"设置"）
+const kCurrentSchemaVersion = 11;
 
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';
@@ -208,9 +230,14 @@ class DatabaseLocation {
       final err = probeWritable(candidate.dir);
       if (err == null) {
         if (failures.isNotEmpty) {
+          final detail = failures.join('\n  · ');
+          // 记下来供设置页展示「为什么没落在常规位置」。
+          // 注意**不能只在最后 throw 时记录**：退到程序目录这种情况
+          // 是正常 return 的，不记的话警告里就没有原因可讲。
+          _privateRootFailureNote = detail;
           // ignore: avoid_print
           print('[LightNote] 私有目录降级为「${candidate.label}」：'
-              '${candidate.dir.path}\n  之前失败：${failures.join(' | ')}');
+              '${candidate.dir.path}\n  之前失败：$detail');
         }
         return _privateRoot = candidate.dir;
       }
@@ -220,9 +247,10 @@ class DatabaseLocation {
     // 连临时目录都不试：临时目录会被系统清理，
     // 把用户的笔记库放进去等于埋一个"过几天数据没了"的定时炸弹。
     // 明确报错比静默丢数据好。
+    final detail = failures.map((f) => '  · $f').join('\n');
+    _privateRootFailureNote = detail;
     throw StateError(
-      '找不到可写的私有数据目录，已尝试：\n'
-      '${failures.map((f) => '  · $f').join('\n')}\n'
+      '找不到可写的私有数据目录，已尝试：\n$detail\n'
       '请检查磁盘空间与安全软件设置。',
     );
   }
@@ -475,20 +503,34 @@ class DatabaseLocation {
 
     final isPrivate = priv != null && p.equals(active.path, priv.path);
     final isFallback = configured != null && !p.equals(active.path, configured);
+
+    // 「退到程序目录」是比 isFallback 更严重的一种情况，而且**判定不能挂在
+    // isFallback 上**：没配置工作目录（configured == null）时 isFallback 为 false，
+    // 但私有目录全不可用、最终落到 build\ 下面同样是危险状态。
+    // 之前绑在一起，导致设置首页把这种情况显示成普通的「自定义目录」，
+    // 丢失了"数据在 build\ 里、删 build 就没了"这个关键警告。
+    final degradedToProgramDir = isFallbackToProgramDir(active);
+
+    // 退化时把"为什么其他位置都不行"讲清楚；否则退回给 isFallback 的原因
+    final degradeNote = degradedToProgramDir
+        ? (lastFallbackNote ?? _privateRootFailureNote ?? '常规位置均不可写')
+        : (isFallback ? lastFallbackNote : null);
+
     return DatabaseLocationInfo(
       activeDir: active.path,
       configuredDir: configured,
       isPrivate: isPrivate,
       isFallback: isFallback,
-      // 只有"配置了工作目录却没生效"才叫降级。
-      // 环境变量覆盖是调试手段，不该出现在正常用户的界面上。
       fallbackNote: isFallback ? lastFallbackNote : null,
       isEnvOverridden: hasEnvOverride && !isPrivate,
       privateRootUnavailable: priv == null,
-      isDegradedToProgramDir: isFallbackToProgramDir(active),
-      degradedNote: isFallback ? lastFallbackNote : null,
+      isDegradedToProgramDir: degradedToProgramDir,
+      degradedNote: degradeNote,
     );
   }
+
+  /// 私有根目录解析失败时的原因（由 [privateRoot] 记录）。
+  static String? _privateRootFailureNote;
 
   /// 判断是否降级到了「程序所在目录」（最后兜底，在 build\ 下面）。
   ///

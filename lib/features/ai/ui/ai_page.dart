@@ -2,21 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/db/app_database.dart';
-import '../../../core/seed/seed_data.dart';
 import '../../../core/theme/dimens.dart';
-import '../../../core/ui/log_bar.dart';
-import '../../../services/preferences_service.dart';
-import '../../folders/data/folder_repository.dart';
-import '../../notes/data/note_repository.dart';
-import '../../notes/ui/widgets/folder_picker.dart';
+import '../../../core/widgets/log_bar.dart';
+import '../../note/data/notebook_repository.dart';
+import 'workspace_sheet.dart';
 import '../domain/ai_chat_repository.dart';
+import '../domain/agent_workspace.dart';
+import '../domain/ask_resolver.dart';
+import '../domain/ask_user.dart';
+import 'agent_dialogs.dart';
 
 /// AI 页（设计稿 §5.6 / 线框图 4.6）。
 ///
 /// 设计稿要求「MVP 只做界面占位、不自动上传」。这里做了两件事：
 ///   1. 接上真实 DeepSeek 调用（这是你最初的核心需求）；
-///   2. 保留设计稿的隐私约束——首次使用必须显式授权，
-///      且每次只发送用户**显式选中**的笔记，不做全库上传。
+///   2. 每次只发送用户**显式选中**的笔记，不做全库上传。
 class AiPage extends StatefulWidget {
   const AiPage({super.key});
 
@@ -29,10 +29,16 @@ class _AiPageState extends State<AiPage> {
   final _scrollController = ScrollController();
 
   String? _conversationId;
-  String? _workspaceFolderId;
+  /// 工作区：AI 能看到哪些笔记（三态：不选择 / 全体空间 / 选择目录）
+  AgentWorkspace _workspace = AgentWorkspace.none;
+
+  /// 工作区的显示名。**缓存成字段**：它要从库里查笔记库名，
+  /// 而 `build` 里不能 await。改动工作区时调 `_refreshWorkspaceLabel`。
+  String _workspaceLabelText = '未选择';
+
+  String get _workspaceLabel => _workspaceLabelText;
 
   /// 工作区名称缓存，避免每次 build 都查库
-  String? _workspaceName;
 
   /// 思考强度：low / medium / high
   String _effort = 'medium';
@@ -41,8 +47,6 @@ class _AiPageState extends State<AiPage> {
   final Set<String> _selectedNoteIds = {};
 
   bool _sending = false;
-  bool _privacyAccepted = true; // 先假设已授权，读取后修正，避免闪一下弹窗
-  bool _privacyChecked = false;
 
   @override
   void initState() {
@@ -60,28 +64,25 @@ class _AiPageState extends State<AiPage> {
   Future<void> _bootstrap() async {
     final repo = context.read<AiChatRepository>();
 
-    // 依赖显式取出后再传，不要写 `SeedData.ensureSeeded(context.read())`：
-    // 不带类型参数的 context.read() 返回的是 BuildContext 本身，
-    // 会抛 ProviderNotFoundException（这个 bug 已在真机启动时暴露过一次）。
-    await SeedData.ensureSeeded(
-      notes: context.read<NoteRepository>(),
-      folders: context.read<FolderRepository>(),
-      prefs: context.read<PreferencesService>(),
-    );
-    if (!mounted) return;
+    // 注意：示例数据（SeedData）**不在这里**写了。
+    // 它已经挪到启动阶段（见 lib/app/seed_bootstrap.dart），
+    // 原因是轻笔记页改成消费流后需要"库里已有笔记库"才能抽出卡片，
+    // 而原先只有打开 AI 页才灌示例数据 —— 首屏会看起来是空的。
 
-    final accepted = await repo.hasPrivacyConsent();
     if (!mounted) return;
 
     final conversations = await repo.watchConversations().first;
     if (!mounted) return;
 
     setState(() {
-      _privacyAccepted = accepted;
-      _privacyChecked = true;
       if (conversations.isNotEmpty) {
         _conversationId = conversations.first.id;
-        _workspaceFolderId = conversations.first.workspaceFolderId;
+    // 进页面就查一次挂起：重开 App 时要能直接看到「AI 在等你回答」
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshPendingAsk();
+    });
+    _workspace = AgentWorkspace.parse(conversations.first.workspaceScope);
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _refreshWorkspaceLabel(); });
         _effort = conversations.first.thinkingEffort;
       }
     });
@@ -90,21 +91,72 @@ class _AiPageState extends State<AiPage> {
   Future<String> _ensureConversation() async {
     if (_conversationId != null) return _conversationId!;
     final conv = await context.read<AiChatRepository>().createConversation(
-          workspaceFolderId: _workspaceFolderId,
           thinkingEffort: _effort,
         );
     if (mounted) setState(() => _conversationId = conv.id);
     return conv.id;
   }
 
+  /// 会话里正在等回答的提问（null = 没有）。
+  ///
+  /// 存成状态是为了**显示一条提示**：光把挂起落库还不够 ——
+  /// 用户重开 App 之后如果什么提示都没有，他根本不知道 AI 在等他，
+  /// 得先随便发一句话才会弹出来。那就不叫"随时回答"了。
+  PendingAsk? _pendingAsk;
+
+
+  /// 查一次"有没有待回答的提问"。
+  Future<void> _refreshPendingAsk() async {
+    final id = _conversationId;
+    if (id == null) {
+      if (mounted) setState(() => _pendingAsk = null);
+      return;
+    }
+    final p = await context.read<AiChatRepository>().pendingAsk(id);
+    if (!mounted) return;
+    setState(() => _pendingAsk = p);
+  }
+
+  /// 会话里有没有"等你回答"的提问？有就弹出来。
+  ///
+  /// ## 为什么从**数据库**查而不是看内存
+  ///
+  /// 挂起状态存在 `ai_messages.pendingAction` 里，所以**杀掉 App 重开之后**
+  /// 也照样能接着答 —— 这正是 §9.5 选"持久化挂起"而不是"超时返回"的原因。
+  /// 看内存的话重启就丢了，用户永远答不上那个问题。
+  ///
+  /// 发送**前后各调一次**：
+  ///   · 之前 —— 恢复上次没答完的（可能已经隔了好几天）
+  ///   · 之后 —— AI 刚问的，立刻弹出来，不用用户自己找
+  Future<void> _answerPendingIfAny(String convId) async {
+    final chat = context.read<AiChatRepository>();
+    final pending = await chat.pendingAsk(convId);
+    if (pending == null || !mounted) return;
+
+    // 选项由 App **现查**：库里 200 条笔记时模型塞不进 prompt，
+    // 而且它给的清单会变旧（可能包含已删除的 id）
+    final options =
+        await AskResolver(context.read<AppDatabase>()).resolve(pending.request);
+    if (!mounted) return;
+
+    final result = await showAskSheet(context, pending.request, options);
+    if (!mounted) return;
+
+    setState(() => _pendingAsk = null);
+    await chat.answerAsk(
+      conversationId: convId,
+      result: result,
+      thinkingEffort: _effort,
+      thinkingEnabled: _effort != 'low',
+    );
+    // 回答之后可能又问了新的一句 —— 刷新提示条
+    if (mounted) await _refreshPendingAsk();
+  }
+
   @override
   Widget build(BuildContext context) {
     final repo = context.read<AiChatRepository>();
     final theme = Theme.of(context);
-
-    if (!_privacyChecked) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
 
     return Scaffold(
       appBar: AppBar(
@@ -124,7 +176,6 @@ class _AiPageState extends State<AiPage> {
       ),
       body: Column(
         children: [
-          if (!_privacyAccepted) _PrivacyBanner(onAccept: _acceptPrivacy),
           Expanded(
             child: _conversationId == null
                 ? const _LogoView()
@@ -144,12 +195,18 @@ class _AiPageState extends State<AiPage> {
             selectedCount: _selectedNoteIds.length,
             onClear: () => setState(() => _selectedNoteIds.clear()),
           ),
+          // 「AI 在等你回答」——重启 App 之后也要看得到，
+          // 否则用户不知道要回答什么，对话就永远停在那儿
+          if (_pendingAsk != null)
+            _PendingAskBanner(
+              question: _pendingAsk!.request.question,
+              onTap: () => _answerPendingIfAny(_conversationId!),
+            ),
           _Composer(
             controller: _inputController,
             workspaceLabel: _workspaceLabel,
             effort: _effort,
             sending: _sending,
-            enabled: _privacyAccepted,
             onPickWorkspace: _pickWorkspace,
             onPickEffort: _pickEffort,
             onAttach: _showAttachMenu,
@@ -162,19 +219,9 @@ class _AiPageState extends State<AiPage> {
     );
   }
 
-  String get _workspaceLabel {
-    if (_workspaceFolderId == null) return '未选择';
-    return _workspaceName ?? '已选择';
-  }
-
-  Future<void> _acceptPrivacy() async {
-    await context.read<AiChatRepository>().acceptPrivacy();
-    if (mounted) setState(() => _privacyAccepted = true);
-  }
 
   Future<void> _newConversation() async {
     final conv = await context.read<AiChatRepository>().createConversation(
-          workspaceFolderId: _workspaceFolderId,
           thinkingEffort: _effort,
         );
     if (!mounted) return;
@@ -226,7 +273,11 @@ class _AiPageState extends State<AiPage> {
                       Navigator.pop(ctx);
                       setState(() {
                         _conversationId = c.id;
-                        _workspaceFolderId = c.workspaceFolderId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshPendingAsk();
+    });
+    _workspace = AgentWorkspace.parse(c.workspaceScope);
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _refreshWorkspaceLabel(); });
                         _effort = c.thinkingEffort;
                         _selectedNoteIds.clear();
                       });
@@ -240,30 +291,37 @@ class _AiPageState extends State<AiPage> {
     );
   }
 
+  /// 选工作区：**不选择 / 全体空间 / 选择目录**。
+  ///
+  /// 第三种要能多选笔记库、并且单独决定要不要带上「我的轻笔记」，
+  /// 所以不走通用的单库选择器（那个只返回一个 id）。
   Future<void> _pickWorkspace() async {
-    final folderId = await showFolderPicker(
-      context,
-      title: '选择工作区',
-      currentFolderId: _workspaceFolderId,
-      allowRemoveFromFolder: true,
-    );
-    if (folderId == null || !mounted) return;
+    final picked = await showWorkspaceSheet(context, current: _workspace);
+    if (picked == null || !mounted) return;
 
-    final next = folderId == kRemoveFromFolder ? null : folderId;
-    String? name;
-    if (next != null) {
-      name = (await context.read<FolderRepository>().byId(next))?.name;
-    }
-    if (!mounted) return;
-
-    setState(() {
-      _workspaceFolderId = next;
-      _workspaceName = name;
-    });
+    setState(() => _workspace = picked);
+    await _refreshWorkspaceLabel();
 
     if (_conversationId != null) {
-      await context.read<AiChatRepository>().setWorkspace(_conversationId!, next);
+      await context
+          .read<AiChatRepository>()
+          .setWorkspace(_conversationId!, picked);
     }
+  }
+
+  /// 刷新工作区的显示名。
+  ///
+  /// 名字是**现查**的：笔记库被删掉之后，标签里不该还留着一个 uuid。
+  Future<void> _refreshWorkspaceLabel() async {
+    final ws = _workspace;
+    if (ws.mode == WorkspaceMode.none) {
+      if (mounted) setState(() => _workspaceLabelText = '未选择');
+      return;
+    }
+    final all = await context.read<NotebookRepository>().all();
+    if (!mounted) return;
+    final byId = {for (final n in all) n.id: n.name};
+    setState(() => _workspaceLabelText = ws.label((id) => byId[id]));
   }
 
   Future<void> _pickEffort() async {
@@ -325,9 +383,9 @@ class _AiPageState extends State<AiPage> {
               onTap: () => Navigator.pop(ctx, 'file'),
             ),
             ListTile(
-              leading: const Icon(Icons.folder_outlined),
-              title: const Text('选择目录'),
-              subtitle: const Text('把某个目录设为工作区'),
+              leading: const Icon(Icons.library_books_outlined),
+              title: const Text('选择笔记库'),
+              subtitle: const Text('把某个笔记库设为工作区'),
               onTap: () => Navigator.pop(ctx, 'folder'),
             ),
           ],
@@ -344,7 +402,7 @@ class _AiPageState extends State<AiPage> {
 
   Future<void> _pickFiles() async {
     final repo = context.read<AiChatRepository>();
-    final candidates = await repo.candidateNotes(_workspaceFolderId);
+    final candidates = await repo.candidateNotes(_workspace);
     if (!mounted) return;
 
     if (candidates.isEmpty) {
@@ -434,27 +492,56 @@ class _AiPageState extends State<AiPage> {
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if (text.isEmpty || _sending) return;
-    if (!_privacyAccepted) {
-      LogBar.info(context, '请先阅读并同意上方的数据说明');
-      return;
-    }
-
     setState(() => _sending = true);
     _inputController.clear();
 
+    // 把「写操作要用户点头」这条通道接上。
+    //
+    // **必须在每次发送前设置**：它闭包住了本页的 `context`，
+    // 而 AI 页是可以被重建的。没接上的话执行器会拒绝**全部**写操作
+    //（fail closed，见 `ToolExecutor`）。
+    context.read<AiChatRepository>().onConfirm =
+        (req) => showToolConfirm(context, req);
+
     try {
       final convId = await _ensureConversation();
-      await context.read<AiChatRepository>().send(
+
+      // 先把上次没答完的问题答掉 —— 挂起是持久化的，可能已经隔了好几天
+      await _answerPendingIfAny(convId);
+      if (!mounted) return;
+
+      final chat = context.read<AiChatRepository>();
+      await chat.send(
             conversationId: convId,
             userInput: text,
             contextNoteIds: _selectedNoteIds.toList(growable: false),
-            workspaceFolderId: _workspaceFolderId ?? '',
             // 思考强度用 low/medium/high；只有「中」以上才真正开启思考模式，
             // 因为 DeepSeek 思考模式默认开启且 effort 默认 high，
             // 轻量问答开着它纯属浪费
             thinkingEffort: _effort,
             thinkingEnabled: _effort != 'low',
           );
+
+      // AI 可能改过东西 → 给一个**可撤销**的提示条。
+      //
+      // ⚠️ 用 `mounted` 挡住：弹确认层之后这个页面可能已经被销毁了，
+      // 那时拿 context 去显示提示条会抛。
+      if (mounted && chat.undoable != null) {
+        final u = chat.undoable!;
+        LogBar.action(
+          context,
+          '已修改《${u.title.trim().isEmpty ? '无标题' : u.title}》',
+          actionLabel: '撤销',
+          onAction: () async {
+            final id = await chat.undoLast();
+            if (!mounted) return;
+            LogBar.success(context, id == null ? '没有可撤销的修改' : '已撤销');
+          },
+        );
+      }
+
+      // AI 刚问了什么 → 立刻弹出来，别让用户自己去找
+      if (mounted) await _answerPendingIfAny(convId);
     } catch (e) {
       if (mounted) {
         LogBar.error(context, '发送失败：$e');
@@ -475,53 +562,6 @@ class _AiPageState extends State<AiPage> {
   }
 }
 
-class _PrivacyBanner extends StatelessWidget {
-  const _PrivacyBanner({required this.onAccept});
-
-  final VoidCallback onAccept;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      color: theme.colorScheme.secondaryContainer,
-      padding: const EdgeInsets.all(AppSpacing.md),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.privacy_tip_outlined, size: 18),
-              const SizedBox(width: AppSpacing.sm),
-              Text(
-                '数据说明',
-                style: theme.textTheme.titleSmall
-                    ?.copyWith(fontWeight: FontWeight.w700),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          Text(
-            '笔记默认只存在本机。当你在这里发送指令时：\n'
-            '· 只会发送你**显式勾选**的笔记内容，不会上传整个笔记库；\n'
-            '· 未勾选任何笔记时，只发送你输入的指令本身；\n'
-            '· 内容会发送给 DeepSeek 用于生成回复，需在设置中配置你自己的 API Key。',
-            style: theme.textTheme.bodySmall?.copyWith(height: 1.6),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton(
-              onPressed: onAccept,
-              child: const Text('我已了解，开始使用'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _LogoView extends StatelessWidget {
   const _LogoView();
@@ -662,13 +702,65 @@ class _ContextBar extends StatelessWidget {
   }
 }
 
+/// 「AI 在等你回答」的提示条。
+///
+/// 为什么需要一个**常驻提示**而不是弹一次就算了：挂起是持久化的，
+/// 用户可能隔一天才回来 —— 那时弹窗早没了。提示条一直在，
+/// 他点一下就继续；不点也不挡着他看历史。
+class _PendingAskBanner extends StatelessWidget {
+  const _PendingAskBanner({required this.question, required this.onTap});
+
+  final String question;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.tertiaryContainer,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.sm,
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.help_outline,
+                  size: 18, color: theme.colorScheme.onTertiaryContainer),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  question,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onTertiaryContainer,
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                '回答',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: theme.colorScheme.onTertiaryContainer,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
     required this.workspaceLabel,
     required this.effort,
     required this.sending,
-    required this.enabled,
     required this.onPickWorkspace,
     required this.onPickEffort,
     required this.onAttach,
@@ -679,7 +771,6 @@ class _Composer extends StatelessWidget {
   final String workspaceLabel;
   final String effort;
   final bool sending;
-  final bool enabled;
   final VoidCallback onPickWorkspace;
   final VoidCallback onPickEffort;
   final VoidCallback onAttach;
@@ -761,7 +852,7 @@ class _Composer extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               IconButton(
-                tooltip: '选择文件 / 目录',
+                tooltip: '选择文件 / 笔记库',
                 onPressed: onAttach,
                 icon: const Icon(Icons.add_circle_outline),
               ),
@@ -770,7 +861,6 @@ class _Composer extends StatelessWidget {
                   controller: controller,
                   minLines: 1,
                   maxLines: 4,
-                  enabled: enabled,
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => onSend(),
                   decoration: const InputDecoration(
@@ -782,7 +872,7 @@ class _Composer extends StatelessWidget {
               const SizedBox(width: AppSpacing.sm),
               IconButton.filled(
                 tooltip: '发送',
-                onPressed: (sending || !enabled) ? null : onSend,
+                onPressed: sending ? null : onSend,
                 icon: sending
                     ? const SizedBox(
                         width: 16,

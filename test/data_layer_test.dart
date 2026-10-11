@@ -9,12 +9,9 @@ import 'package:smart_notes/core/db/app_database.dart';
 import 'package:smart_notes/core/db/models.dart';
 import 'package:smart_notes/core/util/text_utils.dart';
 import 'package:smart_notes/features/ai/domain/prompts.dart';
-import 'package:smart_notes/features/cards/domain/card_repository.dart';
-import 'package:smart_notes/features/cards/domain/review_scheduler.dart';
-import 'package:smart_notes/features/folders/data/folder_repository.dart';
-import 'package:smart_notes/features/notes/data/note_repository.dart';
-import 'package:smart_notes/services/markdown_export_service.dart';
-import 'package:smart_notes/services/preferences_service.dart';
+import 'package:smart_notes/features/note/data/notebook_repository.dart';
+import 'package:smart_notes/features/note/data/note_repository.dart';
+import 'package:smart_notes/core/prefs/preferences_service.dart';
 
 void main() {
   group('TextUtils', () {
@@ -121,108 +118,6 @@ void main() {
       expect(s.endsWith('…'), isTrue);
     });
   });
-
-  group('ReviewScheduler（SM-2）', () {
-    const scheduler = ReviewScheduler();
-    final base = DateTime.utc(2026, 3, 1, 10);
-
-    test('第一次答对：间隔 1 天，EF 不变', () {
-      final r = scheduler.schedule(
-        grade: ReviewGrade.good,
-        ease: 2.5,
-        intervalDays: 0,
-        repetitions: 0,
-        lapses: 0,
-        now: base,
-      );
-      expect(r.intervalDays, 1);
-      expect(r.repetitions, 1);
-      expect(r.ease, closeTo(2.5, 0.0001));
-    });
-
-    test('第二次答对固定 6 天', () {
-      final r = scheduler.schedule(
-        grade: ReviewGrade.good,
-        ease: 2.5,
-        intervalDays: 1,
-        repetitions: 1,
-        lapses: 0,
-        now: base,
-      );
-      expect(r.intervalDays, 6);
-    });
-
-    test('第三次起按 EF 增长：6 × 2.5 = 15', () {
-      final r = scheduler.schedule(
-        grade: ReviewGrade.good,
-        ease: 2.5,
-        intervalDays: 6,
-        repetitions: 2,
-        lapses: 0,
-        now: base,
-      );
-      expect(r.intervalDays, 15);
-    });
-
-    test('忘记了：重置为 1 天、reps 归零、lapses +1、EF 下调', () {
-      final r = scheduler.schedule(
-        grade: ReviewGrade.forgot,
-        ease: 2.5,
-        intervalDays: 30,
-        repetitions: 5,
-        lapses: 2,
-        now: base,
-      );
-      expect(r.intervalDays, 1);
-      expect(r.repetitions, 0);
-      expect(r.lapses, 3);
-      expect(r.ease, closeTo(1.96, 0.0001));
-    });
-
-    test('EF 被钳制在 [1.3, 2.8]', () {
-      var low = 1.35;
-      var high = 2.75;
-      for (var i = 0; i < 10; i++) {
-        low = scheduler
-            .schedule(
-              grade: ReviewGrade.forgot,
-              ease: low,
-              intervalDays: 1,
-              repetitions: 0,
-              lapses: 0,
-              now: base,
-            )
-            .ease;
-        high = scheduler
-            .schedule(
-              grade: ReviewGrade.easy,
-              ease: high,
-              intervalDays: 1,
-              repetitions: 1,
-              lapses: 0,
-              now: base,
-            )
-            .ease;
-      }
-      expect(low, closeTo(ReviewGrade.minEase, 0.0001));
-      expect(high, closeTo(ReviewGrade.maxEase, 0.0001));
-    });
-
-    test('到期时间是「当前时刻 + 间隔」而非当天零点', () {
-      final now = DateTime.utc(2026, 3, 1, 23, 30);
-      final r = scheduler.schedule(
-        grade: ReviewGrade.good,
-        ease: 2.5,
-        intervalDays: 6,
-        repetitions: 2,
-        lapses: 0,
-        now: now,
-      );
-      expect(r.dueAt.hour, 23);
-      expect(r.dueAt.difference(now).inDays, r.intervalDays);
-    });
-  });
-
   // ==========================================================================
   // 数据层集成测试（内存 SQLite，不依赖设备）
   // ==========================================================================
@@ -230,15 +125,13 @@ void main() {
   group('数据层', () {
     late AppDatabase db;
     late NoteRepository notes;
-    late FolderRepository folders;
-    late CardRepository cards;
+    late NotebookRepository notebooks;
     late PreferencesService prefs;
 
     setUp(() {
       db = AppDatabase.forTesting(NativeDatabase.memory());
       notes = NoteRepository(db);
-      folders = FolderRepository(db);
-      cards = CardRepository(db);
+      notebooks = NotebookRepository(db);
       prefs = PreferencesService(db);
     });
 
@@ -249,13 +142,13 @@ void main() {
     test('新建轻笔记进收件箱，新建目录笔记进笔记库', () async {
       final quick = await notes.createInbox(title: '速记', content: '随手记');
       expect(quick.isInbox, isTrue);
-      expect(quick.folderId, isNull);
+      expect(quick.notebookId, isNull);
 
-      final folder = await folders.create(name: '工作笔记');
+      final folder = await notebooks.create(name: '工作笔记');
       final formal =
-          await notes.createInFolder(folder.id, title: '正式', content: '内容');
+          await notes.createInNotebook(folder.id, title: '正式', content: '内容');
       expect(formal.isInbox, isFalse);
-      expect(formal.folderId, folder.id);
+      expect(formal.notebookId, folder.id);
 
       expect((await notes.watchInbox().first).map((n) => n.id), [quick.id]);
       expect((await notes.watchLibrary().first).map((n) => n.id), [formal.id]);
@@ -263,26 +156,26 @@ void main() {
 
     test('加入笔记库：isInbox 变 false 且归属目录', () async {
       final note = await notes.createInbox(content: '待归档');
-      final folder = await folders.create(name: '灵感收集');
+      final folder = await notebooks.create(name: '灵感收集');
 
-      await notes.moveToFolder(note.id, folder.id);
+      await notes.moveToNotebook(note.id, folder.id);
 
       final updated = (await notes.byId(note.id))!;
       expect(updated.isInbox, isFalse);
-      expect(updated.folderId, folder.id);
+      expect(updated.notebookId, folder.id);
       expect((await notes.watchInbox().first), isEmpty);
-      expect((await notes.watchInFolder(folder.id).first).length, 1);
+      expect((await notes.watchNotesInNotebook(folder.id).first).length, 1);
     });
 
-    test('移回轻笔记：folderId 清空且 isInbox 恢复', () async {
-      final folder = await folders.create(name: 'X');
-      final note = await notes.createInFolder(folder.id, content: 'c');
+    test('移回轻笔记：notebookId 清空且 isInbox 恢复', () async {
+      final folder = await notebooks.create(name: 'X');
+      final note = await notes.createInNotebook(folder.id, content: 'c');
 
       await notes.moveToInbox(note.id);
 
       final updated = (await notes.byId(note.id))!;
       expect(updated.isInbox, isTrue);
-      expect(updated.folderId, isNull);
+      expect(updated.notebookId, isNull);
     });
 
     test('保存正文同步更新 excerpt 与 wordCount', () async {
@@ -309,69 +202,69 @@ void main() {
     // ---- 目录 ----
 
     test('删除目录不删笔记，笔记回到轻笔记', () async {
-      final folder = await folders.create(name: '临时目录');
-      final a = await notes.createInFolder(folder.id, content: 'A');
-      final b = await notes.createInFolder(folder.id, content: 'B');
+      final folder = await notebooks.create(name: '临时目录');
+      final a = await notes.createInNotebook(folder.id, content: 'A');
+      final b = await notes.createInNotebook(folder.id, content: 'B');
 
-      await folders.softDelete(folder.id);
+      await notebooks.softDelete(folder.id);
 
       // 目录消失
-      expect((await folders.all()).any((f) => f.id == folder.id), isFalse);
+      expect((await notebooks.all()).any((f) => f.id == folder.id), isFalse);
       // 笔记还在，且回到收件箱
       final a2 = (await notes.byId(a.id))!;
       final b2 = (await notes.byId(b.id))!;
       expect(a2.deletedAt, isNull);
       expect(b2.deletedAt, isNull);
       expect(a2.isInbox, isTrue);
-      expect(a2.folderId, isNull);
+      expect(a2.notebookId, isNull);
       expect((await notes.watchInbox().first).length, 2);
     });
 
-    test('删除父目录时子目录上浮为顶层', () async {
-      final parent = await folders.create(name: '父');
-      final child = await folders.create(name: '子', parentId: parent.id);
+    // 笔记库是**平铺**的：去掉了 parent_id，不能有子笔记库。
+    // 原先这里有三条测试（子目录上浮、buildTree 组层级）——它们测的是
+    // 已被移除的能力。删掉，换成验证"确实没有层级"。
+    test('删除一个笔记库不影响其他笔记库', () async {
+      final a = await notebooks.create(name: 'A');
+      final b = await notebooks.create(name: 'B');
 
-      await folders.softDelete(parent.id);
+      await notebooks.softDelete(a.id);
 
-      final childAfter = (await folders.byId(child.id))!;
-      expect(childAfter.parentId, isNull);
-      expect(childAfter.deletedAt, isNull);
+      final rest = await notebooks.all();
+      expect(rest.map((n) => n.id), [b.id]);
+      expect((await notebooks.byId(a.id))!.deletedAt, isNotNull);
     });
 
-    test('重命名目录会 trim 空白', () async {
-      final f = await folders.create(name: '原名');
-      await folders.rename(f.id, '  新名  ');
-      expect((await folders.byId(f.id))!.name, '新名');
+    test('笔记库列表是平的：没有嵌套结构可用', () async {
+      await notebooks.create(name: '甲');
+      await notebooks.create(name: '乙');
+      await notebooks.create(name: '丙');
+
+      final all = await notebooks.all();
+      expect(all.length, 3);
+      // 每个都是独立一行，没有 children 之类的层级字段
+      expect(all.map((n) => n.name).toSet(), {'甲', '乙', '丙'});
     });
 
-    test('buildTree 正确组层级并计算深度', () async {
-      final root = await folders.create(name: '根');
-      final child = await folders.create(name: '子', parentId: root.id);
-      await folders.create(name: '孙', parentId: child.id);
-
-      final all = await folders.all();
-      final tree = FolderRepository.buildTree(all, const {});
-      expect(tree.length, 1);
-      expect(tree.first.depth, 0);
-      expect(tree.first.children.length, 1);
-      expect(tree.first.children.first.depth, 1);
-      expect(tree.first.children.first.children.first.depth, 2);
+    test('重命名笔记库会 trim 空白', () async {
+      final f = await notebooks.create(name: '原名');
+      await notebooks.rename(f.id, '  新名  ');
+      expect((await notebooks.byId(f.id))!.name, '新名');
     });
 
     // ---- 搜索 ----
 
     test('搜索命中标题与正文', () async {
-      await notes.createLibrary(title: 'Flutter 学习', content: '无关内容');
-      await notes.createLibrary(title: '无关', content: '正文里有 Flutter');
-      await notes.createLibrary(title: '无关', content: '什么都搜不到');
+      await notes.createInbox(title: 'Flutter 学习', content: '无关内容');
+      await notes.createInbox(title: '无关', content: '正文里有 Flutter');
+      await notes.createInbox(title: '无关', content: '什么都搜不到');
 
       final hit = await notes.search('Flutter').first;
       expect(hit.length, 2);
     });
 
     test('搜索关键词里的 % 与 _ 被当字面量而非通配符', () async {
-      await notes.createLibrary(title: '完成度 100%', content: 'a');
-      await notes.createLibrary(title: '完全无关', content: 'b');
+      await notes.createInbox(title: '完成度 100%', content: 'a');
+      await notes.createInbox(title: '完全无关', content: 'b');
 
       // 若不转义，"100%" 会因为 % 通配而匹配到别的记录
       final hit = await notes.search('100%').first;
@@ -383,72 +276,17 @@ void main() {
     });
 
     test('搜索已删除笔记不会返回', () async {
-      final n = await notes.createLibrary(title: '唯一关键词', content: 'x');
+      final n = await notes.createInbox(title: '唯一关键词', content: 'x');
       await notes.softDelete(n.id);
       expect(await notes.search('唯一关键词').first, isEmpty);
     });
 
     // ---- 标签 ----
-
-    test('标签复用：大小写与空格归一化后不重复创建', () async {
-      final id1 = await db.ensureTag('t1', 'Flutter');
-      final id2 = await db.ensureTag('t2', '  flutter  ');
-      expect(id1, id2);
-      expect((await db.watchTags().first).length, 1);
-    });
-
-    test('重复关联同一标签不重复增加 usageCount', () async {
-      final note = await notes.createLibrary(content: 'c');
-      await notes.addTag(note.id, '测试');
-      await notes.addTag(note.id, '测试');
-
-      final tags = await db.watchTags().first;
-      expect(tags.length, 1);
-      expect(tags.first.usageCount, 1);
-    });
-
-    // ---- 卡片 ----
-
-    test('复习一次同时写入卡片状态与流水', () async {
-      final note = await notes.createLibrary(content: 'c');
-      await cards.createCard(question: 'Q', answer: 'A', noteId: note.id);
-      final card = (await cards.cardsOfNote(note.id)).first;
-
-      await cards.review(
-        card: card,
-        grade: ReviewGrade.good,
-        elapsedMs: 1500,
-      );
-
-      final after = (await cards.cardsOfNote(note.id)).first;
-      expect(after.repetitions, 1);
-      expect(after.reviewCount, 1);
-      expect(after.intervalDays, 1);
-
-      final reviews = await db.select(db.reviews).get();
-      expect(reviews.length, 1);
-      expect(reviews.first.quality, ReviewGrade.good.quality);
-      expect(reviews.first.easeBefore, 2.5);
-    });
-
-    test('今日待复习：新卡受上限约束，未到期的不进队列', () async {
-      final note = await notes.createLibrary(content: 'c');
-      for (var i = 0; i < 20; i++) {
-        await cards.createCard(question: 'Q$i', answer: 'A$i', noteId: note.id);
-      }
-      final due = await db.watchDueCards(newCardLimit: 5).first;
-      expect(due.length, 5);
-      expect(due.map((c) => c.question).toList(),
-          ['Q0', 'Q1', 'Q2', 'Q3', 'Q4']);
-    });
-
-    test('暂停的卡片不进复习队列', () async {
-      final note = await notes.createLibrary(content: 'c');
-      final id =
-          await cards.createCard(question: 'Q', answer: 'A', noteId: note.id);
-      await cards.setSuspended(id, true);
-      expect(await db.watchDueCards().first, isEmpty);
-    });
+    //
+    // 「用户手动标签」整条链路（`tags` / `note_tags` 两张表、`ensureTag` /
+    // `attachTag` / `detachTag` / `watchTags` / `tagsOf`）已在 schema v9 删除，
+    // 原有的两条标签用例（复用归一化、usageCount 不重复累加）随之移除。
+    // 卡片级标签还活着，见 `ai_asset_test.dart` 的「标签规整」。
 
     // ---- 会话与设置 ----
 
@@ -514,75 +352,40 @@ void main() {
       expect(await prefs.isSeeded('x'), isTrue);
     });
 
-    test('清空 AI 历史不影响笔记/目录/卡片', () async {
-      final f = await folders.create(name: '目录');
-      final n = await notes.createInFolder(f.id, content: 'c');
-      await cards.createCard(question: 'Q', answer: 'A', noteId: n.id);
-      await db.insertSummary(NoteSummariesCompanion.insert(
-        id: 's1',
-        noteId: n.id,
+    test('清空 AI 历史不影响笔记与笔记库', () async {
+      final f = await notebooks.create(name: '笔记库');
+      await notes.createInNotebook(f.id, content: 'c');
+      await db.insertAiCall(AiCallsCompanion.insert(
+        id: 'a1',
+        task: 'summarize',
         model: 'deepseek-flash',
-        oneLine: const Value('摘要'),
+        promptTokens: const Value(10),
+        completionTokens: const Value(20),
+        costCents: const Value(0.1),
         createdAt: DateTime.now().toUtc(),
       ));
 
       await db.clearAiHistory();
 
-      expect(await db.select(db.noteSummaries).get(), isEmpty);
+      // 只清调用审计，笔记与笔记库一条不少
+      expect(await db.select(db.aiCalls).get(), isEmpty);
       expect((await db.select(db.notes).get()).length, 1);
-      expect((await db.select(db.folders).get()).length, 1);
-      expect((await db.select(db.cards).get()).length, 1);
+      expect((await db.select(db.notebooks).get()).length, 1);
     });
   });
 
-  group('MarkdownExportService', () {
-    test('renderSingle 含标题、元信息与正文', () {
-      final note = Note(
-        id: 'n1',
-        title: '我的标题',
-        content: '正文 **加粗**',
-        excerpt: '',
-        source: 'local',
-        isInbox: true,
-        pinned: false,
-        readingProgress: 0,
-        readingSeconds: 0,
-        wordCount: 10,
-        lastAiAt: null,
-        createdAt: DateTime.utc(2026, 1, 1),
-        updatedAt: DateTime.utc(2026, 1, 2),
-        deletedAt: null,
-        folderId: null,
-      );
 
-      final md = MarkdownExportService.renderSingle(note, tags: ['Flutter']);
-      expect(md.contains('# 我的标题'), isTrue);
-      expect(md.contains('正文 **加粗**'), isTrue);
-      expect(md.contains('#Flutter'), isTrue);
+  group('复制全文', () {
+    test('有标题：标题 + 空行 + 正文', () {
+      expect(
+        TextUtils.noteCopyText(title: '我的标题', content: '正文'),
+        '我的标题\n\n正文',
+      );
     });
 
-    test('buildCopyText：无标题时只返回正文', () {
-      // 用函数声明而不是闭包赋值：Dart 会警告
-      // prefer_function_declarations_over_variables。
-      Note mk(String t) => Note(
-            id: 'n',
-            title: t,
-            content: '正文',
-            excerpt: '',
-            source: 'local',
-            isInbox: true,
-            pinned: false,
-            readingProgress: 0,
-            readingSeconds: 0,
-            wordCount: 2,
-            lastAiAt: null,
-            createdAt: DateTime.utc(2026),
-            updatedAt: DateTime.utc(2026),
-            deletedAt: null,
-            folderId: null,
-          );
-      expect(MarkdownExportService.buildCopyText(mk('')), '正文');
-      expect(MarkdownExportService.buildCopyText(mk('T')), 'T\n\n正文');
+    test('无标题：只返回正文（不留下多余空行）', () {
+      expect(TextUtils.noteCopyText(title: '', content: '正文'), '正文');
+      expect(TextUtils.noteCopyText(title: '   ', content: '正文'), '正文');
     });
   });
 }

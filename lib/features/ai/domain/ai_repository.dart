@@ -1,11 +1,13 @@
-import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../app/api_key_file.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
-import '../../../core/secure/secure_store.dart';import '../data/deepseek_client.dart';
+import '../../../core/secure/secure_store.dart';
+import '../../../core/util/ai_limits.dart';
+import '../data/deepseek_client.dart';
 import '../data/deepseek_config.dart';
 import 'prompts.dart';
 
@@ -24,228 +26,137 @@ class AiRepository {
 
   DeepSeekClient get client => _client;
 
-  Future<void> init() async {
-    final key = await SecureStore.readApiKey();
-    _client.setApiKey(key);
+  bool _initialized = false;
+  Future<void>? _initInflight;
+
+  /// 读 Key 并交给 client。**重复调用是安全的**。
+  ///
+  /// 这个方法原先由 `main.dart` 在一个 post-frame 回调里"发了不等"地调用：
+  ///
+  /// ```dart
+  /// WidgetsBinding.instance.addPostFrameCallback((_) {
+  ///   context.read<AiRepository>().init();   // 没有 await
+  /// });
+  /// ```
+  ///
+  /// 而 `InboxPage._bootstrap` 同样挂在 post-frame 上。**两者没有先后保证**：
+  /// 一旦预热先跑，client 里还没有 Key，请求立刻以 `no_api_key` 失败 →
+  /// 预热静默退回、`takeBatch` 也失败 → 用户看到「生成失败」和重试按钮，
+  /// 手点一次才好。**这就是"配好 Key 重启还要手动重试"的根因**（已用测试证实）。
+  ///
+  /// 修法不是在 main 里补一个 await（那只是把顺序碰对，下次改别处又会踩），
+  /// 而是让每个真正要发请求的方法都先 `await ensureReady()`——
+  /// 谁先用谁负责把 Key 准备好。
+  Future<void> init() {
+    if (_initialized) return Future.value();
+    final running = _initInflight;
+    if (running != null) return running;
+
+    final future = _doInit();
+    _initInflight = future;
+    return future.whenComplete(() {
+      if (identical(_initInflight, future)) _initInflight = null;
+    });
   }
+
+  Future<void> _doInit() async {
+    final key = await SecureStore.readApiKey();
+    if (key != null && key.trim().isNotEmpty) {
+      _client.setApiKey(key);
+      _initialized = true;
+      return;
+    }
+    // 钥匙串里没有时才看开发用的 Key 文件（见 ApiKeyFile 的说明）。
+    // 顺序刻意如此：**用户自己配过的永远优先**，不能被文件悄悄覆盖。
+    final fromFile = await ApiKeyFile.read();
+    _client.setApiKey(fromFile);
+    _initialized = true;
+  }
+
+  /// 发请求前统一走这里。
+  ///
+  /// 已经配过 Key 时它只做一次布尔判断，开销可以忽略。
+  Future<void> ensureReady() => init();
 
   Future<void> saveApiKey(String key) async {
     await SecureStore.writeApiKey(key);
     _client.setApiKey(key);
+    // 标记为已初始化，避免下一次请求又去钥匙串读一遍（可能读回旧值）
+    _initialized = true;
   }
 
   Future<void> clearApiKey() async {
     await SecureStore.deleteApiKey();
     _client.setApiKey(null);
+    // 清掉之后**允许**重新初始化：不然用户重新配一把 Key，
+    // 这个进程内会一直用着 null。
+    _initialized = true;
   }
 
   // ---------------------------------------------------------------------------
-  // 1. 整理笔记（摘要 + 要点 + 标签 + 待办）
+  // 生成轻笔记卡片（卡片流）
   // ---------------------------------------------------------------------------
 
-  /// 流式整理：UI 可以用返回的事件流做打字机效果。
+  /// 从素材生成轻笔记卡片。
   ///
-  /// 注意：流结束后**不会**自动落库，因为流式返回的是 Markdown 文本，
-  /// 不是结构化 JSON。需要结构化结果请用 [organizeNote]。
-  Stream<AiEvent> streamOrganize({
-    required String noteId,
-    String model = DeepSeekConfig.modelFlash,
-    bool deepThinking = true,
-  }) async* {
-    final note = await _db.getNote(noteId);
-    if (note == null) {
-      yield const AiError('笔记不存在', code: 'not_found');
-      return;
-    }
-
-    final stopwatch = Stopwatch()..start();
-    TokenUsage usage = TokenUsage.zero;
-    var success = false;
-    String? errorCode;
-
-    final inner = _client.streamChat(
-      systemPrompt: AiPrompts.organizeSystem,
-      userPrompt: AiPrompts.organizeUser(note.title, note.content),
-      model: model,
-      thinking: deepThinking,
-      reasoningEffort: 'high',
-    );
-
-    await for (final event in inner) {
-      switch (event) {
-        case AiChunk():
-        case AiReasoning():
-          yield event;
-        case AiDone(
-            :final promptTokens,
-            :final completionTokens,
-          ):
-          // 这里只关心 token 用量；costCents / latencyMs 由 _logCall 末尾统一结算，
-          // 提前解构出来会变成未使用变量（analyzer 会报 unused_local_variable）。
-          usage = TokenUsage(
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-          );
-          success = true;
-          await _db.markNoteAiDone(noteId);
-          yield event;
-        case AiError():
-          errorCode = event.code;
-          yield event;
-      }
-    }
-
-    stopwatch.stop();
-    await _logCall(
-      noteId: noteId,
-      task: 'organize',
-      model: model,
-      thinking: deepThinking,
-      usage: usage,
-      latencyMs: stopwatch.elapsedMilliseconds,
-      success: success,
-      errorCode: errorCode,
-    );
-  }
-
-  /// 结构化整理：一次拿到摘要/要点/标签/待办，并落库。
+  /// [materials] 每份包含"摘要 + 一块原文切片"，**一份对应一张卡片**——
+  /// 摘要做"面"、切片做"点"，提示词要求卡片基于切片，这样卡片才具体。
+  /// 详见 [FeedMaterial] 与 `AiPrompts.feedSystem`。
   ///
-  /// 使用 JSON Output + 非流式。内置三次尝试以应对官方承认的
-  /// 「JSON Output 偶发空 content」问题。
-  Future<NoteAiResult> summarize(
-    String noteId, {
+  /// [count] 是**要几张卡片**，和素材份数是两件事：
+  /// 素材够就一份一张；素材不够时提示词会要求从同一份素材的不同角度补足。
+  /// 不传则退化为"一份素材一张卡片"。
+  ///
+  /// [avoidTitles] 是已经生成过的标题（池子 + 预留）。库里笔记少时切片会被
+  /// 反复取到，让模型主动避开这些标题才能真的不重复。
+  ///
+  /// > 曾经把 `count` 删掉、写成"一份素材一张卡"，结果**素材数被笔记数卡死**：
+  /// > 库里只有 3 条笔记就只能出 3 张卡，内存池永远补不满，
+  /// > 用户等一次只拿到几张。这是被用户抓到的回归，别再犯。
+  ///
+  /// 关思考模式：实测它会吃光额度，`max_tokens=20` 时正文直接返回空字符串。
+  /// 生成创意文本不需要长链推理，关掉更快更省。
+  Future<List<FeedDraft>> generateFeedNotes(
+    List<FeedMaterial> materials, {
+    int? count,
+    List<String> avoidTitles = const [],
     String model = DeepSeekConfig.modelFlash,
     bool deepThinking = false,
   }) async {
-    final note = await _db.getNote(noteId);
-    if (note == null) {
-      throw const DeepSeekException('笔记不存在', code: 'not_found');
+    await ensureReady();
+    if (materials.isEmpty) {
+      throw const DeepSeekException('没有可用素材', code: 'no_source');
     }
 
     final stopwatch = Stopwatch()..start();
     var usage = TokenUsage.zero;
     String? lastError;
 
-    for (var attempt = 0; attempt < 3; attempt++) {
+    for (var attempt = 0; attempt < 2; attempt++) {
       try {
         final (raw, u) = await _client.completeJson(
-          systemPrompt: AiPrompts.summarizeSystem,
-          userPrompt: AiPrompts.summarizeUser(note.title, note.content),
+          systemPrompt: AiPrompts.feedSystem,
+          userPrompt: AiPrompts.feedUser(
+            materials,
+            count: count,
+            avoidTitles: avoidTitles,
+          ),
           model: model,
           thinking: deepThinking,
-          reasoningEffort: 'high',
-          maxTokens: 2048,
+          // 额度要跟"一次生成几张 × 每张多长"匹配。
+          //
+          // 一次给 9 份素材（= 最多 9 张卡），每张正文 400-800 字：
+          // 最坏 9 × 800 ≈ 7200 token，加 JSON 结构开销会顶到 8192 边缘。
+          // 而**额度不够会被截断，截断后 JSON 解析失败 = 整批白烧**，
+          // 所以这里给足余量。
+          //
+          // 上限不是瓶颈：`DeepSeekConfig.maxOutputTokens = 384000`。
+          // 调大 `kFeedGenerateCount` 时这里要跟着一起调。
+          maxTokens: 16384,
         );
         usage = u;
 
-        final result = AiPrompts.parseSummary(raw);
-        if (result == null) {
-          lastError = 'json_parse_failed';
-          continue; // 解析失败换一次重试
-        }
-
-        final cost = DeepSeekPricing.estimateCostCents(model: model, usage: u);
-        await _db.insertSummary(NoteSummariesCompanion.insert(
-          id: _uuid.v4(),
-          noteId: noteId,
-          model: model,
-          oneLine: Value(result.oneLine),
-          bullets: Value(_jsonList(result.bullets)),
-          suggestedTags: Value(_jsonList(result.tags)),
-          actionItems: Value(_jsonList(result.actionItems)),
-          rawResponse: Value(result.rawResponse),
-          promptTokens: Value(u.promptTokens),
-          completionTokens: Value(u.completionTokens),
-          costCents: Value(cost),
-          createdAt: DateTime.now().toUtc(),
-        ));
-        await _db.markNoteAiDone(noteId);
-        await _upsertTags(noteId, result.tags);
-
-        stopwatch.stop();
-        await _logCall(
-          noteId: noteId,
-          task: 'summarize',
-          model: model,
-          thinking: deepThinking,
-          usage: u,
-          latencyMs: stopwatch.elapsedMilliseconds,
-          success: true,
-        );
-        return result;
-      } on DeepSeekException catch (e) {
-        lastError = e.code;
-        // 只有可重试的错误才继续尝试；401/402 直接抛出
-        if (!e.isRetryable && e.code != 'json_empty') {
-          stopwatch.stop();
-          await _logCall(
-            noteId: noteId,
-            task: 'summarize',
-            model: model,
-            thinking: deepThinking,
-            usage: usage,
-            latencyMs: stopwatch.elapsedMilliseconds,
-            success: false,
-            errorCode: e.code,
-          );
-          rethrow;
-        }
-      }
-    }
-
-    stopwatch.stop();
-    await _logCall(
-      noteId: noteId,
-      task: 'summarize',
-      model: model,
-      thinking: deepThinking,
-      usage: usage,
-      latencyMs: stopwatch.elapsedMilliseconds,
-      success: false,
-      errorCode: lastError ?? 'unknown',
-    );
-    throw DeepSeekException(
-      'AI 整理连续失败（$lastError）。可稍后重试，或在设置中改用 flash 模型。',
-      code: lastError,
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // 2. 生成记忆卡片
-  // ---------------------------------------------------------------------------
-
-  /// 生成卡片**草稿**。不直接落库 —— 必须经用户确认，
-  /// 否则劣质卡片会立刻污染复习队列。
-  Future<List<CardDraft>> generateCards(
-    String noteId, {
-    String model = DeepSeekConfig.modelPro,
-    bool deepThinking = true,
-    int maxCards = 15,
-  }) async {
-    final note = await _db.getNote(noteId);
-    if (note == null) {
-      throw const DeepSeekException('笔记不存在', code: 'not_found');
-    }
-
-    final stopwatch = Stopwatch()..start();
-    var usage = TokenUsage.zero;
-    String? lastError;
-
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        final (raw, u) = await _client.completeJson(
-          systemPrompt: AiPrompts.cardsSystem,
-          userPrompt: AiPrompts.cardsUser(note.title, note.content,
-              maxCards: maxCards),
-          model: model,
-          thinking: deepThinking,
-          reasoningEffort: 'high',
-          // 卡片比摘要长得多，max_tokens 给足，否则 JSON 会被截断
-          maxTokens: 8192,
-        );
-        usage = u;
-
-        final drafts = AiPrompts.parseCards(raw);
+        final drafts = AiPrompts.parseFeedCards(raw);
         if (drafts == null) {
           lastError = 'json_parse_failed';
           continue;
@@ -253,8 +164,9 @@ class AiRepository {
 
         stopwatch.stop();
         await _logCall(
-          noteId: noteId,
-          task: 'generate_cards',
+          // 轻笔记生成不是针对某一条笔记的，所以没有 noteId
+          noteId: null,
+          task: 'feed_generate',
           model: model,
           thinking: deepThinking,
           usage: u,
@@ -267,8 +179,8 @@ class AiRepository {
         if (!e.isRetryable && e.code != 'json_empty') {
           stopwatch.stop();
           await _logCall(
-            noteId: noteId,
-            task: 'generate_cards',
+            noteId: null,
+            task: 'feed_generate',
             model: model,
             thinking: deepThinking,
             usage: usage,
@@ -283,8 +195,8 @@ class AiRepository {
 
     stopwatch.stop();
     await _logCall(
-      noteId: noteId,
-      task: 'generate_cards',
+      noteId: null,
+      task: 'feed_generate',
       model: model,
       thinking: deepThinking,
       usage: usage,
@@ -293,132 +205,15 @@ class AiRepository {
       errorCode: lastError ?? 'unknown',
     );
     throw DeepSeekException(
-      '卡片生成失败（$lastError）。这篇笔记内容可能过短，或稍后重试。',
+      '生成失败（$lastError）。稍后重试，或先在笔记库里多写几条笔记作为素材。',
       code: lastError,
     );
   }
 
-  /// 用户确认后把草稿落库。
-  ///
-  /// 新卡 `dueAt` 设为当前时间，即可立即进入今日队列。
-  /// `ease` 用 SM-2 默认值 2.5，`repetitions` 为 0 表示新卡。
-  Future<int> commitCardDrafts({
-    required String noteId,
-    required List<CardDraft> drafts,
-    String? model,
-  }) async {
-    final selected = drafts.where((d) => d.selected && d.isValid).toList();
-    if (selected.isEmpty) return 0;
-
-    final now = DateTime.now().toUtc();
-    await _db.transaction(() async {
-      for (final d in selected) {
-        await _db.upsertCard(CardsCompanion.insert(
-          id: _uuid.v4(),
-          noteId: Value(noteId),
-          question: d.question,
-          answer: d.answer,
-          source: const Value('ai'),
-          aiModel: Value(model),
-          tags: Value(d.tags.isEmpty ? null : d.tags.join(',')),
-          dueAt: now,
-          createdAt: now,
-          updatedAt: now,
-        ));
-      }
-    });
-    return selected.length;
-  }
-
   // ---------------------------------------------------------------------------
-  // 3. 基于笔记问答
-  // ---------------------------------------------------------------------------
-
-  /// 检索与问题最相关的若干条笔记作为上下文。
-  ///
-  /// 首版是朴素的关键词匹配（LIKE）。真正的语义检索需要 embedding，
-  /// 列入后续版本；这里先保证「离线可用的降级路径」存在。
-  Future<String> ask(
-    String question, {
-    String model = DeepSeekConfig.modelFlash,
-    bool deepThinking = false,
-    int topK = 5,
-  }) async {
-    final notes = await _db.allActiveNotes();
-    if (notes.isEmpty) {
-      throw const DeepSeekException('你还没有任何笔记', code: 'no_notes');
-    }
-
-    final scored = notes
-        .map((n) => (note: n, score: _relevance(n, question)))
-        .where((e) => e.score > 0)
-        .toList()
-      ..sort((a, b) => b.score.compareTo(a.score));
-
-    final picked = scored.take(topK).map((e) => e.note).toList();
-    // 没有命中任何关键词时，退化为最近的 topK 条笔记，避免完全答不出
-    final contexts = (picked.isEmpty ? notes.take(topK).toList() : picked)
-        .map((n) {
-      final body = n.content.length > 4000
-          ? '${n.content.substring(0, 4000)}…'
-          : n.content;
-      return '标题：${n.title.isEmpty ? '无标题' : n.title}\n$body';
-    }).toList();
-
-    final stopwatch = Stopwatch()..start();
-    final buffer = StringBuffer();
-    var usage = TokenUsage.zero;
-    String? errorCode;
-    String? errorMessage;
-    var success = false;
-
-    // 注意：不要在 await for 内部直接 throw —— 那会跳出循环，
-    // 让下面的用量审计（_logCall）被跳过，产生"失败调用没记录"的黑洞。
-    // 这里先记录错误、正常结束循环，再统一收尾。
-    await for (final event in _client.streamChat(
-      systemPrompt: AiPrompts.askSystem,
-      userPrompt: AiPrompts.askUser(question, contexts),
-      model: model,
-      thinking: deepThinking,
-      reasoningEffort: 'medium',
-    )) {
-      switch (event) {
-        case AiChunk(:final text):
-          buffer.write(text);
-        case AiDone(:final promptTokens, :final completionTokens):
-          usage = TokenUsage(
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-          );
-          success = true;
-        case AiReasoning():
-          break; // 问答场景不展示思维链
-        case AiError(:final code, :final message):
-          errorCode = code;
-          errorMessage = message;
-      }
-    }
-
-    stopwatch.stop();
-    await _logCall(
-      noteId: null,
-      task: 'ask',
-      model: model,
-      thinking: deepThinking,
-      usage: usage,
-      latencyMs: stopwatch.elapsedMilliseconds,
-      success: success,
-      errorCode: errorCode,
-    );
-
-    if (errorMessage != null) {
-      throw DeepSeekException(errorMessage, code: errorCode);
-    }
-    return buffer.toString();
-  }
-
   /// 端点连通性自检，设置页用。
   Future<String> testConnection({String model = DeepSeekConfig.modelFlash}) async {
+    await ensureReady();
     final (content, _) = await _client.completeJson(
       systemPrompt:
           '你是一个测试助手。请输出 json：{"ok": true, "message": "连接正常"}',
@@ -460,45 +255,77 @@ class AiRepository {
     );
   }
 
-  /// 把 AI 建议的标签写入标签表并关联到笔记（幂等）。
-  Future<void> _upsertTags(String noteId, List<String> names) async {
-    for (final raw in names) {
-      final name = raw.trim();
-      if (name.isEmpty || name.length > 20) continue;
+
+  // ==========================================================================
+  // 笔记的 AI 摘要（供卡片流当素材，入库长期复用）
+  // ==========================================================================
+
+  /// 为一篇笔记生成摘要（**不落库**，落库由调用方负责）。
+  ///
+  /// 返回值已经过 [AiLimits.summaryHardMax] 硬截断——**模型不守字数**，
+  /// 兜底必须在这里做，否则 300 字的要求会变成 600 字的实际消耗。
+  ///
+  /// 关思考模式：摘要不需要长链推理，而且实测思考会吃掉大量额度。
+  Future<String> summarizeNote({
+    required String title,
+    required String content,
+    String model = DeepSeekConfig.modelFlash,
+    bool deepThinking = false,
+  }) async {
+    await ensureReady();
+    final stopwatch = Stopwatch()..start();
+    var usage = TokenUsage.zero;
+    String? lastError;
+
+    for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        final tagId = await _db.ensureTag(_uuid.v4(), name);
-        await _db.attachTag(noteId, tagId);
-      } catch (_) {
-        // 单个标签失败不应中断整体整理流程
+        final (raw, u) = await _client.completeJson(
+          systemPrompt: AiPrompts.noteSummarySystem,
+          userPrompt: AiPrompts.noteSummaryUser(title, content),
+          model: model,
+          thinking: deepThinking,
+          maxTokens: 1200,
+        );
+        usage = u;
+
+        // 解析不出来（模型没按 JSON 返回）就用原文兜底，
+        // 别为了一次格式偏差丢掉整次调用
+        final text = AiPrompts.parseNoteSummary(raw);
+        if (text == null) {
+          lastError = 'json_parse_failed';
+          continue;
+        }
+
+        stopwatch.stop();
+        await _logCall(
+          noteId: null,
+          task: 'note_summary',
+          model: model,
+          thinking: deepThinking,
+          usage: u,
+          latencyMs: stopwatch.elapsedMilliseconds,
+          success: true,
+        );
+        return safeTruncate(text, AiLimits.summaryHardMax);
+      } on DeepSeekException catch (e) {
+        lastError = e.code;
+        if (!e.isRetryable) break;
       }
     }
+
+    stopwatch.stop();
+    await _logCall(
+      noteId: null,
+      task: 'note_summary',
+      model: model,
+      thinking: deepThinking,
+      usage: usage,
+      latencyMs: stopwatch.elapsedMilliseconds,
+      success: false,
+      errorCode: lastError,
+    );
+    throw DeepSeekException('生成摘要失败（$lastError）', code: lastError);
   }
-
-  /// 关键词相关度打分：标题命中权重更高，其次统计正文命中次数。
-  static double _relevance(Note note, String question) {
-    final terms = question
-        .toLowerCase()
-        .split(RegExp(r'[\s,，。？?！!、;；:：]+'))
-        .where((t) => t.length >= 2)
-        .toList();
-    if (terms.isEmpty) return 0;
-
-    final title = note.title.toLowerCase();
-    final body = note.content.toLowerCase();
-    var score = 0.0;
-    for (final t in terms) {
-      if (title.contains(t)) score += 5.0;
-      score += body.split(t).length - 1; // 出现次数
-    }
-    return score;
-  }
-
-  /// 把字符串列表编码为 JSON 数组字符串。
-  ///
-  /// 用 dart:convert 而不是手写转义：模型返回的要点里出现引号、反斜杠、
-  /// 换行、Tab 都很常见，手写转义漏掉任何一种都会让存库的 JSON 非法，
-  /// 进而在阅读页解析失败。
-  static String _jsonList(List<String> items) => jsonEncode(items);
 
   Future<void> _logCall({
     required String? noteId,

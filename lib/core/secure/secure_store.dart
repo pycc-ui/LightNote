@@ -24,9 +24,6 @@ class SecureStore {
   SecureStore._();
 
   static const _kApiKey = 'deepseek_api_key';
-  static const _kModel = 'deepseek_model';
-  static const _kThinking = 'deepseek_thinking_enabled';
-  static const _kDailyNewCards = 'daily_new_cards';
 
   static const _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -97,32 +94,11 @@ class SecureStore {
 
   /// 默认 flash：支持 JSON Output 与思考模式，价格是 pro 的 1/4 左右，
   /// 日常整理与卡片生成足够。
-  static Future<String> readModel() async =>
-      (await _read(_kModel)) ?? 'deepseek-flash';
-
-  static Future<void> writeModel(String model) => _write(_kModel, model);
-
   // ---- 思考模式 ----
 
   /// 重要：DeepSeek 思考模式**默认开启**，且 effort 默认 high。
   /// 对"打个标签"这类轻量任务，开启会显著增加耗时与费用，
   /// 所以这里默认关闭，只在深度任务时由业务层显式开启。
-  static Future<bool> readThinkingEnabled() async =>
-      (await _read(_kThinking)) == 'true';
-
-  static Future<void> writeThinkingEnabled(bool enabled) =>
-      _write(_kThinking, enabled.toString());
-
-  // ---- 每日新卡上限 ----
-
-  static Future<int> readDailyNewCards() async {
-    final v = await _read(_kDailyNewCards);
-    return int.tryParse(v ?? '') ?? 15;
-  }
-
-  static Future<void> writeDailyNewCards(int count) =>
-      _write(_kDailyNewCards, count.toString());
-
   static Future<void> wipe() async {
     _memoryFallback.clear();
     try {

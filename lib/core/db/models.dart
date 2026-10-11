@@ -1,11 +1,8 @@
 import 'dart:convert';
 
-import 'app_database.dart';
+export 'app_database.dart' show Note, AiCall;
 
-export 'app_database.dart'
-    show Note, Card, Tag, NoteSummary, Review, AiCall, CardDeck;
-
-/// 解析存库的 JSON 数组字符串（如 NoteSummary.bullets）。
+/// 解析存库的 JSON 数组字符串（如某条笔记的标签数组）。
 ///
 /// 集中在这里，避免每个页面各写一份 `jsonDecode` 并各自处理异常。
 List<String> parseJsonStringList(String? raw) {
@@ -29,120 +26,6 @@ List<String> parseJsonStringList(String? raw) {
       .map((e) => e.trim())
       .where((e) => e.isNotEmpty)
       .toList(growable: false);
-}
-
-/// AI 生成的一张卡片草稿。
-///
-/// 它 **不是** 数据库里的 [Card]：[Card] 带 SM-2 调度状态，
-/// 而草稿只承载模型给出的内容，必须经用户确认后才落库。
-class CardDraft {
-  const CardDraft({
-    required this.question,
-    required this.answer,
-    this.tags = const [],
-    this.selected = true,
-  });
-
-  final String question;
-  final String answer;
-  final List<String> tags;
-
-  /// UI 上的勾选框状态；默认全选，用户可取消勾选。
-  final bool selected;
-
-  CardDraft copyWith({
-    String? question,
-    String? answer,
-    List<String>? tags,
-    bool? selected,
-  }) {
-    return CardDraft(
-      question: question ?? this.question,
-      answer: answer ?? this.answer,
-      tags: tags ?? this.tags,
-      selected: selected ?? this.selected,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'question': question,
-        'answer': answer,
-        'tags': tags,
-      };
-
-  static CardDraft fromJson(Map<String, dynamic> json) {
-    final rawTags = json['tags'];
-    return CardDraft(
-      question: (json['question'] ?? '').toString().trim(),
-      answer: (json['answer'] ?? '').toString().trim(),
-      tags: rawTags is List
-          ? rawTags.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList()
-          : const [],
-    );
-  }
-
-  /// 内容不完整的草稿直接丢弃，不要让它污染复习队列。
-  bool get isValid => question.isNotEmpty && answer.isNotEmpty;
-
-  @override
-  String toString() => 'CardDraft(selected: $selected, q: $question)';
-}
-
-/// AI 整理笔记的结构化结果。
-class NoteAiResult {
-  const NoteAiResult({
-    required this.oneLine,
-    this.bullets = const [],
-    this.tags = const [],
-    this.actionItems = const [],
-    this.rawResponse,
-  });
-
-  final String oneLine;
-  final List<String> bullets;
-  final List<String> tags;
-  final List<String> actionItems;
-  final String? rawResponse;
-
-  static NoteAiResult empty() =>
-      const NoteAiResult(oneLine: '', rawResponse: null);
-
-  bool get isEmpty =>
-      oneLine.isEmpty && bullets.isEmpty && tags.isEmpty && actionItems.isEmpty;
-
-  static NoteAiResult fromJson(Map<String, dynamic> json, {String? raw}) {
-    List<String> strList(Object? v) {
-      if (v is List) {
-        return v
-            .map((e) => e.toString().trim())
-            .where((e) => e.isNotEmpty)
-            .toList(growable: false);
-      }
-      if (v is String && v.trim().isNotEmpty) {
-        return v
-            .split(RegExp(r'[,，\n]'))
-            .map((e) => e.trim())
-            .where((e) => e.isNotEmpty)
-            .toList(growable: false);
-      }
-      return const [];
-    }
-
-    return NoteAiResult(
-      oneLine: (json['one_line'] ?? json['summary'] ?? '').toString().trim(),
-      bullets: strList(json['bullets'] ?? json['key_points']),
-      tags: strList(json['tags']),
-      actionItems: strList(json['action_items']),
-      rawResponse: raw,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'one_line': oneLine,
-        'bullets': bullets,
-        'tags': tags,
-        'action_items': actionItems,
-      };
 }
 
 /// AI 流式事件：UI 拿到的是一个事件流，而不是一次性字符串。
@@ -170,6 +53,7 @@ class AiDone extends AiEvent {
     this.completionTokens = 0,
     this.costCents = 0,
     this.latencyMs = 0,
+    this.toolCalls = const [],
   });
 
   final String fullText;
@@ -177,6 +61,62 @@ class AiDone extends AiEvent {
   final int completionTokens;
   final double costCents;
   final int latencyMs;
+
+  /// 模型在这一轮提出的**工具调用**（可能为空 = 普通回答）。
+  ///
+  /// 非空时：调用方要执行这些工具，把结果以 `role: 'tool'` 回灌，
+  /// 然后**再发一轮**——直到它不再提工具为止。见 `AiAgentLoop`。
+  final List<ToolCall> toolCalls;
+
+  /// 这一轮是不是"只提了工具、没说话"
+  bool get isToolOnly => fullText.trim().isEmpty && toolCalls.isNotEmpty;
+}
+
+/// 模型提出的**一次工具调用**（OpenAI / DeepSeek 的 `tool_calls` 元素）。
+///
+/// 放在这里而不是 `features/ai/`：它是 [AiDone] 的载荷，
+/// 而 `core/` 不能反向依赖 `features/`。
+class ToolCall {
+  const ToolCall({
+    required this.id,
+    required this.name,
+    required this.arguments,
+  });
+
+  /// 调用 id。回灌 `role: 'tool'` 的结果时**必须带上它**，否则协议不认。
+  final String id;
+
+  /// 工具名。
+  final String name;
+
+  /// 参数的 **JSON 字符串**（不是解析好的 Map）。
+  ///
+  /// 保持字符串有两个原因：
+  ///   · 流式下 `arguments` 是**分片**返回的，本来就要拼成串；
+  ///   · 回灌 assistant 消息时要原样送回，解析再序列化反而可能变形状。
+  final String arguments;
+
+  /// 解析成 Map。**解析失败返回 null**（模型偶尔会给出坏 JSON）——
+  /// 调用方据此回一条"参数不是合法 JSON"的工具结果，让模型自己修正。
+  Map<String, dynamic>? get argsMap {
+    if (arguments.trim().isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(arguments);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 回灌给 API 的形状（echo 回 assistant 消息时用）。
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': 'function',
+        'function': {'name': name, 'arguments': arguments},
+      };
+
+  @override
+  String toString() => 'ToolCall($name, $arguments)';
 }
 
 class AiError extends AiEvent {
@@ -184,4 +124,111 @@ class AiError extends AiEvent {
   final String message;
   final String? code;
   final bool isRetryable;
+}
+
+/// 生成一张卡片所需的素材：**摘要做"面"，切片做"点"**。
+///
+/// | 字段 | 作用 | 性质 |
+/// |---|---|---|
+/// | [summary] | 提供整体背景 | 概括，AI 生成，**存库复用** |
+/// | [chunk] | 提供具体原文 | 原文片段，**不失真，现切不存** |
+///
+/// ## 为什么要切片
+///
+/// 只发摘要是试过的，问题很明确：**卡片大而空**。摘要天生是概括的，
+/// AI 拿到概括只能再概括一遍，写出来的东西没有具体内容。
+///
+/// 而切片是原文片段——里面有具体数字、具体说法、具体例子，
+/// 卡片才可能具体。且它**不失真**：正文是什么，切出来就是什么。
+///
+/// ## 素材是"片内的 400 字窗口"
+///
+/// 一份素材 = 某一篇笔记的**某一片**里开出的 400 字窗口（片本身 ≤400 就是整片）。
+/// 片是搜索与 AI 用的语义单元（≤700），卡片流按 400 字消费——这样卡片流的
+/// 提示词、成本估算、抽取逻辑都不用改。见 `FeedWindow`。
+///
+/// 同一片会被用到多次，每次窗口起点不同（**轮换**），所以"哪一片"这件事
+/// 必须显式记下来（[chunkKey]），不能靠正文去认。
+class FeedMaterial {
+  const FeedMaterial({
+    required this.title,
+    required this.summary,
+    required this.chunk,
+    this.chunkKey = '',
+  });
+
+  final String title;
+
+  /// 整体背景（摘要）。提示词里会明确"只作为背景，不要重复它的话"。
+  final String summary;
+
+  /// 具体原文切片（片内的 400 字窗口）。提示词里会明确"卡片必须基于它"。
+  final String chunk;
+
+  /// 这份素材来自哪一片，`noteId:idx` 形式。
+  ///
+  /// **不进提示词**，只用于去重与测试断言：素材文字是窗口，同一片每次取出的
+  /// 文字都不同，所以"是不是同一片"只能看这个键。
+  final String chunkKey;
+}
+
+/// 一条 AI 生成的「轻笔记」——卡片流里的内容。
+///
+/// **它不是一个已有笔记的视图**，而是从素材里长出来的新内容。
+///
+/// 卡片上**只显示标题**（至多 3 行），点进去看 [body] 全文。
+/// 早先的版本在卡片上放过"摘要/预览"，结果是"摘要是正文的前面部分"这种
+/// 别扭关系；后来试过让 AI 单独生成一段摘要，又变成要维护两个内容字段。
+/// 最终简化成：**卡片就是标题，正文只在详情里出现。**
+///
+/// 所以 [title] 要写得**有信息量、能勾起好奇**——它一个人承担了
+/// "让人想点进去"的全部责任，不能只是"间隔重复"这种干标签。
+class FeedDraft {
+  const FeedDraft({
+    required this.title,
+    required this.body,
+    this.tags = const [],
+  });
+
+  /// 卡片上显示的标题（至多 3 行）。
+  /// 应当是有钩子的一句话，而不是干巴巴的名词。
+  final String title;
+
+  /// 完整正文（Markdown）。卡片点进去看的就是它，也是收下后写进笔记的内容。
+  final String body;
+
+  /// 2~6 个短标签。卡片上挑一个展示；收下时也可以一并写成笔记的标签。
+  ///
+  /// 由生成卡片的**同一次调用**产出，而不是另外再调一次 AI——
+  /// 素材已经发出去了，顺带要几个标签几乎不增加成本。
+  final List<String> tags;
+
+  /// 标题与正文都空就丢弃——空卡片对用户毫无意义。
+  bool get isValid => title.isNotEmpty && body.isNotEmpty;
+
+  /// 卡片上展示用的标签（取第一个；没有则返回 null）。
+  String? get displayTag => tags.isEmpty ? null : tags.first;
+
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'body': body,
+        'tags': tags,
+      };
+
+  static FeedDraft fromJson(Map<String, dynamic> json) {
+    final rawTags = json['tags'];
+    return FeedDraft(
+      title: (json['title'] ?? '').toString().trim(),
+      body: (json['body'] ?? '').toString().trim(),
+      tags: rawTags is List
+          ? rawTags
+              .map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList(growable: false)
+          : const [],
+    );
+  }
+
+  @override
+  String toString() => 'FeedDraft($title)';
 }

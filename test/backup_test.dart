@@ -9,9 +9,9 @@ import 'package:path_provider_platform_interface/path_provider_platform_interfac
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:smart_notes/core/db/app_database.dart';
 import 'package:smart_notes/core/db/database_location.dart';
-import 'package:smart_notes/services/backup/backup_models.dart';
-import 'package:smart_notes/services/backup/backup_service.dart';
-import 'package:smart_notes/services/backup/pending_import.dart';
+import 'package:smart_notes/core/backup/backup_models.dart';
+import 'package:smart_notes/core/backup/backup_service.dart';
+import 'package:smart_notes/core/backup/pending_import.dart';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 
 /// 把 path_provider 换成临时目录。
@@ -157,6 +157,40 @@ void main() {
       expect(info.isFallback, isFalse);
     });
 
+    // 回归测试：常规位置全不可写、退到「程序所在目录」时，
+    // 必须把 isDegradedToProgramDir 置上并给出失败原因。
+    //
+    // 曾经的 bug：这个标记被写成 `isFallback ? lastFallbackNote : null`
+    // 那一套的副产物，而 isFallback 只在"配置了工作目录却没生效"时才为 true。
+    // 没配置工作目录（configured == null）时它是 false，于是设置页把这种
+    // 危险状态显示成普通的「自定义目录」，**丢掉了"数据在 build\ 里、
+    // 删 build 就没了"这个关键警告**。
+    test('退到程序所在目录时必须标记为 degraded，并给出原因', () async {
+      // 让所有常规私有目录候选都不可写：
+      // 把「私有根目录」指到一个不存在、且父目录不存在的路径上。
+      // Windows 上 CreateDirectory 对"父目录为文件"的路径一定失败。
+      final blocker = File(p.join(workDir.path, 'blocker-file'));
+      await blocker.writeAsString('x');
+      final hopeless = p.join(blocker.path, 'nested');
+      PathProviderPlatform.instance = _FakePathProvider(hopeless);
+      DatabaseLocation.resetCacheForTesting();
+
+      final info = await DatabaseLocation.describeSafe();
+
+      expect(info.isDegradedToProgramDir, isTrue,
+          reason: '退到程序目录却没标记 degraded，设置页就不会警告用户');
+
+      if (!Platform.isAndroid) {
+        final exeDir = File(Platform.resolvedExecutable).parent;
+        expect(
+          p.normalize(info.activeDir),
+          p.normalize(p.join(exeDir.path, kProgramDirDataFolder)),
+        );
+      }
+      expect(info.degradedNote, isNotNull,
+          reason: '要能说明为什么常规位置都不可用');
+    });
+
     // 这一组针对一个真实踩过的 bug：
     // 原实现把配置存在「私有根目录」下，而私有根目录是**按优先级逐档试出来**的
     // （AppData → 文档 → 主目录 → 程序目录）。于是配置的存放点会随环境漂移：
@@ -287,10 +321,7 @@ void main() {
         sourcePlatform: 'windows',
         stats: const BackupStats(
           notes: 1,
-          folders: 0,
-          tags: 0,
-          cards: 0,
-          reviews: 0,
+          notebooks: 0,
         ),
         files: [
           BackupFileEntry(

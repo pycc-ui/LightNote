@@ -51,13 +51,6 @@ app.*.map.json
 # 本项目自己加的
 # ---------------------------------------------------------------------------
 
-# 图标生成器的产物。源是 tool/icon/make_icon.py 与 feather.svg，
-# 所有 png/ico 都能用 `python tool\icon\make_icon.py` 重新生成，
-# 没必要让二进制文件进版本库（也避免出现"改了脚本忘了重跑"的假 diff）。
-# 唯一保留 preview.png，方便在 README 里直接看图。
-/tool/icon/out/*
-!/tool/icon/out/preview.png
-
 # Windows 插件符号链接目录。
 # Flutter 构建时会在这里为每个插件建链接，属于生成物；
 # 而且 tarball/zip 里符号链接容易被解成普通文件，提交进去会脏。
@@ -69,4 +62,23 @@ app.*.map.json
 # App 启动时写给构建脚本看的"数据库位置"报告。
 # 它在 exe 所在目录（build\ 下面），是运行期产物，不该进版本库。
 .lightnote-storage.txt
+
+
+# 开发用的 API Key 文件（绝不要提交）
+.lightnote-apikey.txt
+
+# ---------------------------------------------------------------------------
+# Android 发布签名（绝不要提交）
+#
+# key.properties 里是 keystore 路径与两个密码；.jks/.keystore 是私钥本体。
+# 一旦进了版本库，任何人都能用它签出"你的"安装包 —— 而这在开源仓库里
+# 是**永久泄露**（改密码没用，得换密钥，也就意味着老用户必须卸载重装）。
+# ---------------------------------------------------------------------------
+/android/key.properties
+*.jks
+*.keystore
+
+
+# Python 生成物（缓存目录）
+__pycache__/
 
