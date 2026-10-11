@@ -10,8 +10,8 @@
 // 但它的存在不影响轮次边界 —— 这正是"工具链不被切断"的实现方式。
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/features/note/domain/history_chunker.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/features/note/domain/history_chunker.dart';
 
 var _seq = 0;
 

@@ -19,8 +19,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart' as sqlite;
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/database_location.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/database_location.dart';
 
 /// v1 的 notes 表结构（字段名与顺序照抄 v1 生成的 DDL）
 const _v1NotesDdl = '''
@@ -231,7 +231,7 @@ void main() {
 
   setUp(() {
     tmp = Directory.systemTemp.createTempSync('lightnote_mig_');
-    dbPath = p.join(tmp.path, 'qing_notes.sqlite');
+    dbPath = p.join(tmp.path, kDatabaseFileName);
   });
 
   tearDown(() {

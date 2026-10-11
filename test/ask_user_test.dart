@@ -8,18 +8,18 @@ import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/models.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/domain/agent_loop.dart';
-import 'package:smart_notes/features/ai/domain/ai_chat_repository.dart';
-import 'package:smart_notes/features/ai/domain/ai_repository.dart';
-import 'package:smart_notes/features/ai/domain/ask_resolver.dart';
-import 'package:smart_notes/features/ai/domain/ask_user.dart';
-import 'package:smart_notes/features/ai/domain/tool_executor.dart';
-import 'package:smart_notes/features/ai/domain/tool_types.dart';
-import 'package:smart_notes/features/note/data/notebook_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/agent_loop.dart';
+import 'package:lightnote/features/ai/domain/ai_chat_repository.dart';
+import 'package:lightnote/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/features/ai/domain/ask_resolver.dart';
+import 'package:lightnote/features/ai/domain/ask_user.dart';
+import 'package:lightnote/features/ai/domain/tool_executor.dart';
+import 'package:lightnote/features/ai/domain/tool_types.dart';
+import 'package:lightnote/features/note/data/notebook_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
 
 void main() {
   group('PendingAsk：挂起记录能跨重启还原', () {

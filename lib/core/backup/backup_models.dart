@@ -8,7 +8,7 @@
 /// lightnote-backup-20260213-104500.zip
 /// ├── backup.json                    清单（版本、统计、校验和）
 /// └── data/
-///     └── qing_notes.sqlite           SQLite 数据库快照
+///     └── lightnote.sqlite            SQLite 数据库快照
 /// ```
 ///
 /// 刻意**不包含** API Key：它在系统钥匙串里，不属于笔记数据，
@@ -24,7 +24,11 @@ import 'package:path/path.dart' as p;
 const kBackupFormatVersion = 1;
 
 /// 清单中数据库条目的固定路径。
-const kBackupDbEntryPath = 'data/qing_notes.sqlite';
+///
+/// **必须与 `kDatabaseFileName` 保持同步**（`lightnote.sqlite`）：
+/// 导出时按这个路径往 zip 里塞库，导入时按这个路径找库，
+/// 两处不一致会直接导致"备份包里找不到数据库文件"。
+const kBackupDbEntryPath = 'data/lightnote.sqlite';
 
 /// 清单文件名。
 const kBackupManifestPath = 'backup.json';

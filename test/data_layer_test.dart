@@ -5,13 +5,13 @@ import 'dart:convert';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/models.dart';
-import 'package:smart_notes/core/util/text_utils.dart';
-import 'package:smart_notes/features/ai/domain/prompts.dart';
-import 'package:smart_notes/features/note/data/notebook_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
-import 'package:smart_notes/core/prefs/preferences_service.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/core/util/text_utils.dart';
+import 'package:lightnote/features/ai/domain/prompts.dart';
+import 'package:lightnote/features/note/data/notebook_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
+import 'package:lightnote/core/prefs/preferences_service.dart';
 
 void main() {
   group('TextUtils', () {

@@ -7,11 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/database_location.dart';
-import 'package:smart_notes/core/backup/backup_models.dart';
-import 'package:smart_notes/core/backup/backup_service.dart';
-import 'package:smart_notes/core/backup/pending_import.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/database_location.dart';
+import 'package:lightnote/core/backup/backup_models.dart';
+import 'package:lightnote/core/backup/backup_service.dart';
+import 'package:lightnote/core/backup/pending_import.dart';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 
 /// 把 path_provider 换成临时目录。

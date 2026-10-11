@@ -25,7 +25,7 @@
 //   · 点击前要等入场动画跑完，否则按钮透明度为 0，hit test 打不中。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smart_notes/core/widgets/log_bar.dart';
+import 'package:lightnote/core/widgets/log_bar.dart';
 
 Widget _host() => const MaterialApp(home: Scaffold(body: SizedBox()));
 

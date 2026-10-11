@@ -6,9 +6,17 @@
 ///   改一次名字要动四个地方，漏一个就会出现"任务栏叫一个名、关于页叫另一个名"。
 ///   把 Dart 侧收敛到这里，至少保证 UI 与提示文案不会各说各话。
 ///
-/// 本项目的命名例外：产品名用英文 **LightNote**，其余一切（代码标识、
-/// 包名、数据库文件名、目录名）保持原有的 `smart_notes` / `qing_notes` /
-/// `轻笔记`，不做重命名——renaming 数据库文件或包名会让老用户的数据"消失"。
+/// 命名现状：产品名（界面展示）用英文 **LightNote**，代码标识已统一为
+/// `lightnote` —— Dart 包名 `lightnote`、Android 包名 / applicationId
+/// `com.lightnote.app`、数据库文件名 `lightnote.sqlite`
+/// （`core/db/database_location.dart` 的 `kDatabaseFileName`）。
+///
+/// 唯一仍然保留原名的是 **Windows 可执行文件名** `smart_notes.exe`
+/// （`windows/CMakeLists.txt` 的 `BINARY_NAME`）：本机构建脚手架与 `bin\`
+/// 下的 shim 按这个名字找它，改名会断开编译通道，另案处理。
+///
+/// 注意：数据库文件名现在还没发布过正式版，改了没事；
+/// **一旦发布就不能再改**——老用户的库会留在旧名下变成孤儿。
 library;
 
 /// 产品名（界面展示用）
@@ -22,4 +30,4 @@ const kAppDisplayNameZh = 'LightNote 轻笔记';
 const kAppVersion = '1.0.0';
 
 /// 包名 / applicationId
-const kAppPackageId = 'com.example.smart_notes';
+const kAppPackageId = 'com.lightnote.app';

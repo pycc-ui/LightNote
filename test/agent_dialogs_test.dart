@@ -6,10 +6,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/features/ai/domain/ask_user.dart';
-import 'package:smart_notes/features/ai/domain/tool_executor.dart';
-import 'package:smart_notes/features/ai/domain/tool_specs.dart';
-import 'package:smart_notes/features/ai/ui/agent_dialogs.dart';
+import 'package:lightnote/features/ai/domain/ask_user.dart';
+import 'package:lightnote/features/ai/domain/tool_executor.dart';
+import 'package:lightnote/features/ai/domain/tool_specs.dart';
+import 'package:lightnote/features/ai/ui/agent_dialogs.dart';
 
 void main() {
   /// 把弹层挂到一个最小页面上，并把返回值收进 [out]

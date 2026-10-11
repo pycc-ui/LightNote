@@ -1,4 +1,4 @@
-# LightNote（smart_notes）
+# LightNote（lightnote）
 
 Flutter + Dart + SQLite(Drift) + DeepSeek API 的**本地优先**笔记应用。
 
@@ -59,12 +59,13 @@ flutter test                       # 测试（项目约定：只在大版本发�
 
 ---
 
-## 关于命名（唯一的例外）
+## 关于命名
 
-产品名统一用英文 **LightNote**。除此之外的一切标识**刻意保持不变**：
+产品名统一用英文 **LightNote**，代码标识统一为 `lightnote`：
 
-| 保持不变 | 值 | 原因 |
+| 标识 | 值 | 说明 |
 |---|---|---|
-| Dart 包名 | `smart_notes` | 改包名要动全部 `package:` import 与平台工程，风险远大于收益 |
-| applicationId | `com.example.smart_notes` | 改了就是另一个 App，老用户升不上来 |
-| 数据库文件名 | `qing_notes.sqlite` | 改名等于让所有人的笔记"消失"（除非写迁移搬文件） |
+| Dart 包名 | `lightnote` | 源码里全部写成 `package:lightnote/...`（`pubspec.yaml` 的 `name`） |
+| Android 包名 / applicationId | `com.lightnote.app` | `android/app/build.gradle.kts` 的 `namespace` 与 `applicationId`，与 `lib/core/app_info.dart` 的 `kAppPackageId` 一致；Kotlin 源码在 `android/app/src/main/kotlin/com/lightnote/app/` |
+| 数据库文件名 | `lightnote.sqlite` | 与包名一致（`kDatabaseFileName` / `kBackupDbEntryPath`，两处必须同步）。**还没有正式发布过，所以现在改得动；发布之后即冻结**——改名等于让所有人的笔记"消失" |
+| Windows 可执行文件名 | `smart_notes.exe` | **刻意保持原名**（`windows/CMakeLists.txt` 的 `BINARY_NAME`）：本机构建脚手架与 `bin\` 下的 shim 按这个名字找它，改名会断开编译通道，另案处理 |

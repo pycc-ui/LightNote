@@ -9,12 +9,12 @@ import 'dart:convert';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/features/ai/domain/tool_executor.dart';
-import 'package:smart_notes/features/ai/domain/tool_specs.dart';
-import 'package:smart_notes/features/ai/domain/tool_types.dart';
-import 'package:smart_notes/features/note/data/notebook_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/features/ai/domain/tool_executor.dart';
+import 'package:lightnote/features/ai/domain/tool_specs.dart';
+import 'package:lightnote/features/ai/domain/tool_types.dart';
+import 'package:lightnote/features/note/data/notebook_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
 
 void main() {
   late AppDatabase db;

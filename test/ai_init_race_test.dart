@@ -25,12 +25,12 @@ import 'package:dio/dio.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/models.dart';
-import 'package:smart_notes/core/secure/secure_store.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/data/deepseek_config.dart';
-import 'package:smart_notes/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/core/secure/secure_store.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/data/deepseek_config.dart';
+import 'package:lightnote/features/ai/domain/ai_repository.dart';
 
 /// 桩客户端：**只记录"被调用时有没有 Key"**，然后返回可解析的假响应。
 ///

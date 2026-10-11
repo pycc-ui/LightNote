@@ -4,7 +4,7 @@
 // 而写错的表现是"显示 100.0 KB 却还能保存"这种自相矛盾的提示。
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/util/ai_limits.dart';
+import 'package:lightnote/core/util/ai_limits.dart';
 
 void main() {
   /// 造一段**恰好** [bytes] 字节的文本（用 ASCII，1 字节 1 字符）。

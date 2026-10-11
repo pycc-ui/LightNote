@@ -6,10 +6,14 @@ import 'package:path_provider/path_provider.dart';
 
 /// 数据库文件名。
 ///
-/// 仍然是 `qing_notes.sqlite` 而不是 `lightnote.sqlite`：
-/// 改文件名等于让所有老用户的数据库"凭空消失"（App 会在新路径建一个空库）。
-/// 产品名可以改，数据库文件名一旦发布就不能改。
-const kDatabaseFileName = 'qing_notes.sqlite';
+/// 统一叫 `lightnote.sqlite`，与 Dart 包名 `lightnote`、
+/// Android 包名 `com.lightnote.app` 保持一致。
+///
+/// 但**发布过正式版之后这个名字就不能再改**：改文件名等于让所有老用户的
+/// 数据库"凭空消失"（App 会在新路径建一个空库，旧文件变成孤儿）。
+/// 现在还没有对外发布过正式版本，所以趁早统一；一旦发布即冻结，
+/// 和 [kBackupDbEntryPath] 一起改（两处必须同步，否则导入备份会找不到库）。
+const kDatabaseFileName = 'lightnote.sqlite';
 
 /// 当前数据库结构版本。
 ///
@@ -86,7 +90,7 @@ class DatabaseLocationInfo {
   /// 降级原因，用于在设置页如实告诉用户，而不是让他以为数据在新的位置上。
   final String? fallbackNote;
 
-  /// 是否由环境变量 `QING_NOTES_DB_DIR` 指定（调试/CI 用）。
+  /// 是否由环境变量 `LIGHTNOTE_DB_DIR` 指定（调试/CI 用）。
   final bool isEnvOverridden;
 
   /// 私有目录完全不可用（连候选位置都建不出来）。
@@ -121,7 +125,8 @@ class DatabaseLocationInfo {
 ///    所以在私有目录下放一个极小的 `storage.json` 作为锚点，
 ///    它永远只有几十字节，且不随工作目录变。
 ///
-/// 3. **不改文件名**。为兼容老数据，文件名保持 `qing_notes.sqlite`。
+/// 3. **文件名固定为 `lightnote.sqlite`**（[kDatabaseFileName]）。位置随便换，
+///    名字不跟着位置走——数据库搬到哪它都还叫这个名字。
 ///
 /// 4. 所有路径都做**真实试写**再返回。目录存在 != 可写
 ///    （Android 上选到的目录可能是只读的 SAF 位置）。
@@ -129,7 +134,7 @@ class DatabaseLocation {
   DatabaseLocation._();
 
   /// 环境变量覆盖，优先级最高。调试 / CI / 自动化测试用。
-  static const envOverride = 'QING_NOTES_DB_DIR';
+  static const envOverride = 'LIGHTNOTE_DB_DIR';
 
   /// 本次运行实际使用的目录。由 `_openConnection` 在打开时写入。
   ///

@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:sqlite3/sqlite3.dart';
 
 /// 用 sqlite3 包直接读取 App 建出来的数据库，验证表结构与种子数据。
-/// 本文件应放在 smart_notes 项目内执行（需要 package:sqlite3）。
+/// 本文件应放在 lightnote 项目内执行（需要 package:sqlite3）。
 ///
 /// 用法：dart run tool/inspect_db.dart <库文件路径>
 void main(List<String> args) {

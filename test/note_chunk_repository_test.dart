@@ -8,11 +8,11 @@ import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/features/note/data/note_chunk_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
-import 'package:smart_notes/features/note/domain/note_chunk.dart';
-import 'package:smart_notes/features/note/domain/note_chunker.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/features/note/data/note_chunk_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
+import 'package:lightnote/features/note/domain/note_chunk.dart';
+import 'package:lightnote/features/note/domain/note_chunker.dart';
 
 void main() {
   late AppDatabase db;

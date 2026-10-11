@@ -1,5 +1,5 @@
-name: smart_notes
-description: 智能笔记 App —— 笔记 + DeepSeek AI 整理 + 记忆卡片(SM-2) + 沉浸阅读
+name: lightnote
+description: 智能笔记 App —— 笔记 + DeepSeek AI 整理 + 沉浸阅读
 publish_to: "none"
 version: 1.0.0+2
 

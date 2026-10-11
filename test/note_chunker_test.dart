@@ -18,8 +18,8 @@
 // 下面每个用例都会顺手断言 `textOf(content) == substring(start, end)`。
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/features/note/domain/note_chunk.dart';
-import 'package:smart_notes/features/note/domain/note_chunker.dart';
+import 'package:lightnote/features/note/domain/note_chunk.dart';
+import 'package:lightnote/features/note/domain/note_chunker.dart';
 
 void main() {
   // ==========================================================================

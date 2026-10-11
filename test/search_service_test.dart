@@ -5,12 +5,12 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/features/note/data/notebook_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
-import 'package:smart_notes/features/note/data/search_service.dart';
-import 'package:smart_notes/features/note/domain/note_chunk.dart';
-import 'package:smart_notes/features/note/domain/note_chunker.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/features/note/data/notebook_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
+import 'package:lightnote/features/note/data/search_service.dart';
+import 'package:lightnote/features/note/domain/note_chunk.dart';
+import 'package:lightnote/features/note/domain/note_chunker.dart';
 
 void main() {
   group('纯函数：找命中位置', () {

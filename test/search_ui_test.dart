@@ -10,15 +10,15 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/prefs/preferences_service.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/domain/ai_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
-import 'package:smart_notes/features/note/data/search_service.dart';
-import 'package:smart_notes/features/note/domain/note_chunker.dart';
-import 'package:smart_notes/features/note/ui/note_editor_page.dart';
-import 'package:smart_notes/features/note/ui/search_page.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/prefs/preferences_service.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
+import 'package:lightnote/features/note/data/search_service.dart';
+import 'package:lightnote/features/note/domain/note_chunker.dart';
+import 'package:lightnote/features/note/ui/note_editor_page.dart';
+import 'package:lightnote/features/note/ui/search_page.dart';
 
 void main() {
   late AppDatabase db;

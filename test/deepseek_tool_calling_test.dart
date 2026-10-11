@@ -11,9 +11,9 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/models.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/domain/tool_types.dart';
+import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/tool_types.dart';
 
 /// 假 HTTP 适配器：把预置的 SSE 文本当成响应体，并记下最后一次请求。
 class _FakeAdapter implements HttpClientAdapter {

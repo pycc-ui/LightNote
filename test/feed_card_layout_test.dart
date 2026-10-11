@@ -5,7 +5,7 @@
 // 用 `tester.getRect` 精确断言位置，这类回归就再也藏不住。
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smart_notes/features/note/ui/widgets/feed_card.dart';
+import 'package:lightnote/features/note/ui/widgets/feed_card.dart';
 
 void main() {
   /// 把卡片放进固定尺寸的窗口，返回按钮的范围。

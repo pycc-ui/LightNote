@@ -9,12 +9,12 @@ import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/db/models.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/domain/ai_chat_repository.dart';
-import 'package:smart_notes/features/ai/domain/ai_repository.dart';
-import 'package:smart_notes/features/ai/domain/tool_types.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/ai_chat_repository.dart';
+import 'package:lightnote/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/features/ai/domain/tool_types.dart';
 
 /// 假客户端：`streamChat` 返回固定摘要并**计数**（验"只生成一次"），
 /// `streamAgent` 直接给一句回答（让 send 能跑完）。

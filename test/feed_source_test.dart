@@ -23,11 +23,11 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/features/ai/data/deepseek_client.dart';
-import 'package:smart_notes/features/ai/domain/ai_repository.dart';
-import 'package:smart_notes/features/note/data/feed_repository.dart';
-import 'package:smart_notes/features/note/data/notebook_repository.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/features/note/data/feed_repository.dart';
+import 'package:lightnote/features/note/data/notebook_repository.dart';
 
 /// 这两个 key 的名字**不能**变回 `feed_source_notebooks`：
 /// 老数据里那个 key 存的是"包含集"，当"排除集"读会把来源整个清空。

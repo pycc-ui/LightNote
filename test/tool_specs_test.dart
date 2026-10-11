@@ -8,7 +8,7 @@
 //   · **危险工具的描述里必须出现"不可恢复"** —— 模型据此才会在调用前提醒用户
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/features/ai/domain/tool_specs.dart';
+import 'package:lightnote/features/ai/domain/tool_specs.dart';
 
 void main() {
   group('清单规模与分层', () {

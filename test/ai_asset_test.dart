@@ -8,10 +8,10 @@
 //      但规整函数还服务卡片自己的标签，见 `AiPrompts.parseFeedCards`）
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:smart_notes/core/db/app_database.dart';
-import 'package:smart_notes/core/util/ai_limits.dart';
-import 'package:smart_notes/features/note/data/note_ai_asset_repository.dart';
-import 'package:smart_notes/features/note/data/note_repository.dart';
+import 'package:lightnote/core/db/app_database.dart';
+import 'package:lightnote/core/util/ai_limits.dart';
+import 'package:lightnote/features/note/data/note_ai_asset_repository.dart';
+import 'package:lightnote/features/note/data/note_repository.dart';
 import 'package:drift/native.dart';
 
 void main() {
