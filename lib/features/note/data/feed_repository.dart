@@ -182,7 +182,8 @@ class FeedRepository {
   /// 窗口"之后，同一片每次取出的文字都不一样，按 text hash 去重等于完全失效。
   ///
   /// 这一份只是**一次会话内的快速过滤**；真正的保证是落库的
-  /// `note_chunks.last_used_at`（重启后仍然生效，见 §7.3）。
+  /// `note_chunks.last_used_at`（重启后仍然生效，见《数据库设计》的
+  /// 「note_chunks（笔记切片）」一节）。
   final List<String> _recentChunks = [];
 
   /// **已生成过的卡片标题**（最新的在前），见 [kRecentTitleKeep]。

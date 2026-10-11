@@ -16,12 +16,12 @@ import '../../../core/util/ai_limits.dart';
 /// 这里早先还有一份"每篇笔记的 AI 标签"（`note_ai_tags` 表），
 /// 与摘要配套生成。它**只写不读**：唯一的读侧链路
 /// `get()` → `FeedRepository.tagsOf()` 零调用方，而卡片上显示的那个标签
-/// 其实来自卡片自己的 `FeedDraft.tags`（见 `displayTag`），与它无关。
+/// 其实来自卡片自己的 `FeedDraft.tag`（见 `displayTag`），与它无关。
 /// v8 把那张表和整条链路（含 `NoteAiAsset.tags`、`get()`、`tagsOf()`）一起删了；
 /// v9 又删掉了「用户手动标签」的 `tags` / `note_tags` 两张表。
 ///
-/// 现在唯一的标签是**卡片级**的（`FeedDraft.tags`），规整函数
-/// `sanitizeTags` 也已挪到 `core/util/ai_limits.dart`——它本来就是个纯文本工具，
+/// 现在唯一的标签是**卡片级**的（`FeedDraft.tag`，单个），规整函数
+/// `sanitizeTag` 也已挪到 `core/util/ai_limits.dart`——它本来就是个纯文本工具，
 /// 让 `prompts.dart` 为了它依赖一个 repository 是别扭的。
 ///
 /// ## 为什么不和展示型摘要合并（那张表已删）

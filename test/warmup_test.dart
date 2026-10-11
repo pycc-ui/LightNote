@@ -30,7 +30,7 @@ import 'package:lightnote/features/note/data/note_repository.dart';
 FeedDraft draft(String n) => FeedDraft(
       title: '标题$n',
       body: '正文$n',
-      tags: ['标签$n'],
+      tag: '标签$n',
     );
 
 void main() {
@@ -65,7 +65,7 @@ void main() {
       expect(got.map((d) => d.title), ['标题A', '标题B', '标题C'],
           reason: '顺序必须稳定（下次打开按这个顺序展示）');
       expect(got.first.body, '正文A');
-      expect(got.first.tags, ['标签A']);
+      expect(got.first.tag, '标签A');
     });
 
     test('取出即清（消费即清）', () async {
@@ -94,8 +94,8 @@ void main() {
 
     test('空标题或空正文的卡片不出现在读取结果里', () async {
       await db.replaceFeedReserve([
-        const FeedDraft(title: '', body: '只有正文'),
-        const FeedDraft(title: '只有标题', body: ''),
+        const FeedDraft(title: '', body: '只有正文', tag: ''),
+        const FeedDraft(title: '只有标题', body: '', tag: ''),
         draft('好卡片'),
       ]);
       final got = await db.takeFeedReserve();
@@ -118,7 +118,8 @@ void main() {
       );
       final got = await db.takeFeedReserve();
       expect(got, hasLength(1));
-      expect(got.single.tags, isEmpty);
+      // 列名是 feed_reserve.tags（历史遗留的 JSON 数组），但现在只放一个标签
+      expect(got.single.tag, '');
     });
   });
 
@@ -317,11 +318,11 @@ void main() {
 
     test('标题指纹去重：标点 / 空格 / 大小写不同也算同一张', () {
       final drafts = [
-        FeedDraft(title: '抄书是最没用的努力', body: 'a'),
-        FeedDraft(title: '抄书是最没用的努力！', body: 'b'),
-        FeedDraft(title: ' 抄书是最没用的努力 ', body: 'c'),
-        FeedDraft(title: '抄书，是最没用的努力', body: 'd'),
-        FeedDraft(title: '完全另一个题目', body: 'e'),
+        FeedDraft(title: '抄书是最没用的努力', body: 'a', tag: ''),
+        FeedDraft(title: '抄书是最没用的努力！', body: 'b', tag: ''),
+        FeedDraft(title: ' 抄书是最没用的努力 ', body: 'c', tag: ''),
+        FeedDraft(title: '抄书，是最没用的努力', body: 'd', tag: ''),
+        FeedDraft(title: '完全另一个题目', body: 'e', tag: ''),
       ];
 
       final out = FeedRepository.dropSimilarDrafts(
@@ -335,8 +336,8 @@ void main() {
 
     test('同一批里自己撞车的也只留一张', () {
       final drafts = [
-        FeedDraft(title: '同一句话', body: 'a'),
-        FeedDraft(title: '同一句话', body: 'b'),
+        FeedDraft(title: '同一句话', body: 'a', tag: ''),
+        FeedDraft(title: '同一句话', body: 'b', tag: ''),
       ];
 
       // 注意 against 为空时也要去重——这里曾经写成"空就提前返回"，漏掉了批内重复
@@ -346,8 +347,8 @@ void main() {
 
     test('英文标题不区分大小写', () {
       final drafts = [
-        FeedDraft(title: 'Spaced Repetition', body: 'a'),
-        FeedDraft(title: 'spaced repetition', body: 'b'),
+        FeedDraft(title: 'Spaced Repetition', body: 'a', tag: ''),
+        FeedDraft(title: 'spaced repetition', body: 'b', tag: ''),
       ];
       expect(FeedRepository.dropSimilarDrafts(drafts, against: const []),
           hasLength(1));
@@ -355,8 +356,8 @@ void main() {
 
     test('标题里没有实义字符时不误杀', () {
       final drafts = [
-        FeedDraft(title: '？？？', body: 'a'),
-        FeedDraft(title: '！！！', body: 'b'),
+        FeedDraft(title: '？？？', body: 'a', tag: ''),
+        FeedDraft(title: '！！！', body: 'b', tag: ''),
       ];
       expect(FeedRepository.dropSimilarDrafts(drafts, against: const []),
           hasLength(2));

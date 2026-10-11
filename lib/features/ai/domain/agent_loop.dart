@@ -136,17 +136,19 @@ class AgentLoop {
   final ToolExecutor executor;
 
   /// 一轮用户输入最多允许几轮工具往返
-  static const maxRounds = 6;
+  static const maxRounds = 15;
 
-  /// `requestTools` 单次最多批几个（协议里定的）
-  static const maxRequestTools = 5;
+  /// `requestTools` 单次最多批几个。
+  ///
+  /// **值来自 `tool_specs.dart` 的 [kMaxRequestTools]**：同一个数字还要写进
+  /// 工具描述给模型看，两处各写各的就会出现"描述说 5、实际收 6"。
+  static const maxRequestTools = kMaxRequestTools;
 
   /// 一轮用户输入里 `askUser` 最多问几次。
   ///
   /// **必须封顶**：模型完全可能"问一句 → 拿不到满意答案 → 再问一句"地循环下去，
-  /// 而每次都要等用户动手。用户被问第三次时已经烦了，第四次就会直接关掉。
-  /// 到上限后强制收尾，让它用现有信息回答。
-  static const maxAsksPerTurn = 3;
+  /// 而每次都要等用户动手。到上限后强制收尾，让它用现有信息回答。
+  static const maxAsksPerTurn = 5;
 
   /// 跑一轮。 [history] 必须**已经包含**本轮的用户输入。
   ///

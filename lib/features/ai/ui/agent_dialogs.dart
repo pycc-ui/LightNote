@@ -4,7 +4,7 @@ import '../../../core/theme/dimens.dart';
 import '../domain/ask_user.dart';
 import '../domain/tool_executor.dart';
 
-/// 「要不要这么做」的确认层（§9.4 的 App 强制拦截在这里落地）。
+/// 「要不要这么做」的确认层（《AI接入设计》说的"App 强制拦截"在这里落地）。
 ///
 /// ## 两个不能省的东西
 ///

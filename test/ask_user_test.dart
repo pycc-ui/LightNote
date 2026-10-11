@@ -3,7 +3,8 @@
 // 三件事必须成立，否则这个功能是坏的：
 //   · 选项**来自 App 的查询**（模型编的清单会变旧、会给出已删除的 id）
 //   · 挂起状态在**数据库**里（杀掉 App 重开还能继续回答）
-//   · 问不过 3 次（模型会"问一句 → 不满意 → 再问一句"地循环下去）
+//   · 问不过 N 次（模型会"问一句 → 不满意 → 再问一句"地循环下去；N 见
+//     `AgentLoop.maxAsksPerTurn`）
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -310,7 +311,7 @@ void main() {
     });
   });
 
-  group('AgentLoop：问不过 3 次', () {
+  group('AgentLoop：问不过 ${AgentLoop.maxAsksPerTurn} 次', () {
     late AppDatabase db;
     late ToolExecutor executor;
 
@@ -320,7 +321,7 @@ void main() {
     });
     tearDown(() => db.close());
 
-    test('★ 第 4 次 askUser 会被挡下，让模型收尾', () async {
+    test('★ 第 ${AgentLoop.maxAsksPerTurn + 1} 次 askUser 会被挡下，让模型收尾', () async {
       var round = 0;
       final seen = <String>[];
 
@@ -331,7 +332,9 @@ void main() {
       }) {
         round++;
         seen.addAll(messages.where((m) => m.role == 'tool').map((m) => m.content));
-        if (round <= 4) {
+        // 一直问到"上限 + 1"：最后一次会被循环挡下，模型只好收尾。
+        // 用常量而不是写死的 4，是为了改上限时这条测试跟着走（别问"到底几次"）
+        if (round <= AgentLoop.maxAsksPerTurn + 1) {
           return Stream.value(AiDone(
             toolCalls: [
               ToolCall(
@@ -368,7 +371,7 @@ void main() {
 
       expect(asked, AgentLoop.maxAsksPerTurn,
           reason: '问到第 ${AgentLoop.maxAsksPerTurn} 次就该封顶');
-      // 第 4 次（被拒的那次）会得到一条"不要再问"的工具结果
+      // 被拒的那次会得到一条"不要再问"的工具结果
       expect(
         seen.any((c) => c.contains('不要再问')),
         isTrue,
@@ -376,7 +379,7 @@ void main() {
       );
     });
 
-    test('asksSoFar 直接生效：已问满 3 次时，再问就被拒', () async {
+    test('asksSoFar 直接生效：已问满 ${AgentLoop.maxAsksPerTurn} 次时，再问就被拒', () async {
       final toolResults = <String>[];
 
       Stream<AiEvent> asking({

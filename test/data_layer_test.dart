@@ -313,6 +313,86 @@ void main() {
       expect(await db.watchMessages('conv-1').first, isEmpty);
     });
 
+    test('会话列表只列**有消息**的会话（空会话不显示，但行还在）', () async {
+      final now = DateTime.now().toUtc();
+      await db.upsertConversation(AiConversationsCompanion.insert(
+        id: 'with-msg',
+        createdAt: now,
+        updatedAt: now,
+      ));
+      // 时间戳差一分钟：排序断言要**确定**，不能靠"两次调用碰巧不同毫秒"
+      await db.upsertConversation(AiConversationsCompanion.insert(
+        id: 'empty',
+        createdAt: now,
+        updatedAt: now.add(const Duration(minutes: 1)),
+      ));
+      await db.insertAiMessage(AiMessagesCompanion.insert(
+        id: 'm1',
+        conversationId: 'with-msg',
+        role: 'user',
+        content: const Value('你好'),
+        createdAt: now,
+      ));
+
+      // 早先"点一下新建就落一行"留下的空壳不该出现在列表里：
+      // 它们时间戳最新，会排在最前面、还会被"打开上次的会话"选中
+      final list = await db.watchConversations().first;
+      expect(list.map((c) => c.id), ['with-msg']);
+      // 只是**不显示**，不删行（删除是破坏性动作，不在这里做）
+      expect((await db.getConversation('empty'))?.id, 'empty');
+
+      // 一旦有了消息就该出现（列表是 watch 的，发消息要能刷出来）
+      await db.insertAiMessage(AiMessagesCompanion.insert(
+        id: 'm2',
+        conversationId: 'empty',
+        role: 'user',
+        content: const Value('在吗'),
+        createdAt: now,
+      ));
+
+      final after = await db.watchConversations().first;
+      expect(after.map((c) => c.id).toSet(), {'with-msg', 'empty'});
+      expect(after.first.id, 'empty', reason: '最近活动的排在最前');
+    });
+
+    test('批量删会话：一条语句删完，消息跟着级联走，空列表是安全 no-op', () async {
+      final now = DateTime.now().toUtc();
+      for (final id in ['c1', 'c2', 'c3']) {
+        await db.upsertConversation(AiConversationsCompanion.insert(
+          id: id,
+          createdAt: now,
+          updatedAt: now,
+        ));
+        await db.insertAiMessage(AiMessagesCompanion.insert(
+          id: 'm-$id',
+          conversationId: id,
+          role: 'user',
+          content: const Value('你好'),
+          createdAt: now,
+        ));
+      }
+
+      // 空列表：什么都不做，而不是报错
+      await db.deleteConversations(const []);
+      expect((await db.watchConversations().first).length, 3);
+
+      await db.deleteConversations(['c1', 'c2']);
+
+      expect(
+        (await db.watchConversations().first).map((c) => c.id),
+        ['c3'],
+        reason: '只删传进去的那些',
+      );
+      // 外键 ON DELETE CASCADE 生效：消息跟着走，不留孤儿行
+      expect(await db.watchMessages('c1').first, isEmpty);
+      expect(await db.watchMessages('c2').first, isEmpty);
+      expect((await db.watchMessages('c3').first).length, 1);
+
+      // 传了不存在的 id 也不影响还在的行
+      await db.deleteConversations(['并不存在']);
+      expect((await db.watchConversations().first).map((c) => c.id), ['c3']);
+    });
+
     test('settings 表读写与覆盖', () async {
       expect(await db.readSetting('k'), isNull);
       await db.writeSetting('k', 'v1');

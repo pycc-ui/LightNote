@@ -261,5 +261,38 @@ void main() {
         reason: '不清就是一条永远读不到的垃圾',
       );
     });
+
+    test('批量删会话时，**每一条**的摘要都要清掉（不是只清第一条）', () async {
+      // 会话记录页的「多选 → 删除」走的就是这条路径：单条删除是它的特例
+      //（`deleteConversation` 就是 `deleteConversations([id])`），
+      // 所以这里盯的是"循环清 key"那一步别写成只清一个。
+      final a = await chat.createConversation();
+      final b = await chat.createConversation();
+      await db.writeSetting('${AiChatRepository.summaryKeyPrefix}${a.id}', 'A 的摘要');
+      await db.writeSetting('${AiChatRepository.summaryKeyPrefix}${b.id}', 'B 的摘要');
+
+      final n = await chat.deleteConversations([a.id, b.id]);
+
+      expect(n, 2);
+      for (final id in [a.id, b.id]) {
+        expect(
+          await db.readSetting('${AiChatRepository.summaryKeyPrefix}$id'),
+          isNull,
+          reason: '会话 $id 的摘要没清掉',
+        );
+      }
+    });
+
+    test('批量删会话：空列表是安全 no-op（返回 0，不动任何数据）', () async {
+      final conv = await chat.createConversation();
+      await db.writeSetting('${AiChatRepository.summaryKeyPrefix}${conv.id}', '留着');
+
+      expect(await chat.deleteConversations(const []), 0);
+      expect(await db.getConversation(conv.id), isNotNull);
+      expect(
+        await db.readSetting('${AiChatRepository.summaryKeyPrefix}${conv.id}'),
+        '留着',
+      );
+    });
   });
 }

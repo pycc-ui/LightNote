@@ -37,7 +37,7 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///   8  **删除 note_feed_state / note_ai_tags** 两张死表——
 ///      前者是卡片流"复习已有笔记"时代的调度状态（改成 AI 生成新卡片后
 ///      就不适用了），后者是每篇笔记的 AI 标签（只写不读，卡片上显示的
-///      标签其实来自卡片自己的 `FeedDraft.tags`）
+///      标签其实来自卡片自己的 `FeedDraft.tag`）
 ///   9  **删除 tags / note_tags**（用户手动标签整条链路：写入只有编辑页那个
 ///      弹窗，读取只有它自己 + Markdown 导出里一行 `> 标签：`，产品确认不要）；
 ///      并改名两张表：`note_ai_summaries` → `ai_note_summaries`（跟同族的
@@ -151,6 +151,24 @@ class DatabaseLocation {
     _privateRoot = null;
   }
 
+  /// 「用户主目录」的取法。**默认就是环境变量，只有测试会覆盖它**。
+  ///
+  /// 为什么需要这个缝：Dart 的 `Platform.environment` 是**只读**的，
+  /// 而"所有常规私有目录都不可写 → 退到程序所在目录"这条路径要求
+  /// **每一个**候选都不可写 —— 主目录也是候选之一。
+  /// 测试改不了环境变量，只能把它一并指到死路上；不留这个缝，
+  /// 测出来的会是"主目录赢了"，而不是那条兜底真的生效。
+  static String Function() homeDirOf = defaultHomeDirOf;
+
+  /// 默认取法（`USERPROFILE` → `HOME`）。
+  ///
+  /// 单独抽出来是为了让测试能**还原**：覆盖过的静态字段还原不回去的话，
+  /// 会污染同一进程里后面所有用例（"我明明没改环境，怎么路径变了"）。
+  static String defaultHomeDirOf() =>
+      Platform.environment['USERPROFILE'] ??
+      Platform.environment['HOME'] ??
+      '';
+
   /// 显式指定本次运行的目录（导入后无缝切换时使用）。
   static void setResolvedDirectory(Directory dir) => _resolved = dir;
 
@@ -187,9 +205,7 @@ class DatabaseLocation {
     // 用户主目录在这种环境下通常仍然可写，而且**不会被系统清理**。
     // 刻意不把「系统临时目录」列为候选：临时目录会在重启或磁盘清理时被删掉，
     // 把用户的笔记库放进去等于埋一个"过几天数据没了"的定时炸弹。
-    final home = Platform.environment['USERPROFILE'] ??
-        Platform.environment['HOME'] ??
-        '';
+    final home = homeDirOf();
     if (home.trim().isNotEmpty) {
       out.add((
         label: '用户主目录',

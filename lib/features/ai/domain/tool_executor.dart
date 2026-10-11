@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 
 import '../../../core/db/app_database.dart';
+import '../../note/data/note_ai_asset_repository.dart';
 import '../../note/data/notebook_repository.dart';
 import '../../note/data/note_chunk_repository.dart';
 import '../../note/data/note_repository.dart';
@@ -59,7 +60,7 @@ typedef ToolConfirmFn = Future<bool> Function(ToolConfirmRequest request);
 /// `askUser` 是模型**自愿**调用的。它忘了调，删除就直接执行了。
 /// 所以风险分级（[ToolRisk]）由 [toolByName] 上的定义给出，
 /// **执行器在动手之前先查级别**：删除类必须先弹确认，模型绕不过去。
-/// 见执行书 §9.4。
+/// 见《AI接入设计》的「工具清单、风险分级与调用约定」一节。
 ///
 /// ## 没有确认通道 = 写操作一律拒绝（fail closed）
 ///
@@ -77,11 +78,16 @@ class ToolExecutor {
     this.onConfirm,
     this.workspace = AgentWorkspace.all,
   })  : _search = SearchService(_db),
-        _chunks = NoteChunkRepository(_db);
+        _chunks = NoteChunkRepository(_db),
+        _assets = NoteAiAssetRepository(_db);
 
   final AppDatabase _db;
   final SearchService _search;
   final NoteChunkRepository _chunks;
+
+  /// AI 资产（缓存摘要）只读一份给 `getNoteMeta` 用：摘要**用户看不到**，
+  /// 但"有没有摘要"能帮模型判断这篇笔记值不值得展开。
+  final NoteAiAssetRepository _assets;
 
   /// **AI 能看到的笔记范围**。
   ///
@@ -199,17 +205,21 @@ class ToolExecutor {
         case 'readChunk':
           return await _readChunk(args);
 
-        // ---- 笔记库 / 笔记列表 ----
+        // ---- 笔记库 / 笔记列表 / 元信息 ----
         case 'listNotebooks':
           return await _listNotebooks();
         case 'listNotes':
           return await _listNotes(args);
+        case 'getNoteMeta':
+          return await _getNoteMeta(args);
 
         // ---- 本会话历史 ----
         case 'listHistory':
           return _listHistory(args, history);
         case 'readHistory':
           return _readHistory(args, history);
+        case 'searchHistory':
+          return _searchHistory(args, history);
 
         // ---- 创建类（轻确认）----
         case 'createNote':
@@ -220,6 +230,8 @@ class ToolExecutor {
         // ---- 修改类 ----
         case 'updateNote':
           return await _updateNote(args);
+        case 'appendToNote':
+          return await _appendToNote(args);
         case 'replaceInNote':
           return await _replaceInNote(args);
         case 'moveNote':
@@ -524,9 +536,61 @@ class ToolExecutor {
     return ToolResult.success({
       'count': briefs.length,
       'notes': [
-        for (final b in briefs) {'id': b.id, 'title': b.title},
+        for (final b in briefs)
+          {
+            'id': b.id,
+            'title': b.title,
+            'notebookId': b.notebookId,
+            'modifiedAt': _stamp(b.updatedAt),
+          },
       ],
-      'hint': '这里只有标题。看内容先 listChunks 再 readChunk。',
+      // 顺序本身就是信息：模型说"最近那篇"时靠的就是它，所以得说明白
+      'order': '按修改时间倒序，最近改过的在最前',
+      'hint': '这里只有元数据（没有正文）。看内容先 listChunks 再 readChunk；'
+          '想知道某篇多大用 getNoteMeta。',
+    });
+  }
+
+  /// 一条笔记的**元信息**，**不含正文**。
+  ///
+  /// 与 `listChunks` 的分工：这个是"这篇是什么、值不值得展开"，
+  /// 那个是"该读哪一片"。两者都不带正文 —— 这是 token 经济的前提：
+  /// 模型要先能**廉价地**判断，才不会一上来就把整篇灌进来。
+  Future<ToolResult> _getNoteMeta(Map<String, Object?> a) async {
+    final noteId = _str(a, 'noteId');
+    if (noteId == null || noteId.isEmpty) {
+      return ToolResult.failure('getNoteMeta 需要 `noteId`。');
+    }
+    final note = await _db.getNote(noteId);
+    if (note == null) {
+      return ToolResult.failure(
+        '找不到笔记 `$noteId`（可能已被删除）。用 searchNotes 重新找。',
+      );
+    }
+    // 片数走 `chunksFor` 而不是 `chunkCount`：前者会在"正文变了但没重切"时
+    // 顺手修好切片，报出来的数字和 readChunk 真能读到的片**一定一致**。
+    final chunks = await _chunks.chunksFor(noteId, note.content);
+    final notebook = note.notebookId == null
+        ? null
+        : await _db.getNotebook(note.notebookId!);
+    final summary = await _assets.getFreshSummary(noteId);
+
+    return ToolResult.success({
+      'noteId': note.id,
+      'title': note.title,
+      'notebookId': note.notebookId,
+      'notebookName': notebook?.name ?? '我的轻笔记',
+      'isInbox': note.isInbox,
+      'createdAt': _stamp(note.createdAt),
+      'modifiedAt': _stamp(note.updatedAt),
+      'charCount': note.content.length,
+      'chunkCount': chunks.length,
+      'hasSummary': summary != null,
+      // 摘要 ≤300 字，比正文便宜一个数量级，有就直接给 —— 但它是**旧版本**
+      // 的概括（正文改多了会作废，作废了这里就是 false），所以标注清楚。
+      if (summary != null) 'summary': summary,
+      'hint': '这里没有正文。看目录用 listChunks(noteId)，'
+          '看内容用 readChunk(noteId, index)。',
     });
   }
 
@@ -586,6 +650,73 @@ class ToolExecutor {
       'chunks': [
         for (final p in pieces) {'index': p.index, 'text': p.text},
       ],
+    });
+  }
+
+  /// 在本会话历史里按关键词搜 —— `searchNotes` 的**会话版**。
+  ///
+  /// 两个设计都照抄 `searchNotes`，因为它们解决的是同一个问题：
+  ///
+  /// 1. **只给片号 + 片段，不给全文**。命中一片就说清"是这几句"，
+  ///    要正文再 `readHistory(indexes: [...])` —— 一次搜索不该顺手灌进 700 字。
+  /// 2. **片号来自同一个 [HistoryChunker]**，所以这里的 `index`
+  ///    和 `listHistory` / `readHistory` 用的是**同一套编号**，
+  ///    模型拿到就能直接用，不需要做任何换算。
+  ///
+  /// 排序与 `searchNotes` 相反：那里按 `updatedAt` 倒序，这里**从最新的一片
+  /// 往前找**（所以结果也是最新的在前）。"我们之前是不是聊过 X" 问的几乎
+  /// 总是最近那次，先命中就先省一次往返。
+  ToolResult _searchHistory(Map<String, Object?> a, List<AiMessage> history) {
+    final query = (_str(a, 'query') ?? '').trim();
+    if (query.isEmpty) {
+      return ToolResult.failure('searchHistory 需要 `query`（关键词）。');
+    }
+    if (history.isEmpty) {
+      return ToolResult.success({
+        'count': 0,
+        'results': const [],
+        'hint': '本会话还没有更早的内容。',
+      });
+    }
+    final limit = (_int(a, 'limit') ?? 5).clamp(1, 20);
+
+    final all = HistoryChunker.chunk(history);
+    final hits = <Map<String, Object?>>[];
+    // 大小写：`searchNotes` 走 SQLite 的 LIKE，英文是不区分大小写的。
+    // 这里要**对齐那个手感**，否则搜 "SM-2" 找不到 "sm-2"。
+    // toLowerCase 极少数情况下会改变长度，长度变了就退回精确匹配，不硬凑偏移。
+    final lower = query.toLowerCase();
+    for (final c in all.reversed) {
+      if (hits.length >= limit) break;
+      var at = c.text.indexOf(query);
+      if (at < 0 && lower != query) {
+        final hay = c.text.toLowerCase();
+        if (hay.length == c.text.length) at = hay.indexOf(lower);
+      }
+      if (at < 0) continue;
+      hits.add({
+        'index': c.index,
+        'at': _stamp(c.at),
+        'roles': c.roles,
+        'userSnippet': c.userSnippet,
+        'charCount': c.charCount,
+        'snippet': _snippetAround(c.text, at, query.length),
+      });
+    }
+
+    if (hits.isEmpty) {
+      return ToolResult.success({
+        'count': 0,
+        'results': const [],
+        'hint': '本会话更早的内容里没有「$query」。'
+            '换个说法再搜（少几个字、只留关键词），或者用 listHistory 看目录。',
+      });
+    }
+    return ToolResult.success({
+      'count': hits.length,
+      'results': hits,
+      'hint': '要看命中那一片的正文用 readHistory(indexes: [片号])，'
+          '一轮最多 $maxChunksPerTurn 片。片号与 listHistory 同一套。',
     });
   }
 
@@ -657,13 +788,91 @@ class ToolExecutor {
   // 修改类
   // ==========================================================================
 
+  /// 在笔记**末尾追加**一段内容。
+  ///
+  /// ## 为什么单独给一个工具，而不是让模型用 `updateNote` 拼全文
+  ///
+  /// "把这段加到末尾"用 `updateNote` 要这么干：先 `readChunk` 读出全文
+  /// （几千字进上下文），再把「原文 + 新内容」整体写回去。中间任何一次抄漏
+  /// 都会**静默丢掉内容** —— 而它看起来完全像成功。
+  ///
+  /// 追加不需要读全文：拼接由 App 在本地做，模型只出"加什么"。
+  /// 于是这个工具的输入长度和"要加的东西"成正比，而不是和整篇成正比。
+  ///
+  /// ## 仍然走确认层
+  ///
+  /// 它改了用户的数据，所以和 `updateNote` 一样弹「改前 / 改后」+ 可撤销。
+  /// 不能因为"只是追加、不删东西"就免确认 —— 那等于开了一个
+  /// 不需要点头的写入通道，模型可以反复往里灌内容。
+  Future<ToolResult> _appendToNote(Map<String, Object?> a) async {
+    final noteId = _str(a, 'noteId');
+    final text = _str(a, 'text');
+    if (noteId == null || noteId.isEmpty) {
+      return ToolResult.failure('appendToNote 需要 `noteId`。');
+    }
+    if (text == null || text.trim().isEmpty) {
+      return ToolResult.failure(
+        'appendToNote 需要 `text`（要追加的内容），空内容没什么可加的。',
+      );
+    }
+
+    final note = await _db.getNote(noteId);
+    if (note == null) {
+      return ToolResult.failure(
+        '找不到笔记 `$noteId`（可能已被删除）。用 searchNotes 重新找。',
+      );
+    }
+
+    // 空行分隔：直接接在最后一行后面会和原文黏成一段（Markdown 里尤其明显）。
+    // 正文本来就是空的（新建还没写）时不加分隔，否则笔记会以空行开头。
+    //
+    // 追加内容首尾的空白会被去掉：写进用户笔记里的东西不该带着一串空行，
+    // 下面报出的 `appendedChars` 用的是**同一份** trim 后的文本，不会自相矛盾。
+    final body = note.content;
+    final next = body.trim().isEmpty
+        ? text.trim()
+        : '${body.trimRight()}\n\n${text.trim()}';
+
+    // 追加**不要求**先读过这篇，所以这里不是"必须拦"的粗筛，
+    // 只是"如果它确实读过、而读完之后用户又改过"就提醒一句。
+    final seen = _snapshot[noteId];
+    final changedSinceRead = seen != null && seen != _hashOf(body);
+
+    final (ok, denied) = await _ask(
+      toolByName('appendToNote')!,
+      ToolConfirmRequest(
+        risk: ToolRisk.modify,
+        toolName: 'appendToNote',
+        title: '追加内容',
+        summary: '在《${note.title.trim().isEmpty ? '无标题' : note.title}》'
+            '末尾追加 ${text.trim().length} 字：「${_clip(text)}」',
+        before: body,
+        after: next,
+        warning: changedSinceRead
+            ? '这条笔记在你读到它之后被改过，确认一下追加的位置对不对。'
+            : null,
+      ),
+    );
+    if (!ok) return denied!;
+
+    _rememberUndo(note);
+    await _writeNote(note, title: note.title, content: next);
+
+    return ToolResult.success({
+      'noteId': note.id,
+      'charCount': next.length,
+      'appendedChars': text.trim().length,
+      'undoAvailable': true,
+    });
+  }
+
   /// 改笔记的某一段。
   ///
   /// ## 为什么用锚点而不是"第几段"
   ///
   /// AI 读到"第 3 段"之后，用户往前面插了一段 —— 再按 index 3 改就**改错地方**，
   /// 而且改得毫无声息。`expectedText` 校验的是"要改的那段原文还在不在"，
-  /// 不在就返回错误让 AI 重新定位。见 §9.6。
+  /// 不在就返回错误让 AI 重新定位。见《AI接入设计》的「参数锚点」一节。
   Future<ToolResult> _updateNote(Map<String, Object?> a) async {
     final noteId = _str(a, 'noteId');
     if (noteId == null) return ToolResult.failure('updateNote 需要 `noteId`。');
@@ -737,7 +946,7 @@ class ToolExecutor {
   /// 纯字符串替换（**全部**替换）。
   ///
   /// 与 `updateNote` 一样走 App 确认 —— 不是"App 绕过 AI 直接改"。
-  /// 这样确认、撤销、审计不用各多一套分支（§9.6 的定案）。
+  /// 这样确认、撤销、审计不用各多一套分支（《AI接入设计》的「参数锚点」一节里的定案）。
   Future<ToolResult> _replaceInNote(Map<String, Object?> a) async {
     final noteId = _str(a, 'noteId');
     final find = _str(a, 'find');
@@ -885,11 +1094,35 @@ class ToolExecutor {
     return flat.length > max ? '${flat.substring(0, max)}…' : flat;
   }
 
+  /// 时间戳（本地时间）。**只到分钟**：模型要知道的是"几天前的"，
+  /// 秒和时区对它没用，写全了只是多占 token。
+  ///
+  /// 与 `HistoryChunker` 目录里的格式**保持一致** —— 两处都在回灌给模型，
+  /// 格式不同会让人以为它们不是一回事。
+  static String _stamp(DateTime utc) {
+    final l = utc.toLocal();
+    String p2(int v) => v.toString().padLeft(2, '0');
+    return '${l.year}-${p2(l.month)}-${p2(l.day)} ${p2(l.hour)}:${p2(l.minute)}';
+  }
+
+  /// 命中位置前后各取一点，拼成单行片段（搜索结果显示用）。
+  ///
+  /// 换行全部压成空格：片段是要**塞进 JSON 的一行**，
+  /// 里面带 `\n` 只会让模型更难看出命中在哪。
+  static String _snippetAround(String text, int at, int len,
+      {int before = 30, int after = 60}) {
+    final from = at - before < 0 ? 0 : at - before;
+    final to = at + len + after > text.length ? text.length : at + len + after;
+    final flat = text.substring(from, to).replaceAll(RegExp(r'\s+'), ' ').trim();
+    return '${from > 0 ? '…' : ''}$flat${to < text.length ? '…' : ''}';
+  }
+
   // ==========================================================================
   // 删除类
   //
   // ## 没有回收站
-  // §9.7 的定案：`deleteNote` 授权确认后**直接删**，不提供 `restoreNote`。
+  // 定案见《AI接入设计》的「确认流程：风险拦截在 App」：
+  // `deleteNote` 授权确认后**直接删**，不提供 `restoreNote`。
   // 内部实现仍然是**软删除**（`deletedAt` 置位、行还在）——那是为了防 bug、
   // 留后路，而不是给用户一个回收站入口。
   //

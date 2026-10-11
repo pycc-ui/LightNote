@@ -277,7 +277,7 @@ void main() {
       expect(data['hint'], isA<String>());
     });
 
-    test('列笔记只给 id 与标题（不给正文）', () async {
+    test('列笔记只给元数据（不给正文）', () async {
       await notes.createInbox(title: '第一篇', content: '这是不该出现的正文内容。');
 
       final r = await executor.execute('listNotes', const {});
@@ -286,8 +286,11 @@ void main() {
       expect(data['count'], 1);
       final first = ((data['notes'] as List).first as Map);
       expect(first['title'], '第一篇');
-      expect(first.length, 2, reason: '只有 id 与 title 两个字段');
-      // 工具描述里写着"只要 id 和标题时用它，比 searchNotes 省钱"——
+      // 按**键集合**断言而不是数个数：多一个 `content` 与多一个 `modifiedAt`
+      // 完全不是一回事，只数字段个数分不出这两种情况
+      expect(first.keys.toSet(), {'id', 'title', 'notebookId', 'modifiedAt'},
+          reason: '只有元数据：id / 标题 / 所属库 / 修改时间，**没有正文**');
+      // 工具描述里写着"只要元数据时用它，比 searchNotes 省钱"——
       // 那就得真的不把正文取出来
       expect(r.encode().contains('不该出现'), isFalse);
     });

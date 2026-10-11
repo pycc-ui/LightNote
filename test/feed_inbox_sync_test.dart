@@ -63,7 +63,7 @@ void main() {
   const draft = FeedDraft(
     title: '记笔记时想分类，等于自断灵感',
     body: '正文内容，讲的是先写下来再整理。',
-    tags: ['笔记法'],
+    tag: '笔记法',
   );
 
   group('收下 → 卡片显示已加入', () {
@@ -232,7 +232,7 @@ void main() {
     });
 
     test('不同卡片收下后各自对应自己的那条', () async {
-      const other = FeedDraft(title: '另一条', body: '另一段正文');
+      const other = FeedDraft(title: '另一条', body: '另一段正文', tag: '别的');
       final a = await notes.createInbox(title: draft.title, content: draft.body);
       final b = await notes.createInbox(title: other.title, content: other.body);
       final map = await snapshot();

@@ -28,10 +28,6 @@ class AiLimits {
 
   // ---- 标签 ----
 
-  /// 标签个数区间
-  static const tagCountMin = 2;
-  static const tagCountMax = 6;
-
   /// 单个标签的**汉字**上限
   static const tagMaxCjk = 5;
 

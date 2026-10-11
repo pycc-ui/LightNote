@@ -306,15 +306,16 @@ void main() {
       expect(receipt.content, contains('没有这个工具'));
     });
 
-    test('单次最多批 5 个（协议上限）', () async {
+    test('单次最多批 ${AgentLoop.maxRequestTools} 个（超出的根本不处理）', () async {
       model.callTool('requestTools', {
         'names': [
           'deleteNotebook',
           'renameNotebook',
           'batchMoveNotes',
           'batchDeleteNotes',
-          'searchNotes', // 第 5 个：核心层，会被拒
-          'listNotes', // 第 6 个：**超出上限，根本不该被处理**
+          'searchHistory', // 第 5 个：按需层，正常批准
+          'listNotes', // 第 6 个：常用层，会被"本来就有定义"拒掉，但**在上限内**
+          'getNoteMeta', // 第 7 个：**超出上限，根本不该被处理**
         ],
       });
       model.say('好');
@@ -325,8 +326,9 @@ void main() {
       ));
 
       final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, isNot(contains('listNotes')),
-          reason: '第 6 个名字超出 5 个的上限，不该出现在回执里');
+      expect(receipt.content, contains('searchHistory'), reason: '上限内的该批准');
+      expect(receipt.content, isNot(contains('getNoteMeta')),
+          reason: '第 ${AgentLoop.maxRequestTools + 1} 个名字超出上限，不该出现在回执里');
     });
 
     test('names 缺失 → 可读的失败，不是崩', () async {

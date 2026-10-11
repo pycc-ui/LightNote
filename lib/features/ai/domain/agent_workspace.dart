@@ -56,6 +56,23 @@ class AgentWorkspace {
   static const none = AgentWorkspace();
   static const all = AgentWorkspace(mode: WorkspaceMode.all);
 
+  /// **新会话的默认工作区**：全体空间。
+  ///
+  /// ## 为什么不默认「不选择」
+  ///
+  /// `none` 不只是"少一句话"：`ToolExecutor._scope` 会把它变成
+  /// "一个目录都不含、也不含轻笔记"的查询，于是用户第一句问
+  /// "帮我看看上周那篇"，得到的是"我一条笔记都看不到"。他只会以为 AI 坏了 ——
+  /// 而不会想到是右上角那个**没人会主动点**的工作区入口造成的。
+  ///
+  /// 默认全选、想做减法的人自己去调，才是默认值该有的样子：
+  /// 减法是**有意**的动作，也能一眼看出自己减了什么。
+  ///
+  /// 想做减法照样做得到：面板里选「不选择」或挑几个库，落库的是
+  /// `{"mode":"none"}` / `{"mode":"pick",…}`，与"从没设过"（空串）分得清 ——
+  /// 见 [parse]。
+  static const initial = all;
+
   /// AI 看不到任何笔记（`none`，或选了目录但一个都没选）
   bool get isEmpty =>
       mode == WorkspaceMode.none ||
@@ -121,10 +138,20 @@ class AgentWorkspace {
         },
       };
 
-  /// 解析。**坏数据一律当成 [WorkspaceMode.none]**（保守）：
-  /// 宁可不给它看，也不要因为一段坏 JSON 突然让它看见全部笔记。
+  /// 解析。三种输入三种处理：
+  ///
+  /// | 输入 | 结果 | 为什么 |
+  /// |---|---|---|
+  /// | `null`（连会话记录都没有） | [none] | 说不清是什么情况 → **保守**，别扩大可见范围 |
+  /// | 空串（这一列加进来之前的老会话） | [initial] | 表达的是"用户**没做过**这个选择"，不是"选了不选择" |
+  /// | 坏 JSON | [none] | 同上：读不懂就按最保守的算 |
+  ///
+  /// ⚠️ 空串**必须**等于默认值，不能等于 [none]：否则老会话与新会话的默认
+  /// 不一样 —— 同一个 App 里两套默认，用户只会觉得"有时候看得见有时候看不见"。
+  /// 用户**显式**选「不选择」时存的是 `{"mode":"none"}`，与空串分得清。
   static AgentWorkspace parse(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return none;
+    if (raw == null) return none;
+    if (raw.trim().isEmpty) return initial;
     try {
       final v = jsonDecode(raw);
       if (v is! Map) return none;

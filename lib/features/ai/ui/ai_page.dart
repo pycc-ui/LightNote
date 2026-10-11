@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/theme/dimens.dart';
 import '../../../core/widgets/log_bar.dart';
+import '../../../core/widgets/markdown_view.dart';
 import '../../note/data/notebook_repository.dart';
 import 'workspace_sheet.dart';
 import '../domain/ai_chat_repository.dart';
@@ -12,7 +13,7 @@ import '../domain/ask_resolver.dart';
 import '../domain/ask_user.dart';
 import 'agent_dialogs.dart';
 
-/// AI 页（设计稿 §5.6 / 线框图 4.6）。
+/// AI 页（见《界面设计》的「AI 助手页」一节）。
 ///
 /// 设计稿要求「MVP 只做界面占位、不自动上传」。这里做了两件事：
 ///   1. 接上真实 DeepSeek 调用（这是你最初的核心需求）；
@@ -29,12 +30,17 @@ class _AiPageState extends State<AiPage> {
   final _scrollController = ScrollController();
 
   String? _conversationId;
+
   /// 工作区：AI 能看到哪些笔记（三态：不选择 / 全体空间 / 选择目录）
-  AgentWorkspace _workspace = AgentWorkspace.none;
+  ///
+  /// **默认全体空间**（见 [AgentWorkspace.initial]）。它同时是
+  /// `ToolExecutor._scope` 的取值来源，所以这个字段与库里那条会话记录
+  /// 必须**始终一致** —— 一旦只改一边，界面说的范围和模型看到的范围就分家了。
+  AgentWorkspace _workspace = AgentWorkspace.initial;
 
   /// 工作区的显示名。**缓存成字段**：它要从库里查笔记库名，
   /// 而 `build` 里不能 await。改动工作区时调 `_refreshWorkspaceLabel`。
-  String _workspaceLabelText = '未选择';
+  String _workspaceLabelText = '全体空间';
 
   String get _workspaceLabel => _workspaceLabelText;
 
@@ -74,23 +80,58 @@ class _AiPageState extends State<AiPage> {
     final conversations = await repo.watchConversations().first;
     if (!mounted) return;
 
+    if (conversations.isEmpty) {
+      // 一条会话都没有（全新安装，或全被删了）：停在"新会话"的空状态。
+      // 不建行 —— 行由第一次发送时创建，见 [_newConversation]。
+      return;
+    }
+
+    final c = conversations.first;
+    _activate(
+      conversationId: c.id,
+      workspace: AgentWorkspace.parse(c.workspaceScope),
+      effort: c.thinkingEffort,
+    );
+  }
+
+  /// 切到某个会话（或切到"新会话"的空状态），并**同步所有跟着它走的状态**。
+  ///
+  /// ## 为什么必须抽成一个入口
+  ///
+  /// 这五个字段是一套：会话 id、工作区、工作区标签、思考强度、显式选中的笔记。
+  /// 早先只有"打开旧会话"那条路径改全了，"新建会话"只改了 id 和选中项 ——
+  /// 于是按新建之后，输入框旁边还写着上一档工作区（"选了目录"），
+  /// 而库里那个新会话是空的工作区 = 模型眼里什么范围都没有。
+  /// **界面说的和 AI 看到的不是一回事**，这种不一致比功能缺失更难查：
+  /// 用户只会觉得"AI 有时候装傻"。
+  void _activate({
+    required String? conversationId,
+    required AgentWorkspace workspace,
+    required String effort,
+  }) {
     setState(() {
-      if (conversations.isNotEmpty) {
-        _conversationId = conversations.first.id;
-    // 进页面就查一次挂起：重开 App 时要能直接看到「AI 在等你回答」
+      _conversationId = conversationId;
+      _workspace = workspace;
+      _effort = effort;
+      _selectedNoteIds.clear();
+      // 挂起提问属于**上一个**会话，换会话时先清掉，再按新 id 重查
+      _pendingAsk = null;
+    });
+    _refreshWorkspaceLabel();
+    // 挂起状态是落库的，切会话就得重新查一次（新会话没有 id → 查出来是 null）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _refreshPendingAsk();
-    });
-    _workspace = AgentWorkspace.parse(conversations.first.workspaceScope);
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _refreshWorkspaceLabel(); });
-        _effort = conversations.first.thinkingEffort;
-      }
     });
   }
 
   Future<String> _ensureConversation() async {
-    if (_conversationId != null) return _conversationId!;
+    final id = _conversationId;
+    if (id != null) return id;
     final conv = await context.read<AiChatRepository>().createConversation(
+          // 工作区必须**在这里一起落库**：`send` / `continueAsk` 都从会话记录里
+          // 读范围（那是唯一真相），不传的话"发第一句话之前选的工作区"
+          // 会被静默丢掉 —— 界面显示「工作」，模型那边是默认范围。
+          workspace: _workspace,
           thinkingEffort: _effort,
         );
     if (mounted) setState(() => _conversationId = conv.id);
@@ -122,7 +163,8 @@ class _AiPageState extends State<AiPage> {
   /// ## 为什么从**数据库**查而不是看内存
   ///
   /// 挂起状态存在 `ai_messages.pendingAction` 里，所以**杀掉 App 重开之后**
-  /// 也照样能接着答 —— 这正是 §9.5 选"持久化挂起"而不是"超时返回"的原因。
+  /// 也照样能接着答 —— 这正是选"持久化挂起"而不是"超时返回"的原因
+  ///（见《AI接入设计》的「挂起机制：askUser」）。
   /// 看内存的话重启就丢了，用户永远答不上那个问题。
   ///
   /// 发送**前后各调一次**：
@@ -220,87 +262,272 @@ class _AiPageState extends State<AiPage> {
   }
 
 
-  Future<void> _newConversation() async {
-    final repo = context.read<AiChatRepository>();
-    final id = _conversationId;
-  
-    // 当前会话没消息（包括还没创建）→ 不新建
-    final hasMessages = id != null &&
-        (await repo.watchMessages(id).first).isNotEmpty;
-    if (!mounted) return;
-  
-    if (!hasMessages) {
-      setState(() => _selectedNoteIds.clear());
-      return;
-    }
-    final conv = await context.read<AiChatRepository>().createConversation(
-          thinkingEffort: _effort,
-        );
-    if (!mounted) return;
-    setState(() {
-      _conversationId = conv.id;
-      _selectedNoteIds.clear();
-    });
+  /// 新建会话：**只是切到一个空状态，不落库**。
+  ///
+  /// ## 为什么不在点按钮时就建一行（这里曾经有过一个 bug）
+  ///
+  /// 早先是"点一下就在库里建一条空会话"，只在"当前会话也没消息"时跳过。
+  /// 那个条件挡不住这个顺序：
+  ///
+  ///   新建 → 回看一个**有消息**的旧会话 → 再新建
+  ///
+  /// 每绕一圈就多一条空会话，会话列表里堆一串「新会话」，谁也分不清哪条是哪条。
+  /// 根子在于"新建"被实现成了一次**副作用**，而它本该只是一个**状态**。
+  ///
+  /// 现在真正的行由 [_ensureConversation] 在第一次发送时建，
+  /// 于是按多少次都一样：空会话根本不会存在，"多出来一条"这个失败模式
+  /// 不是被判断挡住了，而是**不可能发生**。
+  ///
+  /// 顺带修掉两个连带问题：
+  ///   · 会话列表里不再有空条目（以前最新那条永远是你刚点出来的空会话）；
+  ///   · 重开 App 看到的是上次真正聊过的会话，而不是一个空壳。
+  ///
+  /// 输入框里已经打的字**不清**：切会话（包括切到旧的）都不该吃掉用户正在写的东西。
+  void _newConversation() {
+    _activate(
+      conversationId: null,
+      // 工作区回到默认（全体空间），而不是沿用上一档 ——
+      // "新建"的语义是"从干净状态开始"
+      workspace: AgentWorkspace.initial,
+      // 思考强度是**用户偏好**，不是会话内容，所以沿用当前档位
+      effort: _effort,
+    );
   }
 
+  /// 会话记录：点一条**切过去**，也可以切到**多选**批量删。
+  ///
+  /// 多选的三条约定照搬笔记库页（`library_page.dart` 的 `_selecting` /
+  /// `_selectAppBar` / `_batchDelete`），免得同一个 App 里两种多选手感：
+  ///   · 用**单独的 `selecting` 标记**判断是否在多选，不用"选中集合空不空" ——
+  ///     空集既表示"没进多选"、也表示"进了但还没选"，用它判断会一进就退出；
+  ///   · 「全选 / 全不选」按**当前列表里真实存在的会话**算；
+  ///   · 批量删除**先确认**，而且没有撤销（撤销只覆盖"改笔记"，删会话不可逆）。
   Future<void> _showConversations() async {
     final repo = context.read<AiChatRepository>();
+
+    // 多选状态只服务这一次弹层，所以放在这里而不是页面 state：
+    // 弹层关掉它就没了，页面不需要知道用户刚才选了几条。
+    var selecting = false;
+    final selected = <String>{};
+
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: StreamBuilder<List<AiConversation>>(
-          stream: repo.watchConversations(),
-          builder: (context, snapshot) {
-            final list = snapshot.data ?? const <AiConversation>[];
-            if (list.isEmpty) {
-              return const Padding(
-                padding: EdgeInsets.all(AppSpacing.lg),
-                child: Center(child: Text('还没有会话记录')),
-              );
-            }
-            return ListView(
-              shrinkWrap: true,
-              children: [
-                for (final c in list)
-                  ListTile(
-                    leading: const Icon(Icons.chat_bubble_outline),
-                    title: Text(
-                      c.title.trim().isEmpty ? '新会话' : c.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+      // 会话多的时候要能撑高（默认弹层最高只有半屏左右）
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: StreamBuilder<List<AiConversation>>(
+            stream: repo.watchConversations(),
+            builder: (context, snapshot) {
+              final list = snapshot.data ?? const <AiConversation>[];
+              if (list.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(AppSpacing.lg),
+                  child: Center(child: Text('还没有会话记录')),
+                );
+              }
+
+              // 只认"当前列表里还在的"选中项：删完之后 `selected` 里可能留着
+              // 已经不在列表里的 id，直接拿来计数会让「已选 N 条」对不上。
+              // 这里**过滤而不改写** `selected` —— 免得在 build 里做副作用。
+              final visible = list.map((c) => c.id).toSet();
+              final picked = selected.where(visible.contains).toSet();
+              final allSelected = picked.length == list.length;
+
+              void toggle(String id) => setSheetState(() {
+                    if (!selected.remove(id)) selected.add(id);
+                  });
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // ---- 头部：常态「标题 + 多选」，多选态「退出 + 计数 + 全选」----
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                        AppSpacing.sm, 0, AppSpacing.md, AppSpacing.xs),
+                    child: Row(
+                      children: [
+                        if (selecting)
+                          IconButton(
+                            tooltip: '退出多选',
+                            icon: const Icon(Icons.close),
+                            onPressed: () => setSheetState(() {
+                              selecting = false;
+                              selected.clear();
+                            }),
+                          ),
+                        Expanded(
+                          child: Text(
+                            selecting ? '已选 ${picked.length} 条' : '会话记录',
+                            style: Theme.of(ctx).textTheme.titleMedium,
+                          ),
+                        ),
+                        if (selecting)
+                          TextButton(
+                            onPressed: () => setSheetState(() {
+                              if (allSelected) {
+                                selected.clear();
+                              } else {
+                                selected
+                                  ..clear()
+                                  ..addAll(visible);
+                              }
+                            }),
+                            child: Text(allSelected ? '全不选' : '全选'),
+                          )
+                        else
+                          TextButton(
+                            onPressed: () => setSheetState(() {
+                              selecting = true;
+                              selected.clear();
+                            }),
+                            child: const Text('多选'),
+                          ),
+                      ],
                     ),
-                    subtitle: Text(c.thinkingEffort),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline, size: 20),
-                      onPressed: () async {
-                        await repo.deleteConversation(c.id);
-                        if (ctx.mounted) Navigator.pop(ctx);
-                        if (mounted && _conversationId == c.id) {
-                          setState(() => _conversationId = null);
-                        }
+                  ),
+                  const Divider(height: 1),
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: list.length,
+                      itemBuilder: (context, i) {
+                        final c = list[i];
+                        return ListTile(
+                          leading: selecting
+                              ? Checkbox(
+                                  value: picked.contains(c.id),
+                                  onChanged: (_) => toggle(c.id),
+                                )
+                              : const Icon(Icons.chat_bubble_outline),
+                          title: Text(
+                            c.title.trim().isEmpty ? '新会话' : c.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(c.thinkingEffort),
+                          // 多选态**不给**单条删除按钮：那时"删"是底部那个批量动作，
+                          // 同时摆两个删除入口最容易误点
+                          trailing: selecting
+                              ? null
+                              : IconButton(
+                                  tooltip: '删除这条会话',
+                                  icon: const Icon(Icons.delete_outline, size: 20),
+                                  onPressed: () =>
+                                      _deleteConversations(ctx, repo, [c.id]),
+                                ),
+                          onTap: selecting
+                              ? () => toggle(c.id)
+                              : () {
+                                  Navigator.pop(ctx);
+                                  // 会话 id 与它的工作区/思考强度**一起**生效：
+                                  // 工作区是从这条记录里读出来的，见 [_activate]
+                                  _activate(
+                                    conversationId: c.id,
+                                    workspace:
+                                        AgentWorkspace.parse(c.workspaceScope),
+                                    effort: c.thinkingEffort,
+                                  );
+                                },
+                          // 长按直接进多选并选中这条：想删一串时不用先点「多选」
+                          onLongPress: selecting ? null : () {
+                            setSheetState(() {
+                              selecting = true;
+                              selected.add(c.id);
+                            });
+                          },
+                        );
                       },
                     ),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      setState(() {
-                        _conversationId = c.id;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _refreshPendingAsk();
-    });
-    _workspace = AgentWorkspace.parse(c.workspaceScope);
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _refreshWorkspaceLabel(); });
-                        _effort = c.thinkingEffort;
-                        _selectedNoteIds.clear();
-                      });
-                    },
                   ),
-              ],
-            );
-          },
+                  // ---- 多选态的底部动作 ----
+                  if (selecting)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(AppSpacing.md,
+                          AppSpacing.sm, AppSpacing.md, AppSpacing.md),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: picked.isEmpty
+                                  ? null
+                                  : () => _deleteConversations(
+                                        ctx,
+                                        repo,
+                                        picked.toList(growable: false),
+                                      ),
+                              icon: const Icon(Icons.delete_outline, size: 18),
+                              label: Text(picked.isEmpty
+                                  ? '请选择要删除的会话'
+                                  : '删除 ${picked.length} 条'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor:
+                                    Theme.of(ctx).colorScheme.error,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
+  }
+
+  /// 删除若干会话：**先确认，再删，然后关掉弹层**。
+  ///
+  /// 单条与批量走**同一条路径**（单条也是 `[id]`）—— 否则"要不要确认"
+  /// "删完要不要复位当前会话"这类规则会出现两套，改一处漏一处。
+  ///
+  /// 为什么单条也要确认：那个垃圾桶是**点一下就删**（不是左滑那种明确手势），
+  /// 而删会话**没有回收站、也没有撤销**。多一步比丢一串对话便宜得多。
+  Future<void> _deleteConversations(
+    BuildContext sheetCtx,
+    AiChatRepository repo,
+    List<String> ids,
+  ) async {
+    if (ids.isEmpty) return;
+
+    final ok = await showDialog<bool>(
+      context: sheetCtx,
+      builder: (d) => AlertDialog(
+        title: Text('删除 ${ids.length} 条会话'),
+        content: const Text('这些会话将被删除（含里面的全部消息），不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(d, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(d).colorScheme.error,
+            ),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    final n = await repo.deleteConversations(ids);
+    if (sheetCtx.mounted) Navigator.pop(sheetCtx);
+
+    // 删掉的里面有**当前**会话 → 回到"新会话"的空状态
+    //（连工作区一起复位，否则会留着那个已删会话的设置）
+    if (mounted && ids.contains(_conversationId)) {
+      _activate(
+        conversationId: null,
+        workspace: AgentWorkspace.initial,
+        effort: _effort,
+      );
+    }
+    if (mounted) LogBar.info(context, '已删除 $n 条会话');
   }
 
   /// 选工作区：**不选择 / 全体空间 / 选择目录**。
@@ -324,10 +551,14 @@ class _AiPageState extends State<AiPage> {
   /// 刷新工作区的显示名。
   ///
   /// 名字是**现查**的：笔记库被删掉之后，标签里不该还留着一个 uuid。
+  /// 「不选择」「全体空间」这两档的名字是常量，直接问 [AgentWorkspace.label]
+  /// 就行 —— 为它们去查一遍笔记库是白查。
   Future<void> _refreshWorkspaceLabel() async {
     final ws = _workspace;
-    if (ws.mode == WorkspaceMode.none) {
-      if (mounted) setState(() => _workspaceLabelText = '未选择');
+    if (ws.mode != WorkspaceMode.pick) {
+      if (mounted) {
+        setState(() => _workspaceLabelText = ws.label((_) => null));
+      }
       return;
     }
     final all = await context.read<NotebookRepository>().all();
@@ -664,10 +895,19 @@ class _MessageList extends StatelessWidget {
                       Text('正在生成…', style: theme.textTheme.bodySmall),
                     ],
                   )
-                : SelectableText(
-                    content,
-                    style: theme.textTheme.bodyMedium?.copyWith(height: 1.6),
-                  ),
+                // AI 说的话是 Markdown（可能带公式 / 代码 / 表格），
+                // 走统一渲染；**用户自己打的字不渲染**。
+                //
+                // 为什么不一致：用户在输入框里写的是大白话，没有 Markdown 工具栏，
+                // 一句"这个 * 号是什么意思"或者"$100"会被渲染器当强调/公式吃掉 ——
+                // 那是"我明明这么打的，界面却显示成别的样子"。
+                // 笔记正文不同：那里用户是**有意**写 Markdown 的（编辑器带工具栏）。
+                : isUser
+                    ? SelectableText(
+                        content,
+                        style: theme.textTheme.bodyMedium?.copyWith(height: 1.6),
+                      )
+                    : MarkdownView(content),
           ),
         );
       },
@@ -806,7 +1046,7 @@ class _Composer extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // 工作区与思考强度选择行（线框图 4.6 底部）
+          // 工作区与思考强度选择行（AI 页底部）
           Row(
             children: [
               Expanded(

@@ -150,7 +150,7 @@
 
 工具结果统一走一个形状（`ToolResult.encode()`）：成功 `{"ok":true,"data":…}`，失败 `{"ok":false,"error":"…"}`。失败也是「结果」，模型据此换方案，而不是让整轮请求崩掉。
 
-**循环**（`AgentLoop.run`，`maxRounds = 6`）：提工具 → 执行 → 回灌 → 再发一轮，直到模型不再提工具。三条终止条件缺一个都会挂死：没提工具（正常结束）、`askUser`（挂起等用户，对话存进数据库，**重启后可续**）、轮数上限 6（防「每次都提一个必然失败的工具」导致无限烧钱）。工具的中间往来**不落库**，跨轮要回看更早内容走 `listHistory` / `readHistory` 工具。
+**循环**（`AgentLoop.run`，`maxRounds = 15`）：提工具 → 执行 → 回灌 → 再发一轮，直到模型不再提工具。三条终止条件缺一个都会挂死：没提工具（正常结束）、`askUser`（挂起等用户，对话存进数据库，**重启后可续**）、轮数上限 15（防「每次都提一个必然失败的工具」导致无限烧钱；15 不是"鼓励跑满"，而是让「搜 → 看目录 → 读片 → 改 → 复查」这种多步任务不必被硬切断）。工具的中间往来**不落库**，跨轮要回看更早内容走 `listHistory` / `searchHistory` / `readHistory` 工具。
 
 ---
 
@@ -173,7 +173,7 @@
 | 单篇摘要 | 关闭 |
 | 更早历史的压缩摘要 | 关闭（`streamChat` 不传 `thinking`） |
 | 连通性自检 | 关闭 |
-| 已无调用方的 `organize` / `ask` | 前者默认开（`deepThinking: true`），后者默认关 |
+| ~~`organize` / `ask`~~ | **两条路径都已不在代码里**（`organize` 的 prompt 与调用都已删除；`ask` 只剩 `askUser` 提示词、无调用方），所以不再有"默认值"可列 |
 
 ### 坑 2：思考模式下 `temperature` 失效
 
@@ -237,7 +237,7 @@ uncached = promptTokens - cached
 
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
-| `listNotes` 只要 id + 标题 | DB 侧用 `selectOnly(notes)` 只取 `id` / `title` 两列（`noteBriefs`），默认 50 条、上限 100 | 工具描述既然写「比 searchNotes 省钱」，实现就必须真的不读正文 |
+| `listNotes` 只要元数据 | DB 侧用 `selectOnly(notes)` 只取 `id` / `title` / `notebookId` / `updatedAt` 四列（`noteBriefs`），默认 50 条、上限 100；固定 `updatedAt DESC` | 工具描述既然写「比 searchNotes 省钱」，实现就必须真的不读正文；顺序本身就是给模型的线索 |
 | `listChunks` 只给目录 | 每片只回 `index` / `heading` / `level` / `charCount`，**不含正文** | 5000 字的笔记直接灌进去要几千 token，目录只要几十个 |
 | `readChunk` 按轮限量 | `maxChunksPerTurn = 3`、`maxChunkCharsPerTurn = 1500`，每轮 `beginTurn()` 重置 | 模型很容易连着读五片把整篇灌进来；超预算直接返回失败并提示「先用已有内容回答」 |
 | 切片本身有界 | 片硬上限 700 字，不可拆散单元硬顶 1500 字 | 片若超过 1500，AI 根本读不进来，作为「片」就没意义 |
@@ -247,17 +247,17 @@ uncached = promptTokens - cached
 
 #### （3）工具分层下发
 
-工具共 **19 个：核心 7 / 常用 8 / 按需 4**（`tool_specs.dart`）。
+工具共 **22 个：核心 7 / 常用 10 / 按需 5**（`tool_specs.dart`）。
 
 | 层 | 每轮发什么 | 数量 |
 |---|---|---|
 | 核心层 | 完整定义（含参数 schema） | 7：`searchNotes` `listChunks` `readChunk` `createNote` `updateNote` `askUser` `requestTools` |
-| 常用层 | 完整定义，但**没有参数 schema**（描述压成一句话） | 8：`listNotebooks` `listNotes` `deleteNote` `moveNote` `createNotebook` `replaceInNote` `listHistory` `readHistory` |
-| 按需层 | **默认不发定义**，只在 system prompt 末尾的「工具目录」里给「名字 + 一句话」；被 `requestTools` 批准后才进 `tools` | 4：`renameNotebook` `deleteNotebook` `batchMoveNotes` `batchDeleteNotes` |
+| 常用层 | 完整定义，但**没有参数 schema**（描述压成一句话） | 10：`listNotebooks` `listNotes` `getNoteMeta` `appendToNote` `deleteNote` `moveNote` `createNotebook` `replaceInNote` `listHistory` `readHistory` |
+| 按需层 | **默认不发定义**，只在 system prompt 末尾的「工具目录」里给「名字 + 一句话」；被 `requestTools` 批准后才进 `tools` | 5：`renameNotebook` `deleteNotebook` `batchMoveNotes` `batchDeleteNotes` `searchHistory` |
 
 - `specsForRequest` 的实际条件是 `core || common || granted`，所以**常用层是"发定义但省掉 schema"，不是"只发名字"**；只有按需层走目录文本（`toCatalogLine()`）。
-- `requestTools` 单次最多批 5 个，重复申请或不存在的名字会被拒并说明原因——省掉无效往返。
-- 分层本身还是一层摩擦：按需层的 4 个工具要么危险、要么少用，先申请一次能挡掉一部分「顺手就调了」。
+- `requestTools` 单次最多批 6 个，重复申请或不存在的名字会被拒并说明原因——省掉无效往返。
+- 分层本身还是一层摩擦：按需层的 5 个工具要么危险、要么少用，先申请一次能挡掉一部分「顺手就调了」。
 - 工具的**执行侧约定**（风险分级、参数锚点、每轮硬上限、挂起与确认）在第 4 节；这里只讲"发什么、省在哪"。
 
 #### （4）批量、复用、输出侧兜底
@@ -278,13 +278,13 @@ uncached = promptTokens - cached
 
 | 护栏 | 值 |
 |---|---|
-| 一次用户输入最多几轮工具往返 | `maxRounds = 6` |
-| 一轮最多问用户几次 | `maxAsksPerTurn = 3`（到上限就明确拒绝并让它收尾） |
-| 单次申请工具数 | ≤5 |
+| 一次用户输入最多几轮工具往返 | `maxRounds = 15` |
+| 一轮最多问用户几次 | `maxAsksPerTurn = 5`（到上限就明确拒绝并让它收尾） |
+| 单次申请工具数 | `maxRequestTools = 6` |
 | 批量工具条数 | ≤10 |
 | 生成类调用的重试次数 | 2 次尝试（即最多重试 1 次），不无限重试 |
 | 单条笔记正文进 prompt 的上限 | AI 助手 6000 字；`ask` 路径 4000 字（该路径当前无调用方） |
-| prompt 正文上限常量 | `AiPrompts.maxBodyChars = 200000`（只有已无调用方的 `organizeUser` 在截） |
+| prompt 正文上限常量 | `AiPrompts.maxBodyChars = 200000`（`noteSummaryUser` 用它截单条正文；因为比"笔记 100 KB 硬上限"大得多，实际**永不触发**） |
 
 另外，写笔记侧的上限也间接保护了 AI 成本：标题超 200 字截断（标题会进 prompt）；笔记正文按 UTF-8 字节分档 80KB / 90KB / 100KB，到 100KB **拒绝落盘**（见 `ai_limits.dart`、`note_editor_page.dart`）。
 
@@ -303,19 +303,24 @@ uncached = promptTokens - cached
 
 ### 4.1 工具清单、风险分级与调用约定
 
-工具共 19 个（核心 7 / 常用 8 / 按需 4），分层与"每轮发什么"已在 3.2（3）。这里写**执行侧的约定**：
+工具共 22 个（核心 7 / 常用 10 / 按需 5），分层与"每轮发什么"已在 3.2（3）。这里写**执行侧的约定**：
 
 - **风险级别是数据，不是执行器里的 `if`**：`ToolRisk` 五档 `read` / `create` / `modify` / `delete` / `interaction`；`needsConfirm` 对创建 / 修改 / 删除三档为真。做成工具定义的一部分，**加新工具时必须显式声明**（漏了编译器会提醒）；散在一个 `switch` 里迟早会漏掉一个。
-- **每轮真正发出去的定义**是 `core || common || granted`：7 个核心 + 8 个常用 + `requestTools` 已批准的按需项。按需层在批准之前只出现在 system prompt 末尾的「工具目录」里（名字 + 一句话）。
+- **每轮真正发出去的定义**是 `core || common || granted`：7 个核心 + 10 个常用 + `requestTools` 已批准的按需项。按需层在批准之前只出现在 system prompt 末尾的「工具目录」里（名字 + 一句话）。
 - 协议要求 `tools` 数组每一项都带完整 JSON Schema，所以常用层是**发完整定义、只把 `description` 压成一句话**，不是"只发名字"；"只发名字"只存在于目录文本里。
-- `requestTools`：只取前 5 个；**不存在的名字、已经批准过的名字、以及核心/常用层的名字**都会被拒并给出原因（后两类本来就有完整定义，申请它只是白跑一轮）。
-- **命名约定**：`list*` 只给元数据、`read*` 给正文；笔记与会话各一套（`listChunks` / `readChunk` 与 `listHistory` / `readHistory`），模型才不会把两者混起来。
+- `requestTools`：只取前 6 个；**不存在的名字、已经批准过的名字、以及核心/常用层的名字**都会被拒并给出原因（后两类本来就有完整定义，申请它只是白跑一轮）。
+- **命名约定**：`list*` 只给元数据、`read*` 给正文、`get*Meta` 给一条的元信息、`search*` 给"命中哪一片"；笔记与会话各一套（`listChunks` / `readChunk` 与 `listHistory` / `readHistory`，`searchNotes` 与 `searchHistory`），模型才不会把两者混起来。
+- **追加与重写分开**：往末尾加内容用 `appendToNote`（拼接在 App 侧做，输入长度只和"要加的东西"成正比），不要用 `updateNote` 先读全文再整体写回 —— 后者抄漏一段是**静默丢内容**。追加同样走确认层与撤销栈，不能因为"只是追加"就免确认（那会开出一条不需要点头的写入通道）。
 - **参数一律宽松接受**：`_str` / `_int` / `_asInt` 容忍"该给整数给了字符串"；`arguments` 是坏 JSON 时**不抛错**，`parseArgs` 返回空 map，让后面"缺 `query`"这类**具体**抱怨把模型纠正过来（报 `NoSuchMethodError` 没有用）。
 - **名字对不上**（模型编了一个工具）→ 失败并提示"需要别的工具先用 `requestTools` 申请"。
 - **结果形状统一**（`ToolResult.encode()`）：成功 `{"ok":true,"data":…}`、失败 `{"ok":false,"error":"…"}`。失败也是"结果"，抛异常会把整轮对话打断。
 - 工具**不该看到工作区之外**：`ToolExecutor.workspace` 是上限，模型自己传的 `notebookId` **只能收窄**；要的库不在工作区时返回"空范围"（既不命中、也不偷偷放宽成整个工作区）。
 
-  > ⚠️ **这一条目前没生效**：`AiChatRepository._drive` 建执行器时**没有把会话工作区传进去**（用的是默认 `AgentWorkspace.all`），所以工具的可见范围实际是**全库**；工作区只影响 `agentSystem` 的文案与「+ → 选择笔记」候选（`candidateNotes` 才真的用了它）。代码里的注释写着"工作区在这里生效"，与实现不符。
+  > ✅ **这一条现在真的生效**：`AiChatRepository._drive` 建执行器时把会话工作区传了进去（`workspace: workspace`），而 `workspace` 是从 `ai_conversations.workspace_scope` 读的 —— **会话记录是唯一真相**，调用方不用再传一遍。
+  >
+  > 之前这里写着"没生效"：当时 `_drive` 用的是执行器的默认值 `AgentWorkspace.all`，于是工作区只影响提示词文案与「+ → 选择笔记」候选，工具的实际范围是全库（用户选了「工作」却能被搜到别的库）。已修。
+  >
+  > **默认值是「全体空间」**（`AgentWorkspace.initial`），不是「不选择」：`none` 会把查询变成"一个目录都不含"，用户第一句话就会得到"我一条笔记都看不到"，而他不会想到是工作区造成的。老会话的**空串**（这一列加进来之前的值）也读成这个默认 —— 详见 `AgentWorkspace.parse` 的三分支表。
 
 ### 4.2 参数锚点：改正文为什么用 `expectedText`
 
@@ -341,16 +346,17 @@ updateNote(noteId, expectedText: "客户反馈很好", newContent: "用户反馈
 
 | 上限 | 值 | 出处 |
 |---|---|---|
-| 一次 `run()` 的工具往返轮数 | `maxRounds = 6` | `agent_loop.dart` |
+| 一次 `run()` 的工具往返轮数 | `maxRounds = 15` | `agent_loop.dart` |
 | `readChunk` 每轮片数 | `maxChunksPerTurn = 3` | `tool_executor.dart` |
 | `readChunk` 每轮正文合计 | `maxChunkCharsPerTurn = 1500` 字 | `tool_executor.dart` |
-| `askUser` 每轮次数 | `maxAsksPerTurn = 3`（**跨恢复累计**） | `agent_loop.dart` |
-| `requestTools` 单次 | `maxRequestTools = 5` | `agent_loop.dart` |
+| `askUser` 每轮次数 | `maxAsksPerTurn = 5`（**跨恢复累计**） | `agent_loop.dart` |
+| `requestTools` 单次 | `maxRequestTools = 6` | `agent_loop.dart` |
 | 批量工具条数（移动 / 删除） | `maxBatch = 10` | `tool_executor.dart` |
 | 模型自带 `askUser.options` | 取前 10 条；`limit` 默认 10、`clamp(1,10)` | `agent_loop.dart` |
 | `searchNotes.limit` | 默认 20、`clamp(1,50)` | `tool_executor.dart` |
 | `listNotes.limit` | 默认 50、`clamp(1,100)` | `tool_executor.dart` |
 | `listHistory.limit` | 默认 20、`clamp(1,50)` | `tool_executor.dart` |
+| `searchHistory.limit` | 默认 5、`clamp(1,20)` | `tool_executor.dart` |
 | `readHistory` 单次 | ≤3 片、≤1500 字（复用上面两个常量） | `tool_executor.dart` |
 | 撤销栈深度 | `maxUndo = 5` | `tool_executor.dart` |
 
@@ -388,7 +394,23 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 - 冷启动、切页回来都能把答题卡重新显示出来，**不用先发一句话**。
 - 记录损坏（JSON 解析失败）→ **当成没有挂起并清掉**，而不是让会话永远卡在"等回答"。
 
-**`askUser` 次数为什么必须跨恢复累计**：循环在 `askUser` 处 `return`，用户回答后是**新的一次 `run()`**；计数只活在新循环里的话每次都从 0 起，`maxAsksPerTurn = 3` 永远到不了，用户会被反复问。所以 `asks` 存进挂起记录（`PendingAsk.asks`，解析时 `clamp(1,99)`），恢复时用 `asksSoFar` 带回来。到上限**不是简单丢弃**，而是回一条明确的失败："这一轮已经问过 3 次了，不要再问。请用现有信息给出最好的答案……"。
+**⚠️ 流式写入必须是"替换式"，不能是"接龙式"**（这里出过一次很难看的 bug）：
+
+`AgentText` 事件带的是**这一段该怎么显示**的累计文本（不是本次增量），所以把它写进消息时用的是
+「**续写起点 + 累计文本**」整体覆盖那一行。续写起点（`_drive` 的 `base`）在本次 `run()` **开始时读一次就定死**，
+行里如果是「（等你回答）」占位符则起点为空 —— 那第一段输出就会**顶掉**占位符，而不是接在它后面。
+
+曾经的写法是每写一次都**重新读一遍行内容**再 `before + '\n\n' + text`。那等于把上一次刚写进去的
+累计文本又当成前缀：第 k 个分片会把前 k-1 个分片重写一遍，一段几百字的回答滚成几十 KB 的重复，
+用户看到的是**同一句话按字数递增地重复上百遍**（`已` / `已删除，` / `已删除，「我的轻笔记」…` 这种锯齿）。
+单事件（一次 `fullText`）时只多出一份，看着像正常的换行拼接；**真流式（多分片）才会放大成一眼可见的垃圾** ——
+所以它只在部分回答里出现，而且只在"挂起 → 回答 → 接着跑"这条路径上（`send` 走的是替换，本来就是对的）。
+
+> 由此推出一条通用规矩：**流式渲染写库要幂等** —— 把同一个累计文本写两次，结果必须和写一次一样。
+> 回归用例见 `ask_flow_test.dart` 的「流式分片续写」（它用多分片的假客户端把这条钉住；
+> 单事件的假客户端测不出这个 bug）。
+
+**`askUser` 次数为什么必须跨恢复累计**：循环在 `askUser` 处 `return`，用户回答后是**新的一次 `run()`**；计数只活在新循环里的话每次都从 0 起，`maxAsksPerTurn = 5` 永远到不了，用户会被反复问。所以 `asks` 存进挂起记录（`PendingAsk.asks`，解析时 `clamp(1,99)`），恢复时用 `asksSoFar` 带回来。到上限**不是简单丢弃**，而是回一条明确的失败："这一轮已经问过 5 次了，不要再问。请用现有信息给出最好的答案……"。
 
 > ⚠️ **只有 `askUser` 的次数被带回来了**：`maxRounds` 在每次 `run()` 里重新从 0 数，挂起恢复后轮数预算会重置；`_drive` 每次都**新建** `ToolExecutor`，所以撤销栈与读片快照也不跨 `run()`（既包括挂起恢复，也包括下一句用户输入）。
 
@@ -451,14 +473,15 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 **可断言的验收口径**（这些点都有对应测试文件：`tool_executor_test` / `tool_write_test` / `tool_delete_test` / `agent_loop_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` / `history_summary_test` / `tool_specs_test`；是否全绿以 `flutter test` 为准）：
 
-- [x] `listChunks` 目录编码后**一个字正文都没有**；`listNotes` 真的只取 `id` / `title`
+- [x] `listChunks` 目录编码后**一个字正文都没有**；`listNotes` / `getNoteMeta` 真的只取元数据（不读正文）
+- [x] `appendToNote` 不要求先读、仍走确认层与撤销；追加后切片重切
 - [x] `readChunk` **每轮** ≤3 片且 ≤1500 字（`beginTurn()` 每轮重置）
-- [x] 历史自动 5 轮、单条 ≤500 字；`readHistory` ≤3 片且 ≤1500 字
+- [x] 历史自动 5 轮、单条 ≤500 字；`readHistory` ≤3 片且 ≤1500 字；`searchHistory` 只回片号 + 片段（片号与 `listHistory` 同一套）
 - [x] 更早历史的压缩摘要**只生成一次**（用调用次数验证）
 - [x] 风险拦截在 App，**与模型行为解耦**（没有确认通道时写操作一律拒绝）
 - [x] 锚点失败返回错误，且**一个字都不改**（连确认层都不弹）
 - [x] 一次提议只执行一次（幂等路径 `alreadyDeleted`）
-- [x] `askUser` ≤3（跨恢复累计）、`requestTools` ≤5、批量 ≤10、轮数上限 6
+- [x] `askUser` ≤5（跨恢复累计）、`requestTools` ≤6、批量 ≤10、轮数上限 15
 
 > **真机端到端（`agent_live_test.dart` / `agent_search_live_test.dart`）：未做，也不打算做。**
 > 那 3 份真机测试已按用户定案删除（不会真的去跑，留着只是维护负担）。

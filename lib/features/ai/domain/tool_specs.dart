@@ -87,8 +87,18 @@ Map<String, dynamic> _strList(String desc) => {
     };
 
 // ============================================================================
-// 定案的工具清单（19 个：核心 7 / 常用 8 / 按需 4）
+// 定案的工具清单（22 个：核心 7 / 常用 10 / 按需 5）
 // ============================================================================
+
+/// `requestTools` **单次最多批几个**。
+///
+/// 定义在这个文件里而不是 `agent_loop.dart`，是因为这个数字**要写进工具描述
+/// 给模型看**：描述与执行上限必须是同一个数，否则模型会照着错的数字申请
+/// （上限从 5 改成 6 的那次就漏了描述里那句，模型仍然被告知"最多 5 个"）。
+///
+/// 执行侧（`AgentLoop.maxRequestTools`）引用它；`tool_specs_test` 另有一条用例
+/// 钉住"描述里的数字 == 这个常量"。
+const kMaxRequestTools = 6;
 
 /// **核心层（7）**：每次请求都发完整定义。
 ///
@@ -230,16 +240,16 @@ final kCoreTools = <AgentTool>[
     spec: ToolSpec(
       name: 'requestTools',
       description: '申请更多工具的完整定义。当你需要某个只在"工具目录"里见过名字的工具时用它。'
-          '单次最多 5 个，已申请过的不要重复申请。',
+          '单次最多 $kMaxRequestTools 个，已申请过的不要重复申请。',
       parameters: _obj(
-        {'names': _strList('工具名列表，最多 5 个')},
+        {'names': _strList('工具名列表，最多 $kMaxRequestTools 个')},
         required: ['names'],
       ),
     ),
   ),
 ];
 
-/// **常用层（8）**：只发名称 + 一句话，省 token。
+/// **常用层（10）**：只发名称 + 一句话，省 token。
 final kCommonTools = <AgentTool>[
   AgentTool(
     risk: ToolRisk.read,
@@ -251,7 +261,41 @@ final kCommonTools = <AgentTool>[
     layer: ToolLayer.common,
     spec: ToolSpec(
       name: 'listNotes',
-      description: '列出笔记（可按笔记库过滤）。只要 id 和标题时用它，比 searchNotes 省钱。',
+      description: '列出笔记，**按最近修改时间倒序**（可选只看某个笔记库）。'
+          '只要 id、标题、所属库、修改时间时用它，比 searchNotes 省钱。',
+      parameters: _obj({
+        'notebookId': _str('只看这个笔记库；不填＝工作区内的全部（可选）'),
+        'limit': _int('最多返回几条，默认 50，上限 100'),
+      }),
+    ),
+  ),
+  AgentTool(
+    risk: ToolRisk.read,
+    layer: ToolLayer.common,
+    spec: ToolSpec(
+      name: 'getNoteMeta',
+      description: '看一条笔记的**元信息**（标题、所属库、创建/修改时间、字数、'
+          '切片数、有没有缓存摘要）——**不含正文**。'
+          '想知道"这条笔记多大、要不要先看目录"时用它，比直接读正文省 token。',
+      parameters: _obj({'noteId': _str('笔记 id')}, required: ['noteId']),
+    ),
+  ),
+  AgentTool(
+    risk: ToolRisk.modify,
+    layer: ToolLayer.common,
+    spec: ToolSpec(
+      name: 'appendToNote',
+      description: '在一条笔记的**末尾追加**一段内容。'
+          '**追加就用它，不要用 updateNote 把整篇重写一遍**——'
+          '重写要先读到全文，既贵又容易抄漏。'
+          '追加前不需要先读，写入前会把「追加什么」给用户确认。',
+      parameters: _obj(
+        {
+          'noteId': _str('笔记 id'),
+          'text': _str('要追加到末尾的内容（Markdown）'),
+        },
+        required: ['noteId', 'text'],
+      ),
     ),
   ),
   AgentTool(
@@ -306,7 +350,7 @@ final kCommonTools = <AgentTool>[
   ),
 ];
 
-/// **按需层（4）**：默认不发定义，AI 用 `requestTools` 申请。
+/// **按需层（5）**：默认不发定义，AI 用 `requestTools` 申请。
 ///
 /// 放在这一层本身就是一层"额外摩擦"——这些工具要么危险、要么很少用，
 /// 让模型必须先申请一次，能挡掉一部分"顺手就调了"的情况。
@@ -340,9 +384,26 @@ final kOnDemandTools = <AgentTool>[
       description: '批量删除笔记（最多 10 条）。**不可恢复**。',
     ),
   ),
+  AgentTool(
+    risk: ToolRisk.read,
+    layer: ToolLayer.onDemand,
+    spec: ToolSpec(
+      name: 'searchHistory',
+      description: '在本会话更早的历史里**按关键词搜**，返回命中的是第几片'
+          '（只给片号与片段，不给全文）。'
+          '想找"我们之前是不是聊过 X"时用它——比 listHistory 一页页翻便宜得多。',
+      parameters: _obj(
+        {
+          'query': {'type': 'string', 'description': '关键词，用用户原话里的词'},
+          'limit': {'type': 'integer', 'description': '最多返回几片，默认 5'},
+        },
+        required: ['query'],
+      ),
+    ),
+  ),
 ];
 
-/// 全部 19 个工具。
+/// 全部 22 个工具。
 final kAgentTools = <AgentTool>[
   ...kCoreTools,
   ...kCommonTools,

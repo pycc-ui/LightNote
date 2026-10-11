@@ -13,6 +13,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lightnote/core/db/app_database.dart';
 import 'package:lightnote/core/db/models.dart';
 import 'package:lightnote/features/ai/data/deepseek_client.dart';
+import 'package:lightnote/features/ai/domain/agent_loop.dart';
 import 'package:lightnote/features/ai/domain/ai_chat_repository.dart';
 import 'package:lightnote/features/ai/domain/ai_repository.dart';
 import 'package:lightnote/features/ai/domain/ask_user.dart';
@@ -20,10 +21,17 @@ import 'package:lightnote/features/ai/domain/tool_types.dart';
 
 /// 按脚本回答的假客户端。**每一轮记下它收到的 messages**，供断言检查。
 class FakeClient extends DeepSeekClient {
-  FakeClient(this.script);
+  FakeClient(this.script, {this.stream});
 
-  /// 第 n 轮返回什么（n 从 0 起）
+  /// 第 n 轮返回什么（n 从 0 起）—— 单事件、最简单的那种假模型
   final AiEvent Function(int round, List<AgentMessage> messages) script;
+
+  /// 第 n 轮返回**一串**事件（真的分片流式）。给了它就不用 [script]。
+  ///
+  /// 为什么需要两种：单事件的话"每个分片都重写一遍前面的内容"这类 bug
+  /// 只会多出一份、看起来像正常的换行拼接；**分片**才会把它放大成
+  /// 一眼可见的重复（真实模型就是分片的，所以线上更容易撞到）。
+  final Stream<AiEvent> Function(int round, List<AgentMessage> messages)? stream;
 
   final List<List<AgentMessage>> seen = [];
   int _round = 0;
@@ -43,7 +51,8 @@ class FakeClient extends DeepSeekClient {
     CancelToken? cancelToken,
   }) {
     seen.add(List<AgentMessage>.from(messages));
-    return Stream.value(script(_round++, messages));
+    final round = _round++;
+    return stream?.call(round, messages) ?? Stream.value(script(round, messages));
   }
 }
 
@@ -54,10 +63,11 @@ void main() {
   late String convId;
 
   Future<void> boot(
-    AiEvent Function(int round, List<AgentMessage> messages) script,
-  ) async {
+    AiEvent Function(int round, List<AgentMessage> messages) script, {
+    Stream<AiEvent> Function(int round, List<AgentMessage> messages)? stream,
+  }) async {
     db = AppDatabase.forTesting(NativeDatabase.memory());
-    client = FakeClient(script);
+    client = FakeClient(script, stream: stream);
     chat = AiChatRepository(
       db: db,
       ai: AiRepository(db: db, client: client),
@@ -186,8 +196,76 @@ void main() {
       final rows = await db.watchMessages(convId).first;
       final assistant = rows.where((m) => m.role == 'assistant').toList();
       expect(assistant, hasLength(1), reason: '续写同一条，不是新建一条');
-      expect(assistant.single.content, contains('我按你选的来'));
+      // **精确相等**，不是 contains：占位符要被顶掉、正文只出现一次。
+      // 写成 contains 的话，"好的，我按你选的来。\n\n好的，我按你选的来。"
+      // （同一句话被写两遍）也能通过 —— 那正是曾经漏掉的 bug。
+      expect(assistant.single.content, '好的，我按你选的来。');
       expect(assistant.single.pendingAction, isNull);
+    });
+
+    test('★ 流式分片续写：每个分片只"长出来"，不把前面写过的再写一遍', () async {
+      await boot(
+        (round, messages) => const AiDone(fullText: '（不该走这条）'),
+        stream: (round, messages) {
+          if (round == 0) {
+            // 先垫一句话再问 —— 于是续写时行里**已经有内容**，
+            // 走的正是"接在已有内容之后"那条分支（出问题的那条）
+            return Stream.fromIterable([
+              const AiChunk('我先确认一下：'),
+              const AiDone(toolCalls: [
+                ToolCall(
+                  id: 'ask_1',
+                  name: 'askUser',
+                  arguments: '{"question":"哪一篇？","type":"text"}',
+                ),
+              ]),
+            ]);
+          }
+          // 续写的这一轮真的分片（真实模型就是这样）
+          return Stream.fromIterable([
+            const AiChunk('已'),
+            const AiChunk('删除，'),
+            const AiChunk('「我的轻笔记」现在是空的。'),
+            const AiDone(),
+          ]);
+        },
+      );
+
+      await chat.send(
+        conversationId: convId,
+        userInput: 'x',
+        contextNoteIds: const [],
+        thinkingEffort: 'low',
+        thinkingEnabled: false,
+      );
+
+      // 挂起时：垫的那句话要留在消息里（用户过几天回来还得知道自己问的是什么）
+      final suspended = (await db.watchMessages(convId).first)
+          .where((m) => m.role == 'assistant')
+          .single;
+      expect(suspended.content, '我先确认一下：');
+
+      await chat.answerAsk(
+        conversationId: convId,
+        result: AskResult.input('第一篇'),
+        thinkingEffort: 'low',
+        thinkingEnabled: false,
+      );
+
+      final assistant = (await db.watchMessages(convId).first)
+          .where((m) => m.role == 'assistant')
+          .single;
+
+      // 曾经的 bug：每写一个分片都把"当前累计文本"重新拼到行尾，于是内容变成
+      // 「已」+「已删除，」+「已删除，「我的轻笔记」…」……按字数递增地重复上百遍
+      // （用户看到的就是这种锯齿）。续写必须是"起点 + 累计文本"的**替换式**写入，
+      // 重复写同一个累计文本要幂等。
+      expect(
+        assistant.content,
+        '我先确认一下：\n\n已删除，「我的轻笔记」现在是空的。',
+      );
+      // 兜一道粗筛：万一将来又退化成追加，长度会按字数平方级膨胀
+      expect(assistant.content.length, lessThan(60));
     });
 
     test('取消也是合法回答：以 cancelled 回灌，循环照常继续', () async {
@@ -255,7 +333,9 @@ void main() {
   });
 
   group('askUser 的上限跨恢复累计', () {
-    test('问到第 3 次之后，第 4 次会被拒并让模型收尾', () async {
+    test(
+        '问到第 ${AgentLoop.maxAsksPerTurn} 次之后，'
+        '第 ${AgentLoop.maxAsksPerTurn + 1} 次会被拒并让模型收尾', () async {
       var asks = 0;
       await boot((round, messages) {
         // 每轮都问；模型永远不满意
@@ -296,8 +376,9 @@ void main() {
         answered++;
       }
 
-      expect(answered, lessThanOrEqualTo(3),
-          reason: '上限是 3 —— 用户被问第三次时已经烦了，第四次会直接关掉 App');
+      expect(answered, AgentLoop.maxAsksPerTurn,
+          reason: '上限是 ${AgentLoop.maxAsksPerTurn}：到顶之后强制收尾，'
+              '不能让模型"问一句 → 不满意 → 再问一句"地一直问下去');
     });
   });
 }

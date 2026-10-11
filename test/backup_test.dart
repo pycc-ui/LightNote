@@ -106,6 +106,8 @@ void main() {
     // 影响下一个用例（以及万一用到同一个 dart SDK 的其它东西）
     await _clearAllConfigAnchors();
     DatabaseLocation.resetCacheForTesting();
+    // 还原主目录取法：有的用例把它指到死路过，静态字段不还原会污染后面的用例
+    DatabaseLocation.homeDirOf = DatabaseLocation.defaultHomeDirOf;
     for (final path in [privateRoot, workDir.path]) {
       try {
         final d = Directory(path);
@@ -173,6 +175,11 @@ void main() {
       await blocker.writeAsString('x');
       final hopeless = p.join(blocker.path, 'nested');
       PathProviderPlatform.instance = _FakePathProvider(hopeless);
+      // ⚠️ **主目录也要一起指到死路**：候选顺序是
+      // AppData → 文档 → 主目录 → 程序目录，只挡住前两个的话
+      // 会停在主目录（它是可写的），测出来的就不是这条兜底了。
+      // 环境变量在 Dart 里是只读的，所以走 `homeDirOf` 这个缝。
+      DatabaseLocation.homeDirOf = () => hopeless;
       DatabaseLocation.resetCacheForTesting();
 
       final info = await DatabaseLocation.describeSafe();
@@ -284,7 +291,7 @@ void main() {
       expect(tables.length, greaterThanOrEqualTo(10));
     });
 
-    test('会自动在私有目录留一份（用户选的位置丢了也不至于没备份）', () async {
+    test('只生成用户指定的那一份（私有目录不留副本）', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       await _insertNote(db, 'n1', '唯一一条');

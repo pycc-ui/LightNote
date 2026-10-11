@@ -29,7 +29,14 @@ dependencies:
   flutter_secure_storage: ^9.2.0
 
   # ---------- UI ----------
-  flutter_markdown: ^0.7.0   # 注意：该包已停止维护，见 README「已知风险」
+  # Markdown 渲染用 gpt_markdown，**不用 flutter_markdown**：
+  #   · flutter_markdown 不认 `$…$` / `$$…$$`，数学公式会当普通文本显示；
+  #   · 它已被官方标记 discontinued（停止维护）；
+  #   · gpt_markdown 自带 LaTeX（`val_latex_flutter`）、代码高亮与流式渲染，
+  #     且**不需要**额外的 flutter_math_fork。
+  # 统一入口是 `lib/core/ui/markdown_view.dart` 的 MarkdownView —— 不要在页面里
+  # 直接 new GptMarkdown，否则 `useDollarSignsForLatex` 这类开关迟早漏掉一处。
+  gpt_markdown: ^1.3.4
 
   cupertino_icons: ^1.0.8
 

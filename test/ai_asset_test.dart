@@ -101,20 +101,18 @@ void main() {
       expect(out, '中文字abcdefghijkl');
     });
 
-    test('sanitizeTags 去重、去空、限量 6 个', () {
-      final out = sanitizeTags([
-        '记忆', '记忆', '  ', '#间隔重复', '复习',
-        '标签五', '标签六', '标签七', '标签八',
-      ]);
-      expect(out.length, lessThanOrEqualTo(AiLimits.tagCountMax));
-      expect(out.toSet().length, out.length, reason: '不该有重复');
-      expect(out.contains(''), isFalse);
-      expect(out.first, '记忆');
+    test('sanitizeTag 剥掉首尾的壳', () {
+      // 模型很爱用 #话题 / 「」/ 引号把标签裹起来，裹着进库就会显示成「「记忆」」
+      expect(sanitizeTag(' #间隔重复 '), '间隔重复');
+      expect(sanitizeTag('「记忆」'), '记忆');
+      expect(sanitizeTag('【复习】'), '复习');
     });
 
-    test('sanitizeTags 保留少量标签（不为凑数硬塞）', () {
-      final out = sanitizeTags(['只有这一个']);
-      expect(out, ['只有这一个']);
+    test('sanitizeTag 只管一个标签，空的就是空的', () {
+      // 卡片只生成一个标签，所以这里没有"去重 / 凑够 N 个"那套逻辑
+      expect(sanitizeTag('只有这一个'), '只有这一个');
+      expect(sanitizeTag('   '), '');
+      expect(sanitizeTag('##'), '');
     });
   });
 

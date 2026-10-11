@@ -204,7 +204,7 @@ class FeedDraft {
   ///
   /// 注意命名落差：这里叫 `tag`（单数），但库里的列仍叫 `feed_reserve.tags`
   /// 且存的是**单元素 JSON 数组**（见 `AppDatabase.replaceFeedReserve` 与
-  /// `_decodeTagList`）。那是历史遗留的列名，**不代表一次能生成多个**。
+  /// `_decodeTag`）。那是历史遗留的列名，**不代表一次能生成多个**。
   final String tag;
 
   /// 标题与正文都空就丢弃——空卡片对用户毫无意义。

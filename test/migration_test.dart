@@ -379,7 +379,7 @@ void main() {
     //     同一条笔记，那套状态就没用了，repository 里的方法早已全部删掉。
     //   · note_ai_tags 是每篇笔记的 AI 标签，**只写不读**：读侧链路
     //     （get → FeedRepository.tagsOf）零调用方，卡片上那个标签其实来自
-    //     卡片自己的 `FeedDraft.tags`。
+    //     卡片自己的 `FeedDraft.tag`。
     //
     // 表本身原先"留着无害"，v8 把它们清掉了——这里验证真的清了，
     // 且没有牵连其它表与数据。

@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/db/models.dart';
@@ -10,16 +9,17 @@ import '../../../core/theme/dimens.dart';
 import '../../../core/util/ai_limits.dart';
 import '../../../core/util/text_utils.dart';
 import '../../../core/widgets/log_bar.dart';
+import '../../../core/widgets/markdown_view.dart';
 import '../../../core/prefs/preferences_service.dart';
 import '../data/note_repository.dart';
 import '../domain/note_chunk.dart';
 import '../domain/note_chunker.dart';
 import 'widgets/notebook_picker.dart';
 
-/// 保存状态（设计稿 §5.4 状态：编辑中 / 保存中 / 已保存 / 保存失败）
+/// 保存状态（编辑中 / 保存中 / 已保存 / 保存失败）
 enum SaveState { idle, dirty, saving, saved, failed }
 
-/// 笔记编辑页（设计稿 §5.4 / 线框图 4.4）
+/// 笔记编辑页（见《界面设计》的「笔记编辑页：编辑 / 阅读两态」）。
 ///
 /// 两种模式：**编辑** 与 **阅读**。
 ///
@@ -500,6 +500,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                   ),
                 ],
         ),
+        // 阅读态右下角是「目录」入口（形状与笔记库页的「AI 助手」按钮一致）；
+        // 编辑态不给：那里右手边是输入框与格式工具栏，浮一个按钮上去会压住正文
+        floatingActionButton: _reading ? _tocButton() : null,
         body: Column(
           children: [
             // 篇幅提示横幅：只在软上限以上才出现，所以正常写笔记看不见它。
@@ -647,13 +650,16 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     //
     // 分片用的是与搜索**同一个** `NoteChunker.chunk`，所以片号必然对得上
     // （不用查库：切片是纯函数，同输入同输出）。
+    //
+    // Markdown 的样式与"图片不加载"的策略都不在这里：统一走 [MarkdownView]
+    // （`core/widgets/markdown_view.dart`）。这里只传字体倍率。
     final pieces = _piecesOf(content);
-    final scale = _fontScale;
-    final sheet = _markdownSheet(theme, scale);
 
     return SingleChildScrollView(
+      // 底部留白要比别处多一格：右下角浮着「目录」FAB（40 高 + 16 边距），
+      // 留 48 的话最后一行正文会被它压住。
       padding: const EdgeInsets.fromLTRB(
-        AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xl),
+        AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xxl + AppSpacing.md),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -664,19 +670,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                 title,
                 style: theme.textTheme.headlineMedium?.copyWith(
                   fontWeight: FontWeight.w700,
-                  fontSize: 26 * scale,
+                  fontSize: 26 * _fontScale,
                 ),
               ),
             ),
           if (pieces.isEmpty)
-            Markdown(
-              data: '_（正文为空）_',
-              selectable: true,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              sizedImageBuilder: _imageAsText,
-              styleSheet: sheet,
-            )
+            MarkdownView('_（正文为空）_', fontScale: _fontScale)
           else
             for (var i = 0; i < pieces.length; i++)
               Container(
@@ -692,19 +691,147 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                     : null,
                 padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.xs, vertical: 2),
-                child: Markdown(
+                child: MarkdownView(
                   // 片正文从 content 现取（片只存偏移，不存正文）
-                  data: pieces[i].textOf(content),
-                  selectable: true,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  sizedImageBuilder: _imageAsText,
-                  styleSheet: sheet,
+                  pieces[i].textOf(content),
+                  fontScale: _fontScale,
                 ),
               ),
         ],
       ),
     );
+  }
+
+  /// 阅读态的「目录」入口：**右下角一个小号 FAB**。
+  ///
+  /// ## 为什么是这个形状
+  ///
+  /// 和笔记库页右下角的「AI 助手」按钮**是同一个形状**（`FloatingActionButton.small`
+  /// + `heroTag` + tooltip + 一个 16~24 的图标）：那两个都是"点开还有一层"的动作入口，
+  /// 又都不属于主流程（主流程是读、是新建），所以都不该占顶栏或底部一整行。
+  /// 用户在这两处看到的是同一种东西，不用重新认。
+  ///
+  /// 只在**阅读态**出现：编辑态右手边要留给输入与工具栏，一个浮起来的按钮
+  /// 会压在正文输入框上。
+  ///
+  /// 没有小标题时**照样显示** —— 点开是一句"怎么才有目录"的说明；
+  /// 藏起来的话用户永远不会知道有这个功能（这与"点开是空列表"是两回事）。
+  Widget _tocButton() {
+    return FloatingActionButton.small(
+      // heroTag 必须显式给：同一条路由上若有第二个 FAB 且都用默认 tag，
+      // Hero 动画会直接抛异常。这里的 tag 与库里另外两个（ai / create）都不同。
+      heroTag: 'toc',
+      tooltip: '目录',
+      onPressed: _showToc,
+      child: const Icon(Icons.toc),
+    );
+  }
+
+  /// 目录项：**每个小节的第一片**。
+  ///
+  /// 为什么按"片"列目录，而不是自己再解析一遍 Markdown 标题：
+  /// 阅读视图本来就是**按片渲染**、每片一个 `GlobalKey`（见 [_buildReading]），
+  /// 而片的分界正是标题层级（`NoteChunker` 保证不跨标题合并）。所以
+  /// "目录里的一行" 与 "能滚到的那一片" 天然是同一个东西，不需要两套定位。
+  ///
+  /// 同一标题被拆成多片时只留第一片 —— 否则目录里会出现三行一模一样的标题。
+  List<({int index, String heading, int level})> _sections() {
+    final pieces = _piecesOf(_contentController.text);
+    final out = <({int index, String heading, int level})>[];
+    String? last;
+    for (final p in pieces) {
+      final heading = p.heading.trim();
+      // 空标题是"开头那段没有小标题的正文"，不进目录
+      if (heading.isEmpty || heading == last) continue;
+      last = heading;
+      out.add((index: p.index, heading: heading, level: p.level));
+    }
+    return out;
+  }
+
+  /// 弹出目录，点一条**滚到那一节**。
+  ///
+  /// 滚动复用 [_pendingScrollChunk] + [_withScrollTarget]（与"搜索结果点进来
+  /// 定位到命中片"走的是同一条路径），所以"怎么滚、滚到哪个位置"只有一处实现。
+  ///
+  /// 顺序上先关弹层、再滚：让用户**看见**页面滚过去了，而不是在弹层背后偷偷滚完。
+  Future<void> _showToc() async {
+    final sections = _sections();
+    final theme = Theme.of(context);
+
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: sections.isEmpty
+            // 没有小标题时说清楚"怎么才有"，而不是给一个空列表
+            ? Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.md, 0, AppSpacing.md, AppSpacing.lg),
+                child: Text(
+                  '这篇笔记还没有小标题，所以没有可跳转的位置。\n\n'
+                  '在正文里用「## 小节名」起头，目录里就会出现它们。',
+                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.7),
+                ),
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                        AppSpacing.md, 0, AppSpacing.md, AppSpacing.xs),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text('目录', style: theme.textTheme.titleMedium),
+                        ),
+                        Text(
+                          '共 ${sections.length} 节',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: sections.length,
+                      itemBuilder: (context, i) {
+                        final s = sections[i];
+                        // 层级用缩进表达：比画树线安静，长标题也不会被挤掉
+                        final indent =
+                            (s.level - 1).clamp(0, 3).toDouble() * AppSpacing.md;
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.only(
+                            left: AppSpacing.md + indent,
+                            right: AppSpacing.md,
+                          ),
+                          title: Text(
+                            s.heading,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              // 顶层小节加一点分量，扫目录时先看到它
+                              fontWeight: s.level <= 1
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                            ),
+                          ),
+                          onTap: () => Navigator.pop(ctx, s.index),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+
+    if (picked == null || !mounted) return;
+    setState(() => _pendingScrollChunk = picked);
   }
 
   /// 取（并缓存）正文的分片。
@@ -758,86 +885,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     });
   }
 
-  /// 阅读视图的 Markdown 样式（编辑/阅读两条路径共用同一份，避免各写一遍走样）
-  MarkdownStyleSheet _markdownSheet(ThemeData theme, double scale) {
-    return MarkdownStyleSheet.fromTheme(theme).copyWith(
-      p: theme.textTheme.bodyLarge
-          ?.copyWith(height: 1.75, fontSize: 16 * scale),
-      h1: theme.textTheme.headlineMedium
-          ?.copyWith(fontWeight: FontWeight.w700, fontSize: 26 * scale),
-      h2: theme.textTheme.titleLarge
-          ?.copyWith(fontWeight: FontWeight.w700, fontSize: 21 * scale),
-      h3: theme.textTheme.titleMedium
-          ?.copyWith(fontWeight: FontWeight.w600, fontSize: 18 * scale),
-      code: TextStyle(
-        fontFamily: 'monospace',
-        fontSize: 14 * scale,
-        backgroundColor: theme.colorScheme.surfaceContainerHighest,
-      ),
-      blockquoteDecoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: AppRadius.cardRadius,
-      ),
-    );
-  }
-
-  /// 正文里的图片语法**不加载图片**，只把 URL 显示出来。
-  ///
-  /// ## 为什么不做图片
-  ///
-  /// 产品决定**不支持插图**。而 `flutter_markdown` 默认会把 `![](url)`
-  /// 渲染成 `Image.network`，那意味着：
-  ///   · 打开笔记会**向第三方服务器发请求**（暴露 IP 与打开时间）——
-  ///     和"数据只在你设备上"的定位直接冲突
-  ///   · 图床挂了、对方删了 → 破图，而且**用户收不到任何提示**
-  ///   · 从小红书/微信一类站点复制的链接通常带防盗链，根本加载不出来
-  ///
-  /// 所以这里覆盖成"把 URL 当文本显示"：**不渲染 = 不发任何请求**，
-  /// 上面三个问题一次性消掉。用户想看图就选中 URL 自己打开。
-  ///
-  /// 注：**裸 URL**（不带 `![]()` 的）本来就走 Markdown 的链接语法，
-  /// 不受这里影响。
-  Widget _imageAsText(MarkdownImageConfig config) {
-    final theme = Theme.of(context);
-    final url = config.uri.toString();
-    final alt = (config.alt ?? '').trim();
-
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.sm,
-        vertical: AppSpacing.xs,
-      ),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: AppRadius.cardRadius,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (alt.isNotEmpty)
-            Text(
-              alt,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-                fontSize: 15 * _fontScale,
-              ),
-            ),
-          SelectableText(
-            url,
-            style: theme.textTheme.bodySmall?.copyWith(
-              fontFamily: 'monospace',
-              color: theme.colorScheme.primary,
-              fontSize: 13 * _fontScale,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 格式工具栏（线框图 4.4 底部，6 个按钮：加粗 / 斜体 / 下划线 / 列表 /
+  /// 格式工具栏（编辑页底部，6 个按钮：加粗 / 斜体 / 下划线 / 列表 /
   /// 待办 / 标题。原先还有一个「标签」，随手动标签功能一起在 schema v9 删除）
   Widget _formatToolbar(ThemeData theme) {
     return Container(
@@ -1043,7 +1091,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   }
 }
 
-/// 顶栏的保存状态指示（设计稿 §5.4）
+/// 顶栏的保存状态指示（见《界面设计》的「笔记编辑页」一节）
 class _SaveStatus extends StatelessWidget {
   const _SaveStatus({required this.state});
 

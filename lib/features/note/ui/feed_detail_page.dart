@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:provider/provider.dart';
 
 import '../../../../core/db/models.dart';
 import '../../../../core/theme/dimens.dart';
 import '../../../../core/widgets/log_bar.dart';
+import '../../../../core/widgets/markdown_view.dart';
 import '../data/note_repository.dart';
 
 /// 轻笔记的**详情页**：看 AI 写出来的全文。
@@ -122,22 +122,10 @@ class _FeedDetailPageState extends State<FeedDetailPage> {
               ],
             ),
             const Divider(height: AppSpacing.xl),
-            MarkdownBody(
-              data: widget.draft.body,
-              styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-                p: theme.textTheme.bodyLarge?.copyWith(height: 1.7),
-                h1: theme.textTheme.titleLarge
-                    ?.copyWith(fontWeight: FontWeight.w600),
-                h2: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w600),
-                h3: theme.textTheme.titleSmall
-                    ?.copyWith(fontWeight: FontWeight.w600),
-                blockSpacing: AppSpacing.md,
-                listIndent: 20,
-              ),
-              // 正文里可能有链接，详情页允许点击（卡片上不允许）
-              onTapLink: (_, __, ___) {},
-            ),
+            // 卡片正文由 AI 生成，天然是 Markdown（可能带公式/代码/表格），
+            // 所以走统一的 MarkdownView。这里**没有**链接点击回调：
+            // 卡片详情是临时预览，误触跳走会丢掉"还没收下"的这张卡。
+            MarkdownView(widget.draft.body),
           ],
         ),
       ),

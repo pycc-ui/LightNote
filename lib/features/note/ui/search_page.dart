@@ -10,7 +10,7 @@ import '../data/search_service.dart';
 import '../domain/search_result.dart';
 import 'note_editor_page.dart';
 
-/// 搜索页（设计稿 §5.5 / 线框图 4.5）。
+/// 搜索页（见《界面设计》的「搜索页」一节）。
 ///
 /// 实时搜索 + 关键词高亮 + 搜索历史。
 ///
@@ -159,7 +159,7 @@ class _SearchPageState extends State<SearchPage> {
                 if (all.isEmpty) {
                   return _NoResult(keyword: _query);
                 }
-                // 结果分两类（设计稿 §6.2）：点进去的落点不一样 ——
+                // 结果分两类（见《界面设计》的「搜索页」）：点进去的落点不一样 ——
                 // 「笔记」看整篇，「笔记内容」直接定位到命中那一片。
                 final byTitle =
                     all.where((r) => r.isTitleHit).toList(growable: false);

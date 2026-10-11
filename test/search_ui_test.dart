@@ -6,8 +6,8 @@
 // 都是**布局之后**才成立的事，纯数据层测不出来。
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lightnote/core/widgets/markdown_view.dart';
 import 'package:provider/provider.dart';
 
 import 'package:lightnote/core/db/app_database.dart';
@@ -61,7 +61,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // 整篇一个 Markdown 的话这里只会是 1
-      expect(find.byType(Markdown), findsNWidgets(expected));
+      expect(find.byType(MarkdownView), findsNWidgets(expected));
     });
 
     testWidgets('空正文不炸，显示占位', (tester) async {
@@ -70,7 +70,11 @@ void main() {
         NoteEditorPage(noteId: note.id, startInReading: true),
       ));
       await tester.pumpAndSettle();
-      expect(find.textContaining('正文为空'), findsOneWidget);
+      // findRichText：渲染器把文字画在 RichText 里，默认的查找只看 Text
+      expect(
+        find.textContaining('正文为空', findRichText: true),
+        findsOneWidget,
+      );
     });
 
     testWidgets('片正文与原文逐字一致（渲染的就是原文那几段）', (tester) async {
@@ -82,9 +86,10 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      final widgets = tester.widgetList<Markdown>(find.byType(Markdown)).toList();
+      final widgets =
+          tester.widgetList<MarkdownView>(find.byType(MarkdownView)).toList();
       for (var i = 0; i < chunks.length; i++) {
-        expect(widgets[i].data, chunks[i].textOf(note.content));
+        expect(widgets[i].text, chunks[i].textOf(note.content));
       }
     });
 
@@ -115,6 +120,90 @@ void main() {
           .state<ScrollableState>(find.byType(Scrollable).first)
           .position;
       expect(pos.pixels, 0);
+    });
+  });
+
+  group('阅读态目录', () {
+    testWidgets('★ 阅读态右下角有小号 FAB（形状与笔记库页的 AI 入口一致）', (tester) async {
+      final note = await notes.createInbox(title: '三章', content: threeChapters());
+
+      await tester.pumpWidget(host(
+        NoteEditorPage(noteId: note.id, startInReading: true),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('目录'), findsOneWidget);
+      expect(find.byIcon(Icons.toc), findsOneWidget);
+    });
+
+    testWidgets('编辑态**不给**目录入口（浮起来会压住正文输入框）', (tester) async {
+      final note = await notes.createInbox(title: '三章', content: threeChapters());
+
+      await tester.pumpWidget(host(NoteEditorPage(noteId: note.id)));
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('目录'), findsNothing);
+    });
+
+    testWidgets('点开目录列出各节标题与节数', (tester) async {
+      final note = await notes.createInbox(title: '三章', content: threeChapters());
+
+      await tester.pumpWidget(host(
+        NoteEditorPage(noteId: note.id, startInReading: true),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('目录'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('目录'), findsOneWidget, reason: '弹层标题');
+      expect(find.text('共 3 节'), findsOneWidget);
+      // 正文里的标题是 RichText（`find.text` 默认不看它），所以这三条只可能来自目录
+      expect(find.text('甲章'), findsOneWidget);
+      expect(find.text('乙章'), findsOneWidget);
+      expect(find.text('丙章'), findsOneWidget);
+    });
+
+    testWidgets('★ 点目录里的一节会滚到那一片（不是只关掉弹层）', (tester) async {
+      final note = await notes.createInbox(title: '三章', content: threeChapters());
+
+      await tester.pumpWidget(host(
+        NoteEditorPage(noteId: note.id, startInReading: true),
+      ));
+      await tester.pumpAndSettle();
+
+      final pos = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(pos.pixels, 0);
+
+      await tester.tap(find.byTooltip('目录'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('丙章'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.state<ScrollableState>(find.byType(Scrollable).first).position.pixels,
+        greaterThan(0),
+        reason: '选了最后一节却没滚动，等于目录没有定位能力',
+      );
+    });
+
+    testWidgets('没有小标题时说清"怎么才有"，而不是给一个空列表', (tester) async {
+      final note = await notes.createInbox(
+        title: '没有小标题',
+        content: '整篇都是正文，一个小标题也没有。' * 5,
+      );
+
+      await tester.pumpWidget(host(
+        NoteEditorPage(noteId: note.id, startInReading: true),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('目录'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('## 小节名'), findsOneWidget);
     });
   });
 

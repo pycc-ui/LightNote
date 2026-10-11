@@ -165,7 +165,7 @@ class AppDatabase extends _$AppDatabase {
             //
             // 同一批建的 `note_ai_tags`（每篇笔记的 AI 标签）**已在 v8 删除**：
             // 它只写不读——卡片上那个标签来自卡片自己的 tags
-            // （`FeedDraft.tags` / `displayTag`），与这张表无关。
+            // （`FeedDraft.tag` / `displayTag`），与这张表无关。
             //
             // 表名在 v9 从 `note_ai_summaries` 改成了 `ai_note_summaries`。
             // 这里直接用新表定义即可：v9 那条 RENAME 会以"表不存在"失败并被
@@ -219,7 +219,7 @@ class AppDatabase extends _$AppDatabase {
             //     读侧链路（`NoteAiAssetRepository.get` → `FeedRepository.tagsOf`）
             //     零调用方，v8 已把那条链路连同 `NoteAiAsset.tags` 字段一起删掉；
             //     卡片上显示的那个标签来自卡片自己的 tags
-            //     （`FeedDraft.tags` → `displayTag`），与这张表无关。
+            //     （`FeedDraft.tag` → `displayTag`），与这张表无关。
             //
             // 用 raw SQL 而不是 drift 的 delete()：两张表已经从
             // `@DriftDatabase` 移除，schema 里不再有它们。
@@ -242,7 +242,7 @@ class AppDatabase extends _$AppDatabase {
             //    `IF EXISTS` 让"本来就没这两张表"（全新库）也不报错。
             //
             //    注意这与卡片上的标签**无关**：卡片标签来自卡片自己的
-            //    `FeedDraft.tags`，存在 `feed_reserve.tags` 列里，一行不动。
+            //    `FeedDraft.tag`，存在 `feed_reserve.tags` 列里，一行不动。
             for (final t in const ['note_tags', 'tags']) {
               await customStatement('DROP TABLE IF EXISTS $t');
             }
@@ -645,19 +645,30 @@ class AppDatabase extends _$AppDatabase {
     return e;
   }
 
-  /// 只要 **id 与标题** 的笔记列表（AI 的 `listNotes` 用它）。
+  /// 只要 **id / 标题 / 所属库 / 修改时间** 的笔记列表（AI 的 `listNotes` 用它）。
   ///
-  /// 用 `selectOnly` 而不是 `select`：后者的工具描述里写着"只要 id 和标题时
-  /// 用它，比 searchNotes 省钱"——**那就得真的省钱**。
+  /// 用 `selectOnly` 而不是 `select`：工具描述里写着"只要元数据时用它，
+  /// 比 searchNotes 省钱"——**那就得真的省钱**。
   /// 读整行会把每篇笔记的正文都取出来，几百篇就是几百 KB，
-  /// 只为了拿两个短字段。
-  Future<List<({String id, String title})>> noteBriefs({
+  /// 只为了拿几个短字段。
+  ///
+  /// 排序是 `updatedAt DESC`（最近改过的在前）：AI 说"我最近写的那篇"时，
+  /// 它只看得见顺序，看不见时间戳之外的线索 —— 顺序本身就是信息。
+  /// `updatedAt` 也一并返回，好让它能说清"那篇是几天前的"。
+  Future<
+      List<
+          ({
+            String id,
+            String title,
+            String? notebookId,
+            DateTime updatedAt,
+          })>> noteBriefs({
     List<String>? notebookIds,
     bool includeUnfiled = true,
     int limit = 50,
   }) async {
     final q = selectOnly(notes)
-      ..addColumns([notes.id, notes.title])
+      ..addColumns([notes.id, notes.title, notes.notebookId, notes.updatedAt])
       ..where(notes.deletedAt.isNull() &
           _scopeOf(notebookIds, includeUnfiled))
       ..orderBy([
@@ -667,7 +678,13 @@ class AppDatabase extends _$AppDatabase {
     final rows = await q.get();
     return [
       for (final r in rows)
-        (id: r.read(notes.id) ?? '', title: r.read(notes.title) ?? ''),
+        (
+          id: r.read(notes.id) ?? '',
+          title: r.read(notes.title) ?? '',
+          notebookId: r.read(notes.notebookId),
+          // updatedAt 是非空列，读出来不可能是 null；兜底只是为了不写 `!`
+          updatedAt: r.read(notes.updatedAt) ?? DateTime.fromMillisecondsSinceEpoch(0),
+        ),
     ];
   }
 
@@ -850,11 +867,30 @@ class AppDatabase extends _$AppDatabase {
   Future<void> clearAiHistory() => delete(aiCalls).go();
 
   // ==========================================================================
-  // AI 会话（设计稿 §6.3）
+  // AI 会话（见《数据库设计》的「ai_conversations / ai_messages」一节）
   // ==========================================================================
 
+  /// 会话列表：按最近活动倒序，**且只列有消息的**。
+  ///
+  /// ## 为什么把"空会话"挡在列表外
+  ///
+  /// 一条消息都没有的会话，用户点进去也看不到任何东西 —— 它只是早先
+  /// "点一下新建就在库里落一行"留下的空壳（那个 bug 已修，见
+  /// `AiPage._newConversation` 的说明）。留着它们的后果很具体：它们的时间戳最新，
+  /// 于是排在列表最前面，也会被"打开上次的会话"选中 —— 用户一进来看到的是空白。
+  ///
+  /// 这里**只是不显示，不删行**：删除是破坏性动作（本项目的规矩是先问再做），
+  /// 而这个列表本来就是"给用户挑会话"的视图，空会话不构成一个可挑的东西。
+  ///
+  /// 用 `EXISTS` 子查询而不是"先查会话、再逐个查消息"：
+  /// 后者是 N+1 次查询，会话一多就明显。
   Stream<List<AiConversation>> watchConversations() {
+    final hasMessages = existsQuery(
+      select(aiMessages)
+        ..where((m) => m.conversationId.equalsExp(aiConversations.id)),
+    );
     return (select(aiConversations)
+          ..where((t) => hasMessages)
           ..orderBy([
             (t) => OrderingTerm(
                 expression: t.updatedAt, mode: OrderingMode.desc),
@@ -889,6 +925,16 @@ class AppDatabase extends _$AppDatabase {
 
   Future<void> deleteConversation(String id) {
     return (delete(aiConversations)..where((t) => t.id.equals(id))).go();
+  }
+
+  /// 一次删多条会话（会话记录页的「多选 → 删除」）。
+  ///
+  /// 一条 `WHERE id IN (...)` 而不是循环调用 [deleteConversation]：
+  /// 循环是 N 次独立语句，中途失败就只删了一半，而调用方以为全删了。
+  /// 消息由外键 `ON DELETE CASCADE` 跟着走（`beforeOpen` 里开了 `foreign_keys`）。
+  Future<void> deleteConversations(List<String> ids) {
+    if (ids.isEmpty) return Future.value();
+    return (delete(aiConversations)..where((t) => t.id.isIn(ids))).go();
   }
 
   Future<void> insertAiMessage(AiMessagesCompanion entry) {

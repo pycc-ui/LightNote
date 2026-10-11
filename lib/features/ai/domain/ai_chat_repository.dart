@@ -15,7 +15,7 @@ import 'tool_executor.dart';
 import 'tool_types.dart';
 import 'prompts.dart';
 
-/// AI 会话仓储：把设计稿 §5.6 的 AI 页（工作区 / 思考强度 / 选择文件 / 指令）
+/// AI 会话仓储：把《界面设计》里「AI 助手页」那一屏（工作区 / 思考强度 / 选择文件 / 指令）
 /// 接到真实 DeepSeek 调用上，并持久化会话历史。
 ///
 /// 隐私设计：
@@ -79,7 +79,7 @@ class AiChatRepository {
       _db.watchMessages(conversationId);
 
   Future<AiConversation> createConversation({
-    AgentWorkspace workspace = AgentWorkspace.none,
+    AgentWorkspace workspace = AgentWorkspace.initial,
     String thinkingEffort = 'medium',
   }) async {
     final now = DateTime.now().toUtc();
@@ -123,9 +123,27 @@ class AiChatRepository {
   ///
   /// `app_kv` 里的派生数据不会跟着外键走，不清就是一条永远读不到的垃圾
   ///（会话 id 是 uuid，永远撞不上同一条）。
-  Future<void> deleteConversation(String id) async {
-    await _db.deleteSetting('$summaryKeyPrefix$id');
-    await _db.deleteConversation(id);
+  Future<void> deleteConversation(String id) => deleteConversations([id]);
+
+  /// 批量删除会话（会话记录页的「多选 → 删除」用它）。
+  ///
+  /// 与单条删除**共用一条路径**：单条也走这里，所以"顺手清历史摘要"这件事
+  /// 不可能只在一处生效。删行本身是一条 `WHERE id IN (...)`，
+  /// 而 `app_kv` 里的摘要 key 只能逐个删（它是文本 key，没有外键）。
+  ///
+  /// **不可恢复**：没有回收站，也没有撤销 —— 所以调用方（UI）必须先让用户确认。
+  /// 返回真正删掉的条数，供提示文案用。
+  Future<int> deleteConversations(Iterable<String> ids) async {
+    final list = ids.toList(growable: false);
+    if (list.isEmpty) return 0;
+
+    await _db.transaction(() async {
+      for (final id in list) {
+        await _db.deleteSetting('$summaryKeyPrefix$id');
+      }
+      await _db.deleteConversations(list);
+    });
+    return list.length;
   }
   // ---------------------------------------------------------------------------
 
@@ -244,7 +262,8 @@ class AiChatRepository {
   ///
   /// 返回被续写的那条助手消息 id（UI 还在监听它）。
   ///
-  /// 流程与 §9.5 一致：把用户的选择作为 `role: tool` 的结果回灌，
+  /// 流程与《AI接入设计》的「挂起机制：askUser」一节一致：
+  /// 把用户的选择作为 `role: tool` 的结果回灌，
   /// 然后从**提问那一刻的对话**接着跑 —— 中间的工具往来在
   /// [PendingAsk.messages] 里存着，所以重启也不影响。
   Future<String?> answerAsk({
@@ -327,6 +346,24 @@ class AiChatRepository {
     required bool append,
     int asksSoFar = 0,
   }) async {
+    // ---- 续写起点：**在本次 run 开始时就定死** ----
+    //
+    // ⚠️ 这里曾经不是这样：`_write` 每写一次都**重新读一遍行内容**再拼
+    // （`before + '\n\n' + text`），而流式事件送进来的 `text` 是**整段的累计文本**。
+    // 于是第 k 个分片会把前 k-1 个分片再写一遍 —— 一段 700 字的回答能滚成
+    // 几十 KB 的重复：用户看到的是一句话按字数递增地重复上百遍
+    // （"已/已删/已删除/已删除，/…"这种锯齿），越流式越明显。
+    //
+    // 正确的形状是：起点固定，每次写入都写成「起点 + 本次已产生的文本」，
+    // 也就是**替换**而不是接龙。这样重复写入同一个文本是幂等的。
+    final base = append
+        ? _baseForAppend((await _db.aiMessageById(assistantId))?.content ?? '')
+        : '';
+
+    /// 写入"本次 run 已经产生的文本"（[base] 之后的部分）。
+    Future<void> writeText(String text) =>
+        _db.updateAiMessage(assistantId, _joined(base, text));
+
     // 记下来：撤销要靠它（撤销栈在执行器里）。
     // 确认回调也从这里传进去 —— 没接上时执行器会**拒绝**全部写操作。
     final executor = ToolExecutor(
@@ -364,10 +401,12 @@ class AiChatRepository {
       switch (event) {
         case AgentText(:final delta):
           buffer.write(delta);
-          await _write(assistantId, buffer.toString(), append: append);
+          // ⚠️ 写的是**累计文本**（`buffer.toString()`），不是 `delta` ——
+          // 因为 `writeText` 是"替换式"写入，字幕才会一段段长出来而不是拼接。
+          await writeText(buffer.toString());
 
         case AgentFinished(:final text, :final usage):
-          await _write(assistantId, text, append: append);
+          await writeText(text);
           await _log(usage, thinkingEnabled: thinkingEnabled, success: true);
 
         case AgentAwaitingUser(
@@ -382,12 +421,11 @@ class AiChatRepository {
           // ⚠️ 消息内容与挂起记录**同一个事务**：分开写的话，
           // 中间崩一次会留下"有挂起记录但没有问题文本"（用户看到空白卡片）
           // 或者"有问题文本但已挂起失效"（点了没反应）。两种都很难查。
+          final said = _joined(base, buffer.toString());
           await _db.transaction(() async {
             await _db.updateAiMessage(
               assistantId,
-              append && buffer.isEmpty
-                  ? '（等你回答）'
-                  : (buffer.isEmpty ? '（等你回答）' : buffer.toString()),
+              said.isEmpty ? awaitingPlaceholder : said,
             );
             await _db.setPendingAction(
               assistantId,
@@ -404,10 +442,8 @@ class AiChatRepository {
           });
 
         case AgentFailed(:final message, :final usage):
-          await _write(
-            assistantId,
+          await writeText(
             buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message',
-            append: append,
           );
           await _log(usage, thinkingEnabled: thinkingEnabled, success: false);
 
@@ -419,19 +455,26 @@ class AiChatRepository {
     }
   }
 
-  /// 写消息内容；[append] 为真时接在原有内容之后（回答挂起后继续的场景）。
-  Future<void> _write(String id, String text, {required bool append}) async {
-    if (!append) {
-      await _db.updateAiMessage(id, text);
-      return;
-    }
-    final row = await _db.aiMessageById(id);
-    final before = row?.content ?? '';
-    if (before.isEmpty || before == '（等你回答）') {
-      await _db.updateAiMessage(id, text);
-    } else {
-      await _db.updateAiMessage(id, '$before\n\n$text');
-    }
+  /// 助手消息里"正在等用户回答"的占位内容。
+  ///
+  /// 它**不是内容**：续写开始时要用真正的输出把它顶掉，而判断"这一行还是占位符"
+  /// 只能靠认这个字符串 —— 所以抽成常量。写死两处的话，改一处漏一处就会出现
+  /// "（等你回答）这几个字永远粘在回答开头"。
+  static const awaitingPlaceholder = '（等你回答）';
+
+  /// 续写模式下，把"行里已有的内容"翻译成**续写起点**。
+  ///
+  /// 只有一种情况要当空：行里还是 [awaitingPlaceholder]（AI 只是提了个问题、
+  /// 还没说任何话）。那时续写的输出应当**顶掉**占位符，而不是接在它后面 ——
+  /// 否则回答会以"（等你回答）"开头。
+  static String _baseForAppend(String rowContent) =>
+      rowContent == awaitingPlaceholder ? '' : rowContent;
+
+  /// 「续写起点 + 本次已产生的文本」。两段之间空一行（与工具轮的垫话同一套观感）。
+  static String _joined(String base, String text) {
+    if (base.isEmpty) return text;
+    if (text.isEmpty) return base;
+    return '$base\n\n$text';
   }
 
   /// 把整轮的**累计**用量记进审计表。
@@ -459,7 +502,7 @@ class AiChatRepository {
 
   /// 从本会话**全部**消息里取出"自动带的那一段"。
   ///
-  /// 规则（§8.6）：
+  /// 规则（见《AI接入设计》的「会话历史：切片、窗口、摘要」一节）：
   ///   · 最近 [maxHistoryRounds] 轮（一轮 = 一问一答）
   ///   · 单条截断 [maxHistoryChars] 字
   ///   · 上一轮的**工具结果不重发** —— 它们本来就不落库，这里天然满足；
@@ -534,7 +577,7 @@ class AiChatRepository {
   }
 
   // ===========================================================================
-  // 更早历史的压缩摘要（§8.6）
+  // 更早历史的压缩摘要（规则见《AI接入设计》的「会话历史」一节）
   // ===========================================================================
 
   /// 摘要存 `app_kv`，键前缀 + 会话 id。

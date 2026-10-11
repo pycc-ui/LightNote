@@ -4,22 +4,25 @@
 //
 //   · **风险级别必须显式声明** —— 安全确认靠它，漏一个就等于开了个后门
 //   · **描述写的是"什么时候用它"**，不是"它是干什么的"
-//   · **分层数量固定**（7 / 8 / 4）—— 改数量要同步改设计文档与预算
+//   · **分层数量固定**（7 / 10 / 5）—— 改数量要同步改设计文档与预算
 //   · **危险工具的描述里必须出现"不可恢复"** —— 模型据此才会在调用前提醒用户
+//   · **描述里的数字必须等于执行侧的真实上限** —— 例如 `requestTools` 的"最多几个"，
+//     写错了模型会照着错的数字申请（上限从 5 改成 6 那次就漏了这句）
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:lightnote/features/ai/domain/agent_loop.dart';
 import 'package:lightnote/features/ai/domain/tool_specs.dart';
 
 void main() {
   group('清单规模与分层', () {
-    test('一共 19 个工具', () {
-      expect(kAgentTools.length, 19);
+    test('一共 22 个工具', () {
+      expect(kAgentTools.length, 22);
     });
 
-    test('分层是 核心 7 / 常用 8 / 按需 4', () {
+    test('分层是 核心 7 / 常用 10 / 按需 5', () {
       expect(kCoreTools.length, 7);
-      expect(kCommonTools.length, 8);
-      expect(kOnDemandTools.length, 4);
+      expect(kCommonTools.length, 10);
+      expect(kOnDemandTools.length, 5);
     });
 
     test('工具名唯一（重名会让模型调错、也会让执行器分派错）', () {
@@ -81,12 +84,26 @@ void main() {
       expect(props.containsKey('expectedText'), isTrue);
       expect(toolByName('updateNote')!.description, contains('expectedText'));
     });
+
+    test('描述里的数字 == 执行侧的真实上限（requestTools 单次几个）', () {
+      // 这个数字**是发给模型看的**：描述写 5、实际收 6 时，模型会照 5 去申请，
+      // 而把上限从 5 改成 6 的那次改动就正好漏了描述里这句。
+      final tool = toolByName('requestTools')!;
+      final props =
+          (tool.spec.parameters['properties'] as Map).cast<String, Object?>();
+      final namesDesc = (props['names'] as Map)['description'] as String;
+
+      expect(tool.description, contains('$kMaxRequestTools'));
+      expect(namesDesc, contains('$kMaxRequestTools'));
+      // 常量只有一份：`AgentLoop` 引用它，所以两边不可能各写一个数
+      expect(kMaxRequestTools, AgentLoop.maxRequestTools);
+    });
   });
 
   group('分层发送', () {
     test('默认发核心 + 常用，不发按需', () {
       final names = specsForRequest().map((s) => s.name).toSet();
-      expect(names.length, 15);
+      expect(names.length, 17);
       for (final t in kOnDemandTools) {
         expect(names.contains(t.name), isFalse, reason: '${t.name} 默认不该发');
       }
@@ -97,7 +114,7 @@ void main() {
           specsForRequest(granted: {'deleteNotebook'}).map((s) => s.name).toSet();
       expect(names.contains('deleteNotebook'), isTrue);
       expect(names.contains('renameNotebook'), isFalse, reason: '没申请的仍然不发');
-      expect(names.length, 16);
+      expect(names.length, 18);
     });
 
     test('工具目录只列**还没发**的按需层，且给的是名称 + 一句话', () {

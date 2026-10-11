@@ -112,7 +112,7 @@ class AiCalls extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-/// AI 会话（设计稿 §6.3）
+/// AI 会话（见《数据库设计》的「ai_conversations / ai_messages」一节）
 class AiConversations extends Table {
   TextColumn get id => text()();
 
@@ -154,7 +154,7 @@ class AiConversations extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-/// AI 会话消息（设计稿 §6.3）
+/// AI 会话消息（见《数据库设计》的「ai_conversations / ai_messages」一节）
 class AiMessages extends Table {
   TextColumn get id => text()();
   TextColumn get conversationId =>
@@ -169,14 +169,14 @@ class AiMessages extends Table {
   TextColumn get pendingAction => text().nullable()();
 
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
-  /// 设计稿 SQL 里写的是 INTEGER，Drift 会自动转成 Unix 时间戳存储，等价。
+  /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。
   DateTimeColumn get createdAt => dateTime()();
 
   @override
   Set<Column> get primaryKey => {id};
 }
 
-/// 通用 key-value 表（设计稿 §6.4），真实表名 `app_kv`。
+/// 通用 key-value 表，真实表名 `app_kv`（见《数据库设计》的「app_kv」一节）。
 ///
 /// 原先叫 `settings`，但里面 10 个 key 有 6 个根本不是"设置"——
 /// `search_history`、`feed_source_excluded`、`feed_include_unfiled`、
