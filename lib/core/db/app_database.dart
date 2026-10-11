@@ -1071,7 +1071,7 @@ class AppDatabase extends _$AppDatabase {
         final d = FeedDraft(
           title: r.title,
           body: r.body,
-          tags: _decodeTagList(r.tags),
+          tag: _decodeTag(r.tags),
         );
         if (d.isValid) out.add(d);
       }
@@ -1097,7 +1097,9 @@ class AppDatabase extends _$AppDatabase {
             id: uuid.v4(),
             title: d.title,
             body: d.body,
-            tags: Value(jsonEncode(d.tags)),
+            // 列名仍叫 `tags`、存的也仍是 JSON 数组，但里面**只有那一个**标签
+            // —— 列名是历史遗留，不代表一次能生成多个（见 `_decodeTag`）。
+            tags: Value(jsonEncode([d.tag])),
             position: i,
             createdAt: now,
           ),
@@ -1113,23 +1115,23 @@ class AppDatabase extends _$AppDatabase {
     return row.read(c) ?? 0;
   }
 
-  /// 标签 JSON 解析：损坏就当空，不让它把页面搞崩。
-  static List<String> _decodeTagList(String raw) {
-    if (raw.isEmpty) return const [];
+  /// 标签解析：列里存的是 JSON 数组（历史格式），但**取第一个**就是那唯一的标签。
+  /// 损坏就当空串，不让它把页面搞崩。
+  static String _decodeTag(String raw) {
+    if (raw.isEmpty) return '';
     try {
       final decoded = jsonDecode(raw);
       if (decoded is List) {
-        return decoded
-            .map((e) => e.toString())
-            .where((e) => e.isNotEmpty)
-            .toList(growable: false);
+        for (final e in decoded) {
+          final s = e.toString().trim();
+          if (s.isNotEmpty) return s;
+        }
       }
     } catch (_) {
       // 忽略：标签只是锦上添花
     }
-    return const [];
+    return '';
   }
-
 
 }
 

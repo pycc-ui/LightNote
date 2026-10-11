@@ -187,7 +187,7 @@ class FeedDraft {
   const FeedDraft({
     required this.title,
     required this.body,
-    this.tags = const [],
+    required this.tag,
   });
 
   /// 卡片上显示的标题（至多 3 行）。
@@ -197,35 +197,33 @@ class FeedDraft {
   /// 完整正文（Markdown）。卡片点进去看的就是它，也是收下后写进笔记的内容。
   final String body;
 
-  /// 2~6 个短标签。卡片上挑一个展示；收下时也可以一并写成笔记的标签。
+  /// **一个**短标签（卡片左下角显示的就是它）。没有就用空串，[displayTag] 会转成 null。
   ///
   /// 由生成卡片的**同一次调用**产出，而不是另外再调一次 AI——
-  /// 素材已经发出去了，顺带要几个标签几乎不增加成本。
-  final List<String> tags;
+  /// 素材已经发出去了，顺带要一个标签几乎不增加成本。
+  ///
+  /// 注意命名落差：这里叫 `tag`（单数），但库里的列仍叫 `feed_reserve.tags`
+  /// 且存的是**单元素 JSON 数组**（见 `AppDatabase.replaceFeedReserve` 与
+  /// `_decodeTagList`）。那是历史遗留的列名，**不代表一次能生成多个**。
+  final String tag;
 
   /// 标题与正文都空就丢弃——空卡片对用户毫无意义。
   bool get isValid => title.isNotEmpty && body.isNotEmpty;
 
-  /// 卡片上展示用的标签（取第一个；没有则返回 null）。
-  String? get displayTag => tags.isEmpty ? null : tags.first;
+  /// 卡片上展示用的标签（没有则返回 null）。
+  String? get displayTag => tag.isEmpty ? null : tag;
 
   Map<String, dynamic> toJson() => {
         'title': title,
         'body': body,
-        'tags': tags,
+        'tag': tag,
       };
 
   static FeedDraft fromJson(Map<String, dynamic> json) {
-    final rawTags = json['tags'];
     return FeedDraft(
       title: (json['title'] ?? '').toString().trim(),
       body: (json['body'] ?? '').toString().trim(),
-      tags: rawTags is List
-          ? rawTags
-              .map((e) => e.toString().trim())
-              .where((e) => e.isNotEmpty)
-              .toList(growable: false)
-          : const [],
+      tag: (json['tag'] ?? '').toString().trim(),
     );
   }
 

@@ -195,7 +195,7 @@ class AiPrompts {
 
 你要为**每一份素材**生成一张卡片，卡片必须**基于那块切片**。
 
-输出 JSON：{"cards":[{"title":"...","body":"...","tags":["标签1","标签2"]}]}
+输出 JSON：{"cards":[{"title":"...","body":"...","tag":"标签"}]}
 cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**。
 
 ## title
@@ -228,8 +228,8 @@ cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**�
 
 这是用户点进卡片后看到的全文，也是他把这条收进笔记时保存的内容。
 
-## tags
-**2~6 个**短标签，每个是**一个词**，不超过 5 个汉字（英文不超过 12 个字母）。
+## tag
+**1 个**短标签，是**一个词**，不超过 5 个汉字（英文不超过 12 个字母）。
 不带 # 号，不加标点。用来在这条内容里做主题归类。
 
 只输出 JSON，不要任何解释。
@@ -317,7 +317,7 @@ cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**�
       drafts.add(FeedDraft(
         title: d.title,
         body: d.body,
-        tags: sanitizeTags(d.tags),
+        tag: sanitizeTag(d.tag),
       ));
     }
     return drafts.isEmpty ? null : drafts;

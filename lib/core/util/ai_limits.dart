@@ -186,28 +186,16 @@ String normalizeTag(String raw) {
   return buf.toString();
 }
 
-/// 把 AI 给的标签**列表**规整成可入库的形状。
+/// 把 AI 给的标签规整成可入库的**单个**标签。
 ///
-/// 规则（产品要求）：2~6 个，每个不超过 5 汉字 / 12 英文字母。
-/// 去重、去空、超量截断。不足 2 个也照存——宁可存少，
-/// 也不要为了凑数塞进没意义的词。
+/// 规则（产品要求）：一个标签，不超过 5 汉字 / 12 英文字母。
+/// 空串、纯空白、超长的都按 [normalizeTag] 的规则清理。
 ///
-/// 唯一的调用方是 `AiPrompts.parseFeedCards`：规整**卡片自己**的标签
-/// （`FeedDraft.tags`，卡片左下角显示的就是它）。
+/// 卡片**只生成一个**标签，所以这里不再有"去重、截断到 N 个"那套逻辑
+/// （早先的 `sanitizeTags(List)` 是给"生成 2~6 个"的旧设计用的，已删除）。
 /// 它和 [normalizeTag] 一样是纯文本工具，所以放在这里，
 /// 而不是让 `prompts.dart` 反向依赖一个 repository。
-List<String> sanitizeTags(List<String> raw) {
-  final seen = <String>{};
-  final out = <String>[];
-  for (final t in raw) {
-    final tag = normalizeTag(t);
-    if (tag.isEmpty) continue;
-    if (!seen.add(tag.toLowerCase())) continue;
-    out.add(tag);
-    if (out.length >= AiLimits.tagCountMax) break;
-  }
-  return out;
-}
+String sanitizeTag(String raw) => normalizeTag(raw);
 
 /// `String.characters` 的最小实现（避免为一个扩展引入 characters 包）。
 ///
