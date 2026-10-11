@@ -5,12 +5,10 @@ import '../../../core/db/app_database.dart';
 import '../../../core/db/database_location.dart';
 import '../../../core/secure/secure_store.dart';
 import '../../../core/theme/dimens.dart';
-import '../../../core/backup/backup_service.dart';
 import '../../../core/prefs/preferences_service.dart';
 import 'pages/about_settings_page.dart';
 import 'pages/ai_settings_page.dart';
 import 'pages/appearance_settings_page.dart';
-import 'pages/editor_settings_page.dart';
 import 'pages/storage_settings_page.dart';
 import 'pages/usage_settings_page.dart';
 
@@ -75,8 +73,6 @@ class _SettingsPageState extends State<SettingsPage> {
 
     var backup = '';
     try {
-      final list = await context.read<BackupService>().listAutoBackups();
-      if (list.isNotEmpty) backup = '私有目录留有 ${list.length} 份';
     } catch (_) {
       // 备份数拿不到就不显示
     }
@@ -114,18 +110,18 @@ class _SettingsPageState extends State<SettingsPage> {
                 );
               },
             ),
-            _navTile(
-              context,
-              icon: Icons.edit_note_outlined,
-              title: '编辑器',
-              subtitle: '手动保存',
-              page: const EditorSettingsPage(),
-            ),
           ]),
 
           _groupHeader('AI'),
           _group([
             const _AiTile(),
+            _navTile(
+              context,
+              icon: Icons.bar_chart_outlined,
+              title: '用量与成本',
+              subtitle: '查看累计 AI 花费',
+              page: const UsageSettingsPage(),
+            ),
           ]),
 
           _groupHeader('数据'),
@@ -150,13 +146,6 @@ class _SettingsPageState extends State<SettingsPage> {
 
           _groupHeader('其他'),
           _group([
-            _navTile(
-              context,
-              icon: Icons.bar_chart_outlined,
-              title: '用量与成本',
-              subtitle: '查看累计 AI 花费',
-              page: const UsageSettingsPage(),
-            ),
             _navTile(
               context,
               icon: Icons.info_outline,

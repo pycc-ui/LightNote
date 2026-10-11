@@ -221,6 +221,18 @@ class _AiPageState extends State<AiPage> {
 
 
   Future<void> _newConversation() async {
+    final repo = context.read<AiChatRepository>();
+    final id = _conversationId;
+  
+    // 当前会话没消息（包括还没创建）→ 不新建
+    final hasMessages = id != null &&
+        (await repo.watchMessages(id).first).isNotEmpty;
+    if (!mounted) return;
+  
+    if (!hasMessages) {
+      setState(() => _selectedNoteIds.clear());
+      return;
+    }
     final conv = await context.read<AiChatRepository>().createConversation(
           thinkingEffort: _effort,
         );

@@ -44,8 +44,8 @@ class _HomeShellState extends State<HomeShell> {
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.bolt_outlined),
-            selectedIcon: Icon(Icons.bolt),
+            icon: Icon(Icons.edit_outlined),
+            selectedIcon: Icon(Icons.edit),
             label: '轻笔记',
           ),
           NavigationDestination(

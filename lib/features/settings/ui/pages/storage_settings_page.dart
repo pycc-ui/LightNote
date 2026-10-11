@@ -33,7 +33,6 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
   String _busyLabel = '';
   DatabaseLocationInfo? _location;
   String _dbPath = '';
-  int _autoBackupCount = 0;
   bool _loaded = false;
 
   @override
@@ -46,12 +45,10 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
     try {
       final info = await DatabaseLocation.describeSafe();
       final db = context.read<AppDatabase>();
-      final backups = await context.read<BackupService>().listAutoBackups();
       if (!mounted) return;
       setState(() {
         _location = info;
         _dbPath = db.databasePath;
-        _autoBackupCount = backups.length;
         _loaded = true;
       });
     } catch (e) {
@@ -265,15 +262,6 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
                       '原因：${loc?.fallbackNote ?? '未知'}',
                 ),
               ],
-              if (_autoBackupCount > 0) ...[
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  '私有目录里已留有 $_autoBackupCount 份导出备份（backups/）。',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
               const SizedBox(height: AppSpacing.sm + 4),
               Row(
                 children: [
@@ -353,7 +341,7 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
     final dialogs = context.read<FileDialogs>();
     final backup = context.read<BackupService>();
 
-    String? target;
+    ExportTarget? target;
     try {
       target = await dialogs.pickExportTarget(
         suggestedName: BackupService.defaultArchiveName(),
@@ -364,47 +352,65 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
     }
     if (!mounted) return;
 
-    _setBusy(target == null ? '保存到私有目录…' : '正在导出…');
+    // Android 上的目标是缓存目录里的文件（用户看不到），写完要拉分享面板；
+    // 桌面平台是用户自己挑的位置，直接写就行。原因见 FileDialogs.pickExportTarget。
+    final viaShareSheet = target?.viaShareSheet ?? false;
+
+    // 用户在保存对话框里取消了 —— 就到此为止。
+    // 早先这里会"兜底写进私有目录"，那等于用户没要也硬给他留一份，已去掉。
+    final targetPath = target?.path;
+    if (targetPath == null) return;
+
+    _setBusy(viaShareSheet ? '正在生成备份包…' : '正在导出…');
     try {
-      if (target == null) {
-        final fallbackDir = await _privateBackupDir();
-        target = p.join(fallbackDir, BackupService.defaultArchiveName());
+      final outcome = await backup.exportTo(targetPath);
+
+      if (viaShareSheet) {
+        // 拉不起分享面板（例如系统里根本没有能接收的应用）**不代表备份失败**：
+        // 包已经生成，只是没能交给用户，所以这里只提示、不中断后续收尾。
+        try {
+          await dialogs.shareArchive(
+            path: outcome.primaryPath,
+            title: '选择备份包的去处',
+          );
+        } catch (e) {
+          if (!mounted) return;
+          _toast('备份包已生成，但没能打开分享面板：$e');
+        }
       }
 
-      final outcome = await backup.exportTo(target);
       await _refresh();
       if (!mounted) return;
       _clearBusy();
-      await _showExportResult(outcome);
+      await _showExportResult(outcome, viaShareSheet: viaShareSheet);
     } catch (e) {
       if (!mounted) return;
       _clearBusy();
-      _toast('导出失败：$e');
+      _toast(viaShareSheet ? '生成备份包失败：$e' : '导出失败：$e');
     }
   }
 
-  Future<String> _privateBackupDir() async {
-    final root = await DatabaseLocation.privateRoot();
-    final dir = Directory(p.join(root.path, BackupService.autoBackupFolder));
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return dir.path;
-  }
 
-  Future<void> _showExportResult(ExportOutcome outcome) async {
-    final extra = outcome.autoCopyError != null
-        ? '\n\n另外在私有目录留档失败：${outcome.autoCopyError}'
-        : (outcome.autoCopyDir != null
-            ? '\n\n私有目录同时留了一份：\n${outcome.autoCopyDir}'
-            : '');
+  Future<void> _showExportResult(
+    ExportOutcome outcome, {
+    bool viaShareSheet = false,
+  }) async {
+    // Android 上的落点是 App 缓存目录，那个路径用户既看不到也用不上
+    // （文件管理器进不去），所以那里**不报路径**，只说"去分享面板里选去处"。
+    // 桌面平台照旧把完整路径给出来，用户能直接去那儿找文件。
+    final where = viaShareSheet
+        ? '已生成备份包。请在分享面板中选「保存到文件 / 发微信 / 发网盘」'
+            '决定它的去处。'
+        : outcome.primaryPath;
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('备份已导出'),
+        title: Text(viaShareSheet ? '备份包已生成' : '备份已导出'),
         content: SingleChildScrollView(
           child: Text(
-            '${outcome.primaryPath}\n\n'
+            '$where\n\n'
             '大小：${outcome.sizeLabel}\n'
-            '内容：${outcome.stats.summary}$extra\n\n'
+            '内容：${outcome.stats.summary}\n\n'
             '这个 .zip 里是一个标准的 SQLite 数据库文件，'
             '换电脑、换手机、重装 App 都可以用它恢复。\n'
             '注意：备份里**不包含** DeepSeek API Key。',

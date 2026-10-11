@@ -43,6 +43,14 @@ dependencies:
   file_selector: ^1.0.3
   # 备份包内每个文件的 SHA-256，导入时校验完整性
   crypto: ^3.0.0
+  # 导出备份包时拉起系统分享面板，用 Flutter 社区官方的 share_plus。
+  # 为什么需要它：**Android 上没有「保存到哪」对话框** —— file_selector 的
+  # Android 实现只做了选目录，getSaveLocation 会退到未实现的 getSavePath 并抛
+  # UnimplementedError（只有 Android 会踩，Windows 的 IFileDialog 是好的）。
+  # 所以 Android 改成「写进 App 缓存目录 → 在分享面板里选保存到文件/发微信」，
+  # Windows 保持原来的保存对话框不动。分平台的分支就在
+  # lib/core/backup/file_dialogs.dart 的 pickExportTarget / shareArchive 里。
+  share_plus: ^12.0.2
 
 dev_dependencies:
   flutter_test:

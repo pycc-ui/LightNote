@@ -256,21 +256,12 @@ class ExportOutcome {
     required this.primaryPath,
     required this.sizeBytes,
     required this.stats,
-    this.autoCopyDir,
-    this.autoCopyError,
   });
 
-  /// 用户选择的位置（或私有目录里的自动备份）
+  /// 用户选择的位置
   final String primaryPath;
   final int sizeBytes;
   final BackupStats stats;
-
-  /// 另外自动留的一份（私有目录）。用户选了外部位置时才有值。
-  final String? autoCopyDir;
-
-  /// 自动留档失败的原因。失败了也要告诉用户，不能假装成功。
-  final String? autoCopyError;
-
   String get sizeLabel {
     if (sizeBytes < 1024) return '$sizeBytes B';
     if (sizeBytes < 1024 * 1024) {

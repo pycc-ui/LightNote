@@ -222,7 +222,6 @@ class _LibraryPageState extends State<LibraryPage> {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.checklist),
                 title: Text('多选笔记'),
-                subtitle: Text('批量移动或删除我的轻笔记'),
               ),
             ),
           ],

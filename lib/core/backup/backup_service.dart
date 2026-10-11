@@ -31,7 +31,6 @@ class BackupService {
   final AppDatabase _db;
 
   /// 私有目录下自动留档的子目录名。
-  static const autoBackupFolder = 'backups';
 
   /// 导入前旧库的备份子目录名。
   static const safetyFolder = 'backups';
@@ -46,12 +45,10 @@ class BackupService {
   /// 通过系统选目录对话框得到后拼好传进来——把「选目录」和「拼文件名」
   /// 分开，是为了让本方法可以在测试里直接用临时路径调用。
   ///
-  /// [alsoKeepPrivateCopy] 为 true 时额外在私有目录留一份，
-  /// 避免用户导出到 U 盘后 U 盘丢了、或者导出到某个 App 私有沙盒里再也找不到。
-  Future<ExportOutcome> exportTo(
-    String primaryPath, {
-    bool alsoKeepPrivateCopy = true,
-  }) async {
+  /// **只在 [primaryPath] 生成一份**。这里刻意**不再**往 App 私有目录另留一份
+  /// （早先会留）：用户没要的副本会一直堆在私有目录里，既占空间，
+  /// 又让人以为"导出成功 = 系统里有两份"，而其中一份他根本找不到。
+  Future<ExportOutcome> exportTo(String primaryPath) async {
     final stats = await _collectStats();
 
     // 1) 在私有目录生成一致性快照（不要直接写到用户选的位置：
@@ -100,26 +97,10 @@ class BackupService {
       if (target.existsSync()) target.deleteSync();
       tmp.renameSync(target.path);
 
-      // 4) 可选：私有目录也留一份
-      String? autoDir;
-      String? autoError;
-      if (alsoKeepPrivateCopy) {
-        try {
-          final privDir = await _autoBackupDir();
-          final copy = File(p.join(privDir.path, p.basename(target.path)));
-          await copy.writeAsBytes(encoded, flush: true);
-          autoDir = privDir.path;
-        } catch (e) {
-          autoError = e.toString();
-        }
-      }
-
       return ExportOutcome(
         primaryPath: target.path,
         sizeBytes: encoded.length,
         stats: stats,
-        autoCopyDir: autoDir,
-        autoCopyError: autoError,
       );
     } finally {
       _deleteQuietly(staging);
@@ -134,30 +115,7 @@ class BackupService {
         '-${two(t.hour)}${two(t.minute)}.zip';
   }
 
-  /// 私有目录里的自动留档笔记库。
-  Future<Directory> _autoBackupDir() async {
-    final root = await DatabaseLocation.privateRoot();
-    final dir = Directory(p.join(root.path, autoBackupFolder));
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return dir;
-  }
 
-  /// 列出私有目录里已有的自动留档，最新在前。
-  Future<List<File>> listAutoBackups() async {
-    try {
-      final dir = await _autoBackupDir();
-      final files = dir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.toLowerCase().endsWith('.zip'))
-          .toList();
-      files.sort((a, b) =>
-          b.statSync().modified.compareTo(a.statSync().modified));
-      return files;
-    } catch (_) {
-      return const [];
-    }
-  }
 
   /// 把当前库的一致性快照写到指定路径（文件必须不存在）。
   ///

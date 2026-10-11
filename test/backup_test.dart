@@ -290,15 +290,11 @@ void main() {
       await _insertNote(db, 'n1', '唯一一条');
 
       final target = p.join(workDir.path, 'outside', 'my-backup.zip');
-      final outcome = await BackupService(db).exportTo(target);
+      await BackupService(db).exportTo(target);
 
+      // 只生成用户指定的那一份 —— 私有目录里**不该**再留一份
+      // （早先会留，那个行为已按用户要求去掉）。
       expect(File(target).existsSync(), isTrue);
-      expect(outcome.autoCopyDir, isNotNull);
-      final auto = File(p.join(outcome.autoCopyDir!, 'my-backup.zip'));
-      expect(auto.existsSync(), isTrue);
-
-      final listed = await BackupService(db).listAutoBackups();
-      expect(listed.map((f) => p.basename(f.path)), contains('my-backup.zip'));
     });
 
     test('文件名带时间戳，且是合法的 Windows 文件名', () {
@@ -382,7 +378,7 @@ void main() {
 
       // 先正常导出一份，再把清单里的 schemaVersion 改大
       final good = p.join(workDir.path, 'good.zip');
-      await BackupService(db).exportTo(good, alsoKeepPrivateCopy: false);
+      await BackupService(db).exportTo(good);
 
       final bytes = await File(good).readAsBytes();
       final archive = ZipDecoder().decodeBytes(bytes);
@@ -433,7 +429,7 @@ void main() {
       await _insertNote(db, 'n2', '二');
 
       final path = p.join(workDir.path, 'ok.zip');
-      await BackupService(db).exportTo(path, alsoKeepPrivateCopy: false);
+      await BackupService(db).exportTo(path);
 
       final preview = await BackupService(db).inspect(path);
       expect(preview.manifest.stats.notes, 2);
@@ -450,7 +446,7 @@ void main() {
       await _insertNote(source, 'imported-1', '导入进来的笔记');
       final archivePath = p.join(privateRoot, 'incoming.zip');
       final preview =
-          await BackupService(source).exportTo(archivePath, alsoKeepPrivateCopy: false);
+          await BackupService(source).exportTo(archivePath);
       expect(preview.stats.notes, 1);
       await source.close();
 
@@ -498,7 +494,7 @@ void main() {
       final source = AppDatabase.forTesting(NativeDatabase.memory());
       await _insertNote(source, 'imported-1', '导入的');
       final archivePath = p.join(privateRoot, 'incoming2.zip');
-      await BackupService(source).exportTo(archivePath, alsoKeepPrivateCopy: false);
+      await BackupService(source).exportTo(archivePath);
       await source.close();
 
       final liveDir = Directory(p.join(privateRoot, 'LightNote'));
@@ -556,7 +552,7 @@ void main() {
       final source = AppDatabase.forTesting(NativeDatabase.memory());
       await _insertNote(source, 'imported-1', '带目录切换的导入');
       final archivePath = p.join(privateRoot, 'incoming3.zip');
-      await BackupService(source).exportTo(archivePath, alsoKeepPrivateCopy: false);
+      await BackupService(source).exportTo(archivePath);
       await source.close();
 
       final newDir = Directory(p.join(workDir.path, 'my-notes'));

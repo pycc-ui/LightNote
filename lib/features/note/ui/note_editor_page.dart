@@ -446,17 +446,43 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                     tooltip: '更多',
                     onSelected: _onMenu,
                     itemBuilder: (_) => [
-                      const PopupMenuItem(value: 'delete', child: Text('删除笔记')),
-                      const PopupMenuItem(value: 'copy', child: Text('复制全文')),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.delete_outline),
+                          title: Text('删除笔记'),
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'copy',
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.copy_outlined),
+                          title: Text('复制全文'),
+                        ),
+                      ),
                       if (_note?.isInbox == true)
                         const PopupMenuItem(
                           value: 'archive',
-                          child: Text('加入笔记库 / 移动到笔记库'),
+                          child: ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.archive_outlined),
+                            title: Text('加入到笔记库'),
+                          ),
                         )
                       else
                         const PopupMenuItem(
                           value: 'move',
-                          child: Text('移动到笔记库'),
+                          child: ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.drive_file_move_outlined),
+                            title: Text('移动到笔记库'),
+                          ),
                         ),
                     ],
                   ),

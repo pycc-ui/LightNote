@@ -321,13 +321,28 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.checklist),
                 title: Text('多选笔记'),
-                subtitle: Text('批量移动或删除'),
               ),
             ),
-            PopupMenuItem(value: 'rename', child: Text('重命名笔记库')),
+            PopupMenuItem(
+              value: 'rename',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.drive_file_rename_outline),
+                title: Text('重命名笔记库'),
+              ),
+            ),
+            PopupMenuItem(
+              value: 'delete',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.delete_outline),
+                title: Text('删除笔记库'),
+              ),
+            ),
             // 刻意没有「新建子笔记库」：笔记库是平铺的，不能嵌套。
             // 用数据库而不是文件系统本来就是为了不模仿目录树。
-            PopupMenuItem(value: 'delete', child: Text('删除笔记库')),
           ],
         ),
       ],
