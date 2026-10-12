@@ -139,10 +139,11 @@ class AiRepository {
           // 额度要跟"一次生成几张 × 每张多长"匹配。
           //
           // 卡片流是**并发多路、每路单卡**（见 `FeedRepository._generateCardsParallel`），
-          // 所以单次请求通常只要 1 张；素材不足时会退化成一请求要 2~6 张。
-          // 最坏 6 × 800 ≈ 4800 token，加 JSON 结构开销也在 8192 以内；给到 16384
-          // 是留足余量——**额度不够会被截断，截断后 JSON 解析失败 = 整批白烧**。
-          maxTokens: 16384,
+          // 所以单次请求通常只要 1 张。卡片正文已从 400–800 砍到 200–400，
+          // 输出上限跟着从 16384 收到 `AiLimits.feedMaxOutputTokens`（2048）：
+          // 正常远用不到，纯粹是**防"黑天鹅"**——模型偶尔跑飞一次就烧几千 token。
+          // 额度不够会被截断，截断后 JSON 解析失败 = 整批白烧，所以仍留足余量。
+          maxTokens: AiLimits.feedMaxOutputTokens,
         );
         usage = u;
 

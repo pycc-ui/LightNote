@@ -1,94 +1,16 @@
-/// AI 相关内容的硬性上限。
+/// 按 [AppParams] 里的长度参数做**截断 / 规整**的文本工具。
 ///
-/// 原则是「对 AI 消费的内容要狠，对用户生产的内容要软」：
+/// ⚠️ **数值不在这里，在 `app_params.dart`**。这个文件只留"怎么截"的算法，
+/// 参数统一从 [AppParams]（及其子域 `AiLimits` / `ChunkLimits` …）读。
+/// 这样"prompt 里写 300、代码里截 500"这类不一致不可能再发生。
 ///
-/// - 摘要 / 标签：硬上限，强制截断。它们是喂给 AI 的素材，长度直接决定 token
-///   成本；而且用户看不到，截断不会伤害体验。
-/// - 笔记：软上限 + 硬保护。那是用户亲手写的东西，截断等于毁掉他的内容——
-///   所以只警告，最后一道才拒绝保存。
-///
-/// 所有数值集中在这里，避免"prompt 里写 300、代码里截 500"这种不一致。
-class AiLimits {
-  AiLimits._();
+/// 本文件同时 `export 'app_params.dart'`，让老代码里 `import 'ai_limits.dart'`
+/// 后直接用 `AiLimits.xxx` 仍然成立，避免一次性改一圈 import。
+library;
 
-  // ---- 摘要 ----
+import 'app_params.dart';
 
-  /// 摘要目标长度（字）
-  static const summaryTargetMin = 120;
-  static const summaryTargetMax = 200;
-
-  /// 摘要硬上限（字）。超过就截断。
-  ///
-  /// 提示词里也要求不超过这个数，但不能只靠提示词——模型基本不守字数
-  /// （要求 60 字会返回 160 字），所以代码里必须兜底。
-  static const summaryHardMax = 220;
-
-  // ---- 标签 ----
-
-  /// 单个标签的汉字上限
-  static const tagMaxCjk = 5;
-
-  /// 单个标签的英文字母上限
-  static const tagMaxLatin = 12;
-
-  // ---- 卡片（AI 生成的轻笔记）----
-
-  /// 卡片标题上限（字）。提示词要求 ≤30，这里给一倍余量兜底。
-  ///
-  /// 与 [titleHardMax] 分开：卡片标题是"卡片上唯一显示的文字"，
-  /// 30 字和 200 字在卡片上完全是两种东西，不能共用一个上限。
-  static const feedCardTitleMax = 60;
-
-  /// 卡片正文上限（字）。提示词要求 400–800，这里给两倍余量。
-  ///
-  /// 为什么必须有：正文会被收进笔记、也会进 prompt。模型偶尔会跑飞
-  /// （有返回几千字的），`feed_reserve` 表不该被一张卡片塞满。
-  static const feedCardBodyMax = 2000;
-
-  // ---- 笔记正文（软上限 + 硬保护）----
-
-  /// 软上限：超过就轻提示"注意编辑流畅度"
-  static const noteSoftBytes = 80 * 1024;
-
-  /// 强警告线：超过就建议拆分，但仍允许保存
-  static const noteWarnBytes = 90 * 1024;
-
-  /// 硬上限：超过就拒绝保存
-  static const noteHardBytes = 100 * 1024;
-
-  /// 单行短字段的上限（字）：笔记标题、笔记库名、会话标题、卡片标题……
-  ///
-  /// 超出截断（不是拒绝）：这类字段进 prompt、也上界面，一个几万字的
-  /// "标题"能直接把一次请求撑爆，而用户真正想表达的早就写完了。
-  /// 凡是"名字/标题"类字段都该走这一个常量，别各写各的数字。
-  static const titleHardMax = 200;
-
-  /// 按 UTF-8 字节数计算长度。
-  ///
-  /// 用字节而不是字符数：中文一个字 3 字节，用字符数算会低估三倍，
-  /// 而数据库与 token 成本都跟字节数更相关。
-  static int byteLength(String text) => utf8ByteLength(text);
-}
-
-/// UTF-8 字节长度。
-///
-/// 单独抽出来是为了能在不引入 dart:convert 的地方也能用，
-/// 并让 `AiLimits.byteLength` 有一个明确的实现锚点。
-int utf8ByteLength(String text) {
-  var bytes = 0;
-  for (final rune in text.runes) {
-    if (rune <= 0x7F) {
-      bytes += 1;
-    } else if (rune <= 0x7FF) {
-      bytes += 2;
-    } else if (rune <= 0xFFFF) {
-      bytes += 3;
-    } else {
-      bytes += 4;
-    }
-  }
-  return bytes;
-}
+export 'app_params.dart';
 
 /// 一个字符占几字节（用于按字节预算反推字符数）。
 int _bytesOfRune(int rune) {
@@ -107,9 +29,6 @@ int _bytesOfRune(int rune) {
 ///      `**` 或反引号，就把它们补上，避免整段样式失效
 ///
 /// 超出时在末尾加省略号。
-///
-/// 注意：这是**字符数**截断。摘要另有一条字节数无关的 300 字上限，
-/// 两条都走这里。
 String safeTruncate(String text, int maxChars) {
   if (maxChars <= 0) return '';
   if (text.length <= maxChars) return text;
@@ -163,15 +82,11 @@ int _countUnescaped(String text, String pattern) {
 
 /// 把标签规整成"一个短词"。
 ///
-/// 规则（来自产品要求）：不超过 5 个汉字 / 12 个英文字母。
+/// 规则：不超过 [AiLimits.tagMaxCjk] 个汉字 / [AiLimits.tagMaxLatin] 个英文字母。
 /// 超出按字符安全截断；同时去掉首尾的 `#`、空格、标点。
 String normalizeTag(String raw) {
   var t = raw.trim();
   // 去掉常见的包装字符。
-  //
-  // 覆盖的种类比想象的广：模型会用 #话题、`代码`、引号、
-  // 以及中日式括号「」『』把标签裹起来。少了任何一种，
-  // 生成的标签都会带着壳进库，在卡片上显示成「「记忆」」那种。
   const wrappers = r'[#`"“”「」『』【】\[\]\s]+';
   t = t.replaceAll(RegExp('^$wrappers'), '');
   t = t.replaceAll(RegExp('$wrappers\$'), '');
@@ -197,14 +112,7 @@ String normalizeTag(String raw) {
   return buf.toString();
 }
 
-/// 把 AI 给的标签规整成可入库的**单个**标签。
-///
-/// 规则（产品要求）：一个标签，不超过 5 汉字 / 12 英文字母。
-/// 空串、纯空白、超长的都按 [normalizeTag] 的规则清理。
-///
-/// 卡片只生成一个标签，所以这里没有"去重、截断到 N 个"那套逻辑（`sanitizeTags(List)`
-/// 是"生成 2~6 个"的旧设计才需要的）。它和 [normalizeTag] 一样是纯文本工具，
-/// 所以放在这里，而不是让 `prompts.dart` 反向依赖一个 repository。
+/// 把 AI 给的标签规整成可入库的**单个**标签（卡片只生成一个标签）。
 String sanitizeTag(String raw) => normalizeTag(raw);
 
 /// `String.characters` 的最小实现。

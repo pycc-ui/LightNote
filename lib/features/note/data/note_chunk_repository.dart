@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 
 import '../../../core/db/app_database.dart';
 import '../domain/note_chunk.dart';
+import '../../../core/util/app_params.dart';
 import '../domain/note_chunker.dart';
 
 /// 笔记切片的仓储：**切、存、读、自愈**都在这里。
@@ -29,7 +30,7 @@ class NoteChunkRepository {
   /// 与摘要资产的失效阈值同一个思路（那边也是 20%）：小改动靠读时自愈，
   /// 大改动才值得在保存那一刻多花一次切片。
   /// 这里的改动是合理的,因为万一改动的是重要的地方(比如纠正错误),干脆小改动也切
-  static const staleRatio = 0.0;
+  static const staleRatio = ChunkLimits.noteStaleRatio;
 
   // ==========================================================================
   // 读

@@ -5,23 +5,27 @@ import 'package:uuid/uuid.dart';
 
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
+import '../../../core/util/app_params.dart';
 import '../data/deepseek_client.dart';
 import '../data/deepseek_config.dart';
 import 'agent_loop.dart';
-import 'agent_workspace.dart';
+import 'ai_model.dart';
 import 'ai_repository.dart';
 import 'ask_user.dart';
 import 'tool_executor.dart';
 import 'tool_types.dart';
 import 'prompts.dart';
 
-/// AI 会话仓储：把《界面设计》里「AI 助手页」那一屏（工作区 / 思考强度 / 选择文件 / 指令）
+/// AI 会话仓储：把《界面设计》里「AI 助手页」那一屏（模型 / 思考强度 / 指令）
 /// 接到真实 DeepSeek 调用上，并持久化会话历史。
 ///
+/// ⚠️ 「工作区」已取消：AI 现在能看到用户的**全部**笔记（命令语言下就是整个
+/// 笔记库根目录）。原先选工作区的位置改成**选模型**（flash / pro）。
+///
 /// 隐私设计：
-/// 2. 每次请求只发送**用户显式选中**的笔记正文，不做全库上传；
-/// 3. 未选中任何文件时，只发送用户当前这条指令，不带笔记内容；
-/// 4. 授权状态与「本次发送包含哪些笔记」都在 UI 上明示。
+/// 每次请求只发送**用户这句话本身**（+ 最近几轮对话）；App **不主动附带任何笔记正文**，
+/// 也不做全库上传。需要笔记内容时，由 AI 自己在 `run` 脚本里用 `sed` / `grep` 按需读取，
+/// 读到的行只在该轮的工具结果里回灌。
 class AiChatRepository {
   AiChatRepository({required AppDatabase db, required AiRepository ai})
       : _db = db,
@@ -46,25 +50,18 @@ class AiChatRepository {
   /// 撤销最近一次 AI 写操作。
   Future<String?> undoLast() async => _lastExecutor?.undoLast();
 
-
-  /// 单次请求最多带入的笔记条数，防止一次点满导致费用失控
-  static const maxContextNotes = 8;
-
-  /// 单条笔记带正文的上限字符数
-  static const maxCharsPerNote = 6000;
-
   /// 自动带的历史**轮数**（一轮 = 一问一答）。
   ///
   /// 必须钉死：历史是每条消息都重发的，不设上限就是 `O(N²)` ——
   /// 聊得越久每条越贵。钉死之后总成本回到 `O(N)`。
   /// 5 轮足够覆盖"接着说""上面那个"这类指代。
-  static const maxHistoryRounds = 5;
+  static const maxHistoryRounds = AgentLimits.maxHistoryRounds;
 
   /// 历史里**单条**消息的截断上限。
   ///
   /// 长的历史回答不原样重发 —— 那是纯浪费，模型只需要知道"刚才聊到哪"。
   /// 真要那段内容，它该去调 `readHistory`。
-  static const maxHistoryChars = 500;
+  static const maxHistoryChars = AgentLimits.maxHistoryChars;
 
   AiRepository get ai => _ai;
 
@@ -79,14 +76,16 @@ class AiChatRepository {
       _db.watchMessages(conversationId);
 
   Future<AiConversation> createConversation({
-    AgentWorkspace workspace = AgentWorkspace.initial,
+    String model = AiModel.flash,
     String thinkingEffort = 'medium',
   }) async {
     final now = DateTime.now().toUtc();
     final id = _uuid.v4();
     await _db.upsertConversation(AiConversationsCompanion.insert(
       id: id,
-      workspaceScope: Value(workspace.encode()),
+      // 这一列原先是「工作区」的 JSON，现在**复用**为会话选的模型名：
+      // 不新增列 / 不改表结构，也就没有迁移与代码生成的负担。
+      workspaceScope: Value(model),
       thinkingEffort: Value(thinkingEffort),
       title: const Value(''),
       createdAt: now,
@@ -95,18 +94,14 @@ class AiChatRepository {
     return (await _db.getConversation(id))!;
   }
 
-  /// 写入这个会话的工作区（**AI 能看到哪些笔记**）。
+  /// 写入这个会话选的**模型**（flash / pro）。
   ///
-  /// 存 JSON 而不是一个笔记库 id：工作区有三态（不选择 / 全体空间 / 选择目录），
-  /// 而"选择目录"还能多选、并单独决定要不要带上「我的轻笔记」。
-  Future<void> setWorkspace(
-    String conversationId,
-    AgentWorkspace workspace,
-  ) async {
+  /// 列名仍是 `workspaceScope`（见 [createConversation] 的说明）。
+  Future<void> setModel(String conversationId, String model) async {
     await (_db.update(_db.aiConversations)
           ..where((t) => t.id.equals(conversationId)))
         .write(AiConversationsCompanion(
-      workspaceScope: Value(workspace.encode()),
+      workspaceScope: Value(AiModel.parse(model)),
       updatedAt: Value(DateTime.now().toUtc()),
     ));
   }
@@ -149,13 +144,12 @@ class AiChatRepository {
 
   /// 发送一条指令。
   ///
-  /// [contextNoteIds] 是用户在「+ → 选择文件」里显式挑选的笔记；
-  /// 为空时**不附带任何笔记正文**。
+  /// 只发用户这句话本身 —— 笔记原文一律由 AI 用 `run` 命令自己按需读取
+  /// （`sed` / `grep`），App **不主动附带任何笔记正文**。
   /// 返回助手消息的 id，UI 可以监听该条消息的流式更新。
   Future<String> send({
     required String conversationId,
     required String userInput,
-    required List<String> contextNoteIds,
     required String thinkingEffort,
     required bool thinkingEnabled,
   }) async {
@@ -179,22 +173,8 @@ class AiChatRepository {
       await _db.touchConversation(conversationId, title: title);
     }
 
-    // 3) 组装上下文：只带用户显式选中的笔记
-    final contexts = <String>[];
-    for (final id in contextNoteIds.take(maxContextNotes)) {
-      final note = await _db.getNote(id);
-      if (note == null) continue;
-      final body = note.content.length > maxCharsPerNote
-          ? '${note.content.substring(0, maxCharsPerNote)}…'
-          : note.content;
-      contexts.add(
-        '《${note.title.trim().isEmpty ? '无标题' : note.title.trim()}》\n$body',
-      );
-    }
-
-    // 工作区从**会话记录**读 —— 它是唯一真相，调用方不用再传一遍。
-    final workspace = AgentWorkspace.parse(conv?.workspaceScope);
-    final workspaceLabel = await _workspaceLabelOf(workspace);
+    // 3) 模型从**会话记录**读 —— 它是唯一真相，调用方不用再传一遍。
+    final model = AiModel.parse(conv?.workspaceScope);
 
     // 4) 落助手占位消息，拿到 id 供流式更新
     final assistantId = _uuid.v4();
@@ -209,9 +189,8 @@ class AiChatRepository {
     // 5) 组装 agent 历史
     //
     //    ⚠️ 工具的中间往来（assistant 的 `tool_calls` 与 `role: tool` 的结果）
-    //    **不落库** —— 它们是本轮的临时上下文。跨轮要回看更早的内容时走
-    //    `listHistory` / `readHistory` 这两个工具，它们读的正是 `ai_messages`。
-    //    这也解释了设计里为什么要有这两个工具：会话历史本来就存在这张表里。
+    //    **不落库** —— 它们是本轮的临时上下文，跨轮不重发。
+    //    落库的只有用户原话与助手回答（`ai_messages`），自动带的是"最近 5 轮"。
     final rows = await _db.watchMessages(conversationId).first;
     final history = historyWindowOf(rows);
     // 窗口之外的更早轮次：压成一段背景摘要拼进 system prompt
@@ -219,25 +198,16 @@ class AiChatRepository {
     final summary =
         await _olderHistorySummary(conversationId, olderHistoryOf(rows));
 
-    // 本轮的**显式选中笔记**附在最后一条用户消息上。
-    //
-    // 落库的只有用户原话（干净、列表里好读），附带的正文只发给模型 ——
-    // 两者在同一条消息里会让人以为"用户打了这么多字"。
-    if (contexts.isNotEmpty && history.isNotEmpty && history.last.role == 'user') {
-      history[history.length - 1] =
-          AgentMessage.user(AiPrompts.agentUser(userInput, contexts));
-    }
-
     // 6) 跑 Agent 循环：提工具 → 执行 → 回灌 → 再问，直到它不再提工具
     await _drive(
       conversationId: conversationId,
       assistantId: assistantId,
-      systemPrompt: withSummary(AiPrompts.agentSystem(workspaceLabel), summary),
+      systemPrompt: withSummary(AiPrompts.agentSystem, summary),
       history: history,
       dbHistory: rows,
       thinkingEnabled: thinkingEnabled,
       thinkingEffort: thinkingEffort,
-      workspace: workspace,
+      model: model,
       append: false,
     );
 
@@ -295,10 +265,9 @@ class AiChatRepository {
       ),
     ];
 
-    // 工作区从**会话记录**读 —— 它是唯一真相，调用方不用再传一遍。
-    final workspace = AgentWorkspace.parse(
+    // 模型从**会话记录**读 —— 它是唯一真相，调用方不用再传一遍。
+    final model = AiModel.parse(
         (await _db.getConversation(conversationId))?.workspaceScope);
-    final workspaceLabel = await _workspaceLabelOf(workspace);
 
     final rows = await _db.watchMessages(conversationId).first;
     // 恢复时也带上更早历史的摘要（同一个键，读到的是同一份，不会重复生成）
@@ -315,12 +284,12 @@ class AiChatRepository {
     await _drive(
       conversationId: conversationId,
       assistantId: row.id,
-      systemPrompt: withSummary(AiPrompts.agentSystem(workspaceLabel), summary),
+      systemPrompt: withSummary(AiPrompts.agentSystem, summary),
       history: history,
       dbHistory: rows,
       thinkingEnabled: thinkingEnabled,
       thinkingEffort: thinkingEffort,
-      workspace: workspace,
+      model: model,
       // 续写：用户已经看到"（等你回答）"，接下来的输出接在它后面
       append: true,
       asksSoFar: pending.asks,
@@ -342,7 +311,7 @@ class AiChatRepository {
     required List<AiMessage> dbHistory,
     required bool thinkingEnabled,
     required String thinkingEffort,
-    required AgentWorkspace workspace,
+    required String model,
     required bool append,
     int asksSoFar = 0,
   }) async {
@@ -365,12 +334,9 @@ class AiChatRepository {
 
     // 记下来：撤销要靠它（撤销栈在执行器里）。
     // 确认回调也从这里传进去 —— 没接上时执行器会**拒绝**全部写操作。
-    final executor = ToolExecutor(
-      _db,
-      onConfirm: onConfirm,
-      // ★ 工作区在这里生效：AI 的 searchNotes / listNotes 只能看到这个范围
-      workspace: workspace,
-    );
+    //
+    // 不再有工作区：AI 的 `ls` / `grep` / `sed` 直接作用于**整个笔记库根目录**。
+    final executor = ToolExecutor(_db, onConfirm: onConfirm);
     _lastExecutor = executor;
 
     final loop = AgentLoop(
@@ -383,7 +349,7 @@ class AiChatRepository {
         systemPrompt: systemPrompt,
         messages: messages,
         tools: tools,
-        model: DeepSeekConfig.modelFlash,
+        model: model,
         thinking: thinkingEnabled,
         reasoningEffort: thinkingEffort,
       ),
@@ -406,7 +372,8 @@ class AiChatRepository {
 
         case AgentFinished(:final text, :final usage):
           await writeText(text);
-          await _log(usage, thinkingEnabled: thinkingEnabled, success: true);
+          await _log(usage,
+              model: model, thinkingEnabled: thinkingEnabled, success: true);
 
         case AgentAwaitingUser(
             :final request,
@@ -444,11 +411,11 @@ class AiChatRepository {
           await writeText(
             buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message',
           );
-          await _log(usage, thinkingEnabled: thinkingEnabled, success: false);
+          await _log(usage,
+              model: model, thinkingEnabled: thinkingEnabled, success: false);
 
         case AgentToolStarted():
         case AgentToolDone():
-        case AgentToolsGranted():
           break; // 工具活动不写进正文（进度由 UI 的 LogBar 承担）
       }
     }
@@ -482,11 +449,12 @@ class AiChatRepository {
   /// 只记最后一次会让"工具用得越多、成本越低"这种假象出现。
   Future<void> _log(
     AgentUsage usage, {
+    required String model,
     required bool thinkingEnabled,
     required bool success,
   }) =>
       _ai.logChatCall(
-        model: DeepSeekConfig.modelFlash,
+        model: model,
         thinking: thinkingEnabled,
         promptTokens: usage.promptTokens,
         completionTokens: usage.completionTokens,
@@ -504,8 +472,7 @@ class AiChatRepository {
   /// 规则（见《AI接入设计》的「会话历史：切片、窗口、摘要」一节）：
   ///   · 最近 [maxHistoryRounds] 轮（一轮 = 一问一答）
   ///   · 单条截断 [maxHistoryChars] 字
-  ///   · 上一轮的**工具结果不重发** —— 它们本来就不落库，这里天然满足；
-  ///     要让模型回看更早的内容，它该去调 `readHistory`
+  ///   · 上一轮的**工具结果不重发** —— 它们本来就不落库，这里天然满足
   ///
   /// 提成纯函数是为了单独测得到：这条规则直接决定**每条消息的成本**，
   /// 写错了会随着聊天变长越来越贵，而且**不会报错**。
@@ -648,29 +615,4 @@ class AiChatRepository {
   /// system prompt 开头" —— 前缀一致才命中上下文缓存（输入成本降到约 1/50）。
   static String withSummary(String systemPrompt, String summary) =>
       summary.trim().isEmpty ? systemPrompt : '$systemPrompt\n\n$summary';
-
-  /// 「+ → 选择笔记库」时列出候选笔记：优先工作区，其次全部
-  /// 「+ → 选择笔记」的候选列表：**只列工作区内的笔记**。
-  ///
-  /// 把工作区翻成给用户与模型看的一句话。
-  ///
-  /// 笔记库被删掉之后，标签里不该还留着一个 uuid —— 查不到名字的直接丢掉。
-  Future<String> _workspaceLabelOf(AgentWorkspace w) async {
-    if (w.mode == WorkspaceMode.none) return '';
-    final all = await _db.allNotebooks();
-    final byId = {for (final n in all) n.id: n.name};
-    return w.label((id) => byId[id]);
-  }
-
-  /// 「+ → 选择笔记」的候选列表：**只列工作区内的笔记**。
-  ///
-  /// ⚠️ 范围必须是硬边界，不能"这个库里没有就返回全部笔记"—— 那会越出工作区，
-  /// 用户选了"工作"却在候选里看到别的库的笔记。
-  Future<List<Note>> candidateNotes(AgentWorkspace workspace) async {
-    final scope = workspace.resolve();
-    return _db.notesInScope(
-      notebookIds: scope.notebookIds,
-      includeUnfiled: scope.includeUnfiled,
-    );
-  }
 }

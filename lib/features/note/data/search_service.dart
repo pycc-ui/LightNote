@@ -1,4 +1,5 @@
 import '../../../core/db/app_database.dart';
+import '../../../core/util/app_params.dart';
 import '../domain/note_chunk.dart';
 import '../domain/search_result.dart';
 import 'note_chunk_repository.dart';
@@ -7,7 +8,7 @@ import 'note_chunk_repository.dart';
 ///
 /// 搜索结果要能定位到片，不能只到笔记粒度，因为有两件事：
 ///   · 搜索页要显示**命中哪一段**（「项目A / 风险」+ 摘要），点进去定位到那儿
-///   · AI 的 `searchNotes` 要能接着调 `readChunk` 读那一小段，而不是整篇灌进来
+///   · 搜索要能定位到片，供搜索页展示与跳转
 /// 两者都要求结果带**片号**。片是预先算好落库的（`note_chunks`），所以这一步
 /// 只是"把命中位置映射到片"，不用重新切。
 ///
@@ -24,23 +25,23 @@ class SearchService {
   final NoteChunkRepository _chunks;
 
   /// 默认返回条数
-  static const defaultLimit = 20;
+  static const defaultLimit = SearchLimits.defaultLimit;
 
   /// 摘要里命中位置前后各留多少字
-  static const snippetRadius = 40;
+  static const snippetRadius = SearchLimits.snippetRadius;
 
   /// 标题命中的得分
-  static const titleScore = 3.0;
+  static const titleScore = SearchLimits.titleScore;
 
   /// 片命中的基础得分（同一片里每多命中一次 +1）
-  static const chunkScore = 2.0;
+  static const chunkScore = SearchLimits.chunkScore;
 
   /// 正文命中最多**看**这么多篇笔记。
   ///
   /// 给每篇都算"命中哪一片"需要它的切片。命中几千篇时不能每篇都切一遍，
   /// 而结果只会返回前 [defaultLimit] 条 —— 所以按更新时间取最近的若干篇来算，
   /// 够用且不会因为一次搜索就把整个库切一遍。
-  static const contentScanCap = 80;
+  static const contentScanCap = SearchLimits.contentScanCap;
 
   /// 搜索。[notebookId] 非空时只在这个笔记库里找。
   ///

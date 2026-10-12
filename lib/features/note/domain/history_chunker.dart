@@ -1,4 +1,5 @@
 import '../../../core/db/app_database.dart';
+import '../../../core/util/app_params.dart';
 
 /// 会话历史的一片。
 ///
@@ -62,14 +63,14 @@ class HistoryChunk {
 class HistoryChunker {
   HistoryChunker._();
 
-  /// 上限（与笔记切片同一套）。超过就用更深的分隔继续拆。
-  static const cap = 700;
+  /// 上限（与笔记切片同一套）。超过就用更深的分隔继续拆。值见 `ChunkLimits`。
+  static const cap = ChunkLimits.historyCap;
 
   /// 下限（尽力而为）。低于它的相邻轮会合并。
-  static const floor = 300;
+  static const floor = ChunkLimits.historyFloor;
 
   /// 目录里"用户那句话"的摘要长度。
-  static const userSnippetChars = 40;
+  static const userSnippetChars = ChunkLimits.historyUserSnippetChars;
 
   /// 一条消息在片里的角色标注。
   static const userLabel = '【用户】';

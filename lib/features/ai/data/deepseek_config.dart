@@ -16,8 +16,21 @@ class DeepSeekConfig {
   /// 旧名 `deepseek-v4-flash` 仍可调用但对应模型已下线，请求会由新模型代答。
   static const modelFlash = 'deepseek-flash';
 
-  // 不再提供 pro 模型选择：设置里能选、但所有真实请求都硬编码 flash 的开关
-  // 等于改了没反应。要用 pro 就得先真的把它接进调用链。
+  /// Pro 模型。
+  ///
+  /// **只在 AI 助手页按会话可选**（原先选工作区的位置现在选模型）：
+  /// 复杂度高的整理/推理任务用 pro，日常问答用 flash。
+  /// 卡片流与摘要**固定用 flash**（`generateFeedNotes` / `summarizeNote`
+  /// 的默认参数就是 [modelFlash]）—— 那两条是高频、可并发的成本大头，
+  /// 让用户误选 pro 会把费用抬高三倍。
+  static const modelPro = 'deepseek-v4-pro';
+
+  /// 供 UI 选择器枚举。顺序即展示顺序（flash 在前，默认）。
+  static const selectableModels = <String>[modelFlash, modelPro];
+
+  /// 模型显示名。
+  static String modelLabel(String model) =>
+      model.contains('pro') ? 'DeepSeek Pro' : 'DeepSeek Flash';
 
   /// 上下文 1M / 最大输出 384K。实际调用请留出余量，
   /// 单次请求正文建议不超过 20 万字符，超长笔记应先分段。

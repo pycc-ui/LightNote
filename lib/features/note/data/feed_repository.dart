@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/ai_limits.dart';
+import '../../../core/util/app_params.dart';
 import '../../ai/domain/ai_repository.dart';
 import '../domain/feed_window.dart';
 import '../domain/note_chunk.dart';
@@ -16,7 +17,7 @@ import 'note_chunk_repository.dart';
 /// 一屏显示几张卡片（骨架屏与首屏用）。
 ///
 /// 屏幕上一屏就是 3 张。
-const kFeedBatchSize = 3;
+const kFeedBatchSize = FeedLimits.batchSize;
 
 /// 无预留（第一次进、或上次没留成）时，首屏先只生成几张。
 ///
@@ -28,14 +29,14 @@ const kFeedFirstScreenCount = kFeedBatchSize;
 ///
 /// 比一屏（3）少：一次拿 3 张会把后台池子抽得太快，取 2 张更容易让池子跟得上
 /// （首屏仍是 [kFeedFirstScreenCount] 张）。
-const kFeedPullSize = 2;
+const kFeedPullSize = FeedLimits.pullSize;
 
 /// 后台常备几张。低于这个数就在取完一屏后补。
 ///
 /// 取 8 ≈ 4 屏余量：够用户连刷几次不用等生成。
 /// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kGenParallelism] 张），
 /// 所以池子是随着用户下拉逐步涨到这个数的。
-const kFeedPoolTarget = 8;
+const kFeedPoolTarget = FeedLimits.poolTarget;
 
 /// 补池的**并发路数**：一次最多同时发几路生成请求（≈一次最多生成几张，
 /// 因为每路只要 1 张）。
@@ -45,18 +46,18 @@ const kFeedPoolTarget = 8;
 ///
 /// 取 4（3 路补池 + 1 路余量给预留/收尾）：手机上并发请求是 I/O 等待、不占 CPU，
 /// 4 路很轻；再多的收益递减，而且输入 token 会按路数重复（每路都重发一份系统提示词）。
-const kGenParallelism = 4;
+const kGenParallelism = FeedLimits.genParallelism;
 
 /// 摘要的并发生成度。
 ///
 /// 摘要生成是**网络等待**、不是 CPU，几路并发就能把 N 篇的串行等待压到约
 /// `⌈N / 并发度⌉` 倍。取 4：够快，又不容易触发服务端限流。
-const _summaryParallelism = 4;
+const _summaryParallelism = FeedLimits.summaryParallelism;
 
 /// 每次启动给**下次**预留几张（存进 `feed_reserve` 表）。
 ///
 /// 取 6：下次进入先把这 6 张放进内存池，首屏 3 张秒出、又够一次下拉。
-const kFeedReserveSize = 6;
+const kFeedReserveSize = FeedLimits.reserveSize;
 
 /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
 ///
@@ -65,7 +66,7 @@ const kFeedReserveSize = 6;
 /// 只记**笔记**级别、只记内存：不记"用过哪一块"
 /// （块重复概率本来就低，见 `gatherSources` 的说明），
 /// 也不落库（进程重启就重置，代价为零）。
-const kRecentNoteKeep = 15;
+const kRecentNoteKeep = FeedLimits.recentNoteKeep;
 
 /// **切片记忆窗口**：最近这么多块不重复取。
 ///
@@ -76,13 +77,13 @@ const kRecentNoteKeep = 15;
 /// 只在笔记少、块被反复取的时候才兜住。
 ///
 /// 只记内存、只记键（不存块内容，省内存）：键撞了最多是少用一个块，无害。
-const kRecentChunkKeep = 60;
+const kRecentChunkKeep = FeedLimits.recentChunkKeep;
 
 /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
 ///
 /// 取 40：够覆盖池子（[kFeedPoolTarget] = 15）+ 预留（6）+ 刚看过的，
 /// 又不至于让 prompt 里那串「别重复」清单太长。
-const kRecentTitleKeep = 40;
+const kRecentTitleKeep = FeedLimits.recentTitleKeep;
 
 // ---- app_kv 表的 key ----
 //

@@ -1,5 +1,6 @@
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
+import '../../../core/util/app_params.dart';
 import 'ask_user.dart';
 import 'tool_executor.dart';
 import 'tool_specs.dart';
@@ -8,8 +9,8 @@ import 'tool_types.dart';
 /// **一次**模型调用的抽象。
 ///
 /// 生产实现就是 `DeepSeekClient.streamAgent`。抽成函数类型是为了让整条循环
-/// **在测试里跑得起来**：换一个假实现，就能验证"多轮 / 回灌 / 申请工具 /
-/// 终止条件"这些最容易写错的地方，而不用真的花 API 额度。
+/// **在测试里跑得起来**：换一个假实现，就能验证"多轮 / 回灌 / 终止条件"
+/// 这些最容易写错的地方，而不用真的花 API 额度。
 typedef AgentRoundFn = Stream<AiEvent> Function({
   required String systemPrompt,
   required List<AgentMessage> messages,
@@ -30,7 +31,7 @@ class AgentText extends AgentEvent {
   final String delta;
 }
 
-/// 开始执行某个工具（UI 可以显示"正在搜索…"）
+/// 开始执行某个工具（UI 可以显示"正在执行命令…"）
 class AgentToolStarted extends AgentEvent {
   const AgentToolStarted(this.name);
   final String name;
@@ -43,16 +44,10 @@ class AgentToolDone extends AgentEvent {
   final bool ok;
 }
 
-/// 模型申请了更多工具，[approved] 是这次批准的
-class AgentToolsGranted extends AgentEvent {
-  const AgentToolsGranted(this.approved);
-  final List<String> approved;
-}
-
 /// 模型要问用户，循环**停在这里**等回答。
 ///
-/// 阶段 6 会把这条待答的调用写进 `ai_messages.pendingAction`，
-/// 用户回答之后再从这里恢复 —— 所以事件里带着 [toolCallId]。
+/// 待答的调用会写进 `ai_messages.pendingAction`，用户回答之后再从这里恢复 ——
+/// 所以事件里带着 [toolCallId]。
 class AgentAwaitingUser extends AgentEvent {
   const AgentAwaitingUser({
     required this.request,
@@ -121,39 +116,34 @@ class AgentFailed extends AgentEvent {
 
 /// **多轮工具调用循环**：提工具 → 执行 → 回灌 → 再发一轮，直到它不再提。
 ///
+/// 命令语言改造后，工具只剩 `run`（执行命令脚本）与 `askUser`（挂起提问）。
+/// 一次用户输入通常只需要 1~2 轮：模型把要读要写的命令写进**一个** `run` 里，
+/// 而不是像旧的 function calling 那样一个工具一轮、`O(N²)` 地重发历史。
+///
 /// ## 三条终止条件（缺一个都会挂死）
 ///
 /// 1. 模型这一轮**没提工具** → 正常结束
-/// 2. `askUser` → 停下来等用户（阶段 6 恢复）
+/// 2. `askUser` → 停下来等用户（持久化挂起，见《AI接入设计》）
 /// 3. **轮数上限** [maxRounds] → 强行结束
 ///
 /// 第 3 条不是防御性代码而是必需品：模型有可能每次都提一个必然失败的工具
-/// （参数一直写错、id 一直是编的），没有上限就是**无限烧钱**。
+/// （脚本一直写错），没有上限就是**无限烧钱**。
 class AgentLoop {
   const AgentLoop({required this.round, required this.executor});
 
   final AgentRoundFn round;
   final ToolExecutor executor;
 
-  /// 一轮用户输入最多允许几轮工具往返
-  static const maxRounds = 15;
-
-  /// `requestTools` 单次最多批几个。
-  ///
-  /// **值来自 `tool_specs.dart` 的 [kMaxRequestTools]**：同一个数字还要写进
-  /// 工具描述给模型看，两处各写各的就会出现"描述说 5、实际收 6"。
-  static const maxRequestTools = kMaxRequestTools;
+  /// 一轮用户输入最多允许几轮工具往返。
+  static const maxRounds = AgentLimits.maxRounds;
 
   /// 一轮用户输入里 `askUser` 最多问几次。
   ///
   /// 必须封顶：模型完全可能"问一句 → 拿不到满意答案 → 再问一句"地循环下去，
   /// 而每次都要等用户动手。到上限后强制收尾，让它用现有信息回答。
-  static const maxAsksPerTurn = 5;
+  static const maxAsksPerTurn = AgentLimits.maxAsksPerTurn;
 
   /// 跑一轮。 [history] 必须**已经包含**本轮的用户输入。
-  ///
-  /// [dbHistory] 只有 `listHistory` / `readHistory` 用得到：那是本会话存下来的
-  /// 消息行，工具的活数据在调用方手里。
   Stream<AgentEvent> run({
     required String systemPrompt,
     required List<AgentMessage> history,
@@ -161,8 +151,7 @@ class AgentLoop {
     int asksSoFar = 0,
   }) async* {
     final messages = List<AgentMessage>.from(history);
-    final granted = <String>{};
-    var tools = specsForRequest(granted: granted);
+    final tools = specsForRequest();
     final answer = StringBuffer();
     var usage = const AgentUsage();
     // ⚠️ 从 [asksSoFar] 起算：挂起恢复时调用方会把已经问过的次数带回来
@@ -177,7 +166,7 @@ class AgentLoop {
       var errored = false;
 
       await for (final e in round(
-        systemPrompt: _systemWithCatalog(systemPrompt, granted),
+        systemPrompt: systemPrompt,
         messages: messages,
         tools: tools,
       )) {
@@ -217,19 +206,6 @@ class AgentLoop {
       if (text.trim().isNotEmpty) answer.write('${text.trim()}\n\n');
 
       for (final call in calls) {
-        // `requestTools` 不碰数据，由循环自己处理（它要改 tools 列表）
-        if (call.name == 'requestTools') {
-          final (approved, result) = _grant(call, granted);
-          if (approved.isNotEmpty) {
-            tools = specsForRequest(granted: granted);
-            yield AgentToolsGranted(approved);
-          }
-          messages.add(
-            AgentMessage.tool(toolCallId: call.id, content: result.encode()),
-          );
-          continue;
-        }
-
         // `askUser` → 停在这里等用户（工具结果等回答了再补）
         if (call.name == 'askUser') {
           if (asks >= maxAsksPerTurn) {
@@ -283,56 +259,6 @@ class AgentLoop {
       '工具调用轮数达到上限（$maxRounds 轮），已停止。'
       '${answer.isEmpty ? '' : '下面是已经拿到的部分内容。'}',
       usage: usage,
-    );
-  }
-
-  /// system prompt 末尾附上"还没发给你的工具目录"。
-  ///
-  /// 只列**按需层且没批准过的**：核心层与常用层的完整定义已经在 `tools` 里了，
-  /// 再列一遍是重复占 token。
-  static String _systemWithCatalog(String base, Set<String> granted) {
-    final catalog = toolCatalogText(granted: granted);
-    return catalog.isEmpty ? base : '$base\n\n$catalog';
-  }
-
-  /// 处理 `requestTools`。返回（这次批准的，给模型的回执）。
-  (List<String>, ToolResult) _grant(ToolCall call, Set<String> granted) {
-    final raw = ToolExecutor.parseArgs(call.arguments)['names'];
-    final names = raw is List ? raw.map((x) => '$x').toList() : const <String>[];
-    if (names.isEmpty) {
-      return (
-        const [],
-        ToolResult.failure('requestTools 需要 `names`（工具名数组）。'),
-      );
-    }
-
-    final approved = <String>[];
-    final rejected = <String>[];
-    for (final n in names.take(maxRequestTools)) {
-      final tool = toolByName(n);
-      if (tool == null) {
-        rejected.add('$n（没有这个工具）');
-        continue;
-      }
-      if (granted.contains(n) || tool.layer != ToolLayer.onDemand) {
-        // 核心/常用层本来就有完整定义，再申请是浪费一轮往返
-        rejected.add('$n（已经有了，不用申请）');
-        continue;
-      }
-      granted.add(n);
-      approved.add(n);
-    }
-
-    return (
-      approved,
-      ToolResult.success({
-        'approved': approved,
-        'rejected': rejected,
-        if (approved.isEmpty)
-          'hint': '这次没有批准任何新工具。已有的工具里挑一个用，或者直接回答用户。'
-        else
-          'hint': '新工具的完整定义已经给你了，现在可以调用它们。',
-      }),
     );
   }
 

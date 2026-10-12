@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/dimens.dart';
+import '../../../core/util/app_params.dart';
 import '../domain/ask_user.dart';
 import '../domain/tool_executor.dart';
 
@@ -140,7 +141,7 @@ class _DiffBlock extends StatelessWidget {
   final String text;
   final Color color;
 
-  static const _maxChars = 600;
+  static const _maxChars = AgentLimits.confirmDiffMaxChars;
 
   @override
   Widget build(BuildContext context) {

@@ -102,29 +102,17 @@ class AiCalls extends Table {
 class AiConversations extends Table {
   TextColumn get id => text()();
 
-  /// 工作区（**AI 能看到哪些笔记**），JSON。
+  /// **本会话使用的模型名**（`deepseek-flash` / `deepseek-v4-pro`）。
   ///
-  /// 工作区有三态：**不选择 / 全体空间 / 选择目录**，而"选择目录"还能多选、
-  /// 并且单独决定要不要带上「我的轻笔记」—— 一个笔记库 id 表达不了，
-  /// 所以这里存一个描述范围的 JSON。
+  /// ⚠️ 列名仍是历史遗留的 `workspace_scope`（不改列名 = 不动表结构 =
+  /// 不需要迁移，也不需要重跑代码生成）。它原本存的是「工作区」的 JSON；
+  /// 工作区取消后，这个位置改成了**选模型**，于是这一列被复用为模型名。
   ///
-  /// 形状（`AgentWorkspace.toJson`）：
-  /// ```json
-  /// { "mode": "none" | "all" | "pick",
-  ///   "notebookIds": ["…"],       // 仅 pick
-  ///   "includeUnfiled": false }   // 仅 pick
-  /// ```
+  /// 老会话里存的可能是旧的 JSON（`{"mode":…}`）或空串 —— 解析统一走
+  /// `AiModel.parse`，认不出 pro 就回默认的 flash，不会因为老值而选到
+  /// 不存在的模型。
   ///
-  /// 三态的含义：
-  ///   · `none` —— 不选择，AI 看不到任何笔记（只能靠用户显式附上的文件）
-  ///   · `all`  —— **全部笔记库 + 我的轻笔记**
-  ///   · `pick` —— 指定的若干笔记库，`includeUnfiled` 另外决定要不要带上轻笔记
-  ///
-  /// 空串 = 还没设过 → 按 [WorkspaceMode.none] 处理（**保守**：
-  /// 老会话不给 AI 任何笔记范围，而不是突然让它看见全部）。
-  ///
-  /// ⚠️ 这个范围**同时是 AI 工具的范围**：`searchNotes` / `listNotes`
-  /// 会被它限制。否则"选了库 A"却还能搜到库 B，工作区就只是个标签。
+  /// 卡片流与摘要**不读这一列**（它们固定用 flash）。
   TextColumn get workspaceScope => text().withDefault(const Constant(''))();
 
   /// 思考强度：low / medium / high
@@ -164,7 +152,7 @@ class AiMessages extends Table {
 ///
 /// 原先叫 `settings`，但里面 10 个 key 有 6 个根本不是"设置"——
 /// `search_history`、`feed_source_excluded`、`feed_include_unfiled`、
-/// 会话级的工作区范围、卡片流的来源配置等等。
+/// 卡片流的来源配置等等。
 /// 与其让后来的人对着 `settings` 表找一个搜索历史，不如正名成"应用的键值对"。
 ///
 /// 改名靠改类名（Drift 由类名推导表名），所以 v8→v9 迁移里有

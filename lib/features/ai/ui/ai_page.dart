@@ -5,10 +5,8 @@ import '../../../core/db/app_database.dart';
 import '../../../core/theme/dimens.dart';
 import '../../../core/widgets/log_bar.dart';
 import '../../../core/widgets/markdown_view.dart';
-import '../../note/data/notebook_repository.dart';
-import 'workspace_sheet.dart';
 import '../domain/ai_chat_repository.dart';
-import '../domain/agent_workspace.dart';
+import '../domain/ai_model.dart';
 import '../domain/ask_resolver.dart';
 import '../domain/ask_user.dart';
 import 'agent_dialogs.dart';
@@ -31,26 +29,15 @@ class _AiPageState extends State<AiPage> {
 
   String? _conversationId;
 
-  /// 工作区：AI 能看到哪些笔记（三态：不选择 / 全体空间 / 选择目录）
+  /// 会话选的**模型**（取代原来的「工作区」）。
   ///
-  /// **默认全体空间**（见 [AgentWorkspace.initial]）。它同时是
-  /// `ToolExecutor._scope` 的取值来源，所以这个字段与库里那条会话记录
-  /// 必须**始终一致** —— 一旦只改一边，界面说的范围和模型看到的范围就分家了。
-  AgentWorkspace _workspace = AgentWorkspace.initial;
-
-  /// 工作区的显示名。**缓存成字段**：它要从库里查笔记库名，
-  /// 而 `build` 里不能 await。改动工作区时调 `_refreshWorkspaceLabel`。
-  String _workspaceLabelText = '全体空间';
-
-  String get _workspaceLabel => _workspaceLabelText;
-
-  /// 工作区名称缓存，避免每次 build 都查库
+  /// 它同时是发送时 `streamAgent` 用的模型，所以这个字段与库里那条会话记录
+  /// 必须**始终一致** —— 界面说 flash、实际发 pro（或反过来）会让用户对成本
+  /// 产生完全错误的判断。
+  String _model = AiModel.flash;
 
   /// 思考强度：low / medium / high
   String _effort = 'medium';
-
-  /// 显式选中的笔记（默认空 = 不上传任何笔记内容）
-  final Set<String> _selectedNoteIds = {};
 
   bool _sending = false;
 
@@ -89,32 +76,29 @@ class _AiPageState extends State<AiPage> {
     final c = conversations.first;
     _activate(
       conversationId: c.id,
-      workspace: AgentWorkspace.parse(c.workspaceScope),
+      model: AiModel.parse(c.workspaceScope),
       effort: c.thinkingEffort,
     );
   }
 
   /// 切到某个会话（或切到"新会话"的空状态），并**同步所有跟着它走的状态**。
   ///
-  /// 这五个字段是一套：会话 id、工作区、工作区标签、思考强度、显式选中的笔记，
+  /// 这三个字段是一套：会话 id、模型、思考强度，
   /// 所以必须抽成一个入口一起改。只改一部分的话，"新建会话"之后输入框旁边还写着
-  /// 上一档工作区（"选了目录"），而库里那个新会话是空的工作区 = 模型眼里什么范围
-  /// 都没有。**界面说的和 AI 看到的不是一回事**，这种不一致比功能缺失更难查：
-  /// 用户只会觉得"AI 有时候装傻"。
+  /// 上一档模型，而库里那个新会话存的是默认档。**界面说的和实际发的不是一回事**，
+  /// 这种不一致比功能缺失更难查。
   void _activate({
     required String? conversationId,
-    required AgentWorkspace workspace,
+    required String model,
     required String effort,
   }) {
     setState(() {
       _conversationId = conversationId;
-      _workspace = workspace;
+      _model = model;
       _effort = effort;
-      _selectedNoteIds.clear();
       // 挂起提问属于**上一个**会话，换会话时先清掉，再按新 id 重查
       _pendingAsk = null;
     });
-    _refreshWorkspaceLabel();
     // 挂起状态是落库的，切会话就得重新查一次（新会话没有 id → 查出来是 null）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _refreshPendingAsk();
@@ -125,10 +109,10 @@ class _AiPageState extends State<AiPage> {
     final id = _conversationId;
     if (id != null) return id;
     final conv = await context.read<AiChatRepository>().createConversation(
-          // 工作区必须**在这里一起落库**：`send` / `continueAsk` 都从会话记录里
-          // 读范围（那是唯一真相），不传的话"发第一句话之前选的工作区"
-          // 会被静默丢掉 —— 界面显示「工作」，模型那边是默认范围。
-          workspace: _workspace,
+          // 模型必须**在这里一起落库**：`send` / `answerAsk` 都从会话记录里
+          // 读模型（那是唯一真相），不传的话"发第一句话之前选的模型"
+          // 会被静默丢掉。
+          model: _model,
           thinkingEffort: _effort,
         );
     if (mounted) setState(() => _conversationId = conv.id);
@@ -228,10 +212,6 @@ class _AiPageState extends State<AiPage> {
                     },
                   ),
           ),
-          _ContextBar(
-            selectedCount: _selectedNoteIds.length,
-            onClear: () => setState(() => _selectedNoteIds.clear()),
-          ),
           // 「AI 在等你回答」——重启 App 之后也要看得到，
           // 否则用户不知道要回答什么，对话就永远停在那儿
           if (_pendingAsk != null)
@@ -241,12 +221,11 @@ class _AiPageState extends State<AiPage> {
             ),
           _Composer(
             controller: _inputController,
-            workspaceLabel: _workspaceLabel,
+            modelLabel: AiModel.label(_model),
             effort: _effort,
             sending: _sending,
-            onPickWorkspace: _pickWorkspace,
+            onPickModel: _pickModel,
             onPickEffort: _pickEffort,
-            onAttach: _showAttachMenu,
             onSend: _send,
           ),
           SizedBox(height: MediaQuery.of(context).padding.bottom > 0 ? 0 : 0),
@@ -276,10 +255,8 @@ class _AiPageState extends State<AiPage> {
   void _newConversation() {
     _activate(
       conversationId: null,
-      // 工作区回到默认（全体空间），而不是沿用上一档 ——
-      // "新建"的语义是"从干净状态开始"
-      workspace: AgentWorkspace.initial,
-      // 思考强度是**用户偏好**，不是会话内容，所以沿用当前档位
+      // 模型与思考强度都是**用户偏好**，不是会话内容，所以沿用当前档位
+      model: _model,
       effort: _effort,
     );
   }
@@ -411,12 +388,11 @@ class _AiPageState extends State<AiPage> {
                               ? () => toggle(c.id)
                               : () {
                                   Navigator.pop(ctx);
-                                  // 会话 id 与它的工作区/思考强度**一起**生效：
-                                  // 工作区是从这条记录里读出来的，见 [_activate]
+                                  // 会话 id 与它的模型/思考强度**一起**生效：
+                                  // 模型是从这条记录里读出来的，见 [_activate]
                                   _activate(
                                     conversationId: c.id,
-                                    workspace:
-                                        AgentWorkspace.parse(c.workspaceScope),
+                                    model: AiModel.parse(c.workspaceScope),
                                     effort: c.thinkingEffort,
                                   );
                                 },
@@ -509,52 +485,70 @@ class _AiPageState extends State<AiPage> {
     if (sheetCtx.mounted) Navigator.pop(sheetCtx);
 
     // 删掉的里面有**当前**会话 → 回到"新会话"的空状态
-    //（连工作区一起复位，否则会留着那个已删会话的设置）
+    //（连模型一起复位，否则会留着那个已删会话的设置）
     if (mounted && ids.contains(_conversationId)) {
       _activate(
         conversationId: null,
-        workspace: AgentWorkspace.initial,
+        model: AiModel.flash,
         effort: _effort,
       );
     }
     if (mounted) LogBar.info(context, '已删除 $n 条会话');
   }
 
-  /// 选工作区：**不选择 / 全体空间 / 选择目录**。
+  /// 选模型：DeepSeek Flash / DeepSeek Pro。
   ///
-  /// 第三种要能多选笔记库、并且单独决定要不要带上「我的轻笔记」，
-  /// 所以不走通用的单库选择器（那个只返回一个 id）。
-  Future<void> _pickWorkspace() async {
-    final picked = await showWorkspaceSheet(context, current: _workspace);
+  /// 取代了原来的「工作区」入口（工作区已取消，AI 能看到全部笔记）。
+  Future<void> _pickModel() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(
+                  AppSpacing.md, 0, AppSpacing.md, AppSpacing.sm),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('选择模型'),
+              ),
+            ),
+            for (final m in AiModel.all)
+              ListTile(
+                leading: Icon(
+                  m == _model
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(AiModel.label(m)),
+                subtitle: Text(
+                  m == AiModel.pro
+                      ? '更强，适合复杂的整理与推理；费用更高'
+                      : '默认，日常问答够用；便宜、快',
+                ),
+                onTap: () => Navigator.pop(ctx, m),
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.md),
+              child: Text(
+                '卡片流固定使用 DeepSeek Flash，不受这里影响。',
+                style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
     if (picked == null || !mounted) return;
-
-    setState(() => _workspace = picked);
-    await _refreshWorkspaceLabel();
-
+    setState(() => _model = picked);
     if (_conversationId != null) {
-      await context
-          .read<AiChatRepository>()
-          .setWorkspace(_conversationId!, picked);
+      await context.read<AiChatRepository>().setModel(_conversationId!, picked);
     }
-  }
-
-  /// 刷新工作区的显示名。
-  ///
-  /// 名字是**现查**的：笔记库被删掉之后，标签里不该还留着一个 uuid。
-  /// 「不选择」「全体空间」这两档的名字是常量，直接问 [AgentWorkspace.label]
-  /// 就行 —— 为它们去查一遍笔记库是白查。
-  Future<void> _refreshWorkspaceLabel() async {
-    final ws = _workspace;
-    if (ws.mode != WorkspaceMode.pick) {
-      if (mounted) {
-        setState(() => _workspaceLabelText = ws.label((_) => null));
-      }
-      return;
-    }
-    final all = await context.read<NotebookRepository>().all();
-    if (!mounted) return;
-    final byId = {for (final n in all) n.id: n.name};
-    setState(() => _workspaceLabelText = ws.label((id) => byId[id]));
   }
 
   Future<void> _pickEffort() async {
@@ -601,127 +595,6 @@ class _AiPageState extends State<AiPage> {
     }
   }
 
-  Future<void> _showAttachMenu() async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.description_outlined),
-              title: const Text('选择文件'),
-              subtitle: const Text('只发送你勾选的笔记内容'),
-              onTap: () => Navigator.pop(ctx, 'file'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.library_books_outlined),
-              title: const Text('选择笔记库'),
-              subtitle: const Text('把某个笔记库设为工作区'),
-              onTap: () => Navigator.pop(ctx, 'folder'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (action == null || !mounted) return;
-    if (action == 'folder') {
-      await _pickWorkspace();
-    } else {
-      await _pickFiles();
-    }
-  }
-
-  Future<void> _pickFiles() async {
-    final repo = context.read<AiChatRepository>();
-    final candidates = await repo.candidateNotes(_workspace);
-    if (!mounted) return;
-
-    if (candidates.isEmpty) {
-      LogBar.info(context, '还没有可选的笔记');
-      return;
-    }
-
-    // 弹窗里维护临时勾选状态，确认后才生效
-    final temp = {..._selectedNoteIds};
-    final confirmed = await showModalBottomSheet<bool>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheetState) => SafeArea(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.7,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                      AppSpacing.md, 0, AppSpacing.md, AppSpacing.sm),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '选择要发送的笔记（已选 ${temp.length}）',
-                          style: Theme.of(ctx).textTheme.titleMedium,
-                        ),
-                      ),
-                      FilledButton(
-                        onPressed: () => Navigator.pop(ctx, true),
-                        child: const Text('确定'),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1),
-                Flexible(
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: candidates.length,
-                    itemBuilder: (context, i) {
-                      final n = candidates[i];
-                      return CheckboxListTile(
-                        value: temp.contains(n.id),
-                        onChanged: (v) => setSheetState(() {
-                          if (v == true) {
-                            temp.add(n.id);
-                          } else {
-                            temp.remove(n.id);
-                          }
-                        }),
-                        title: Text(
-                          n.title.trim().isEmpty ? '无标题' : n.title.trim(),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          n.excerpt,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-
-    if (confirmed == true && mounted) {
-      setState(() {
-        _selectedNoteIds
-          ..clear()
-          ..addAll(temp);
-      });
-    }
-  }
-
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if (text.isEmpty || _sending) return;
@@ -747,7 +620,6 @@ class _AiPageState extends State<AiPage> {
       await chat.send(
             conversationId: convId,
             userInput: text,
-            contextNoteIds: _selectedNoteIds.toList(growable: false),
             // 思考强度用 low/medium/high；只有「中」以上才真正开启思考模式，
             // 因为 DeepSeek 思考模式默认开启且 effort 默认 high，
             // 轻量问答开着它纯属浪费
@@ -825,8 +697,8 @@ class _LogoView extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
             child: Text(
-              '可以先选工作区与思考强度，\n'
-              '再用 + 勾选要参考的笔记，然后输入指令。',
+              '可以先选模型与思考强度，然后输入指令。\n'
+              '需要笔记内容时，AI 会自己去读。',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
@@ -905,45 +777,6 @@ class _MessageList extends StatelessWidget {
   }
 }
 
-/// 已选上下文提示条
-class _ContextBar extends StatelessWidget {
-  const _ContextBar({required this.selectedCount, required this.onClear});
-
-  final int selectedCount;
-  final VoidCallback onClear;
-
-  @override
-  Widget build(BuildContext context) {
-    if (selectedCount == 0) return const SizedBox.shrink();
-    final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      color: theme.colorScheme.tertiaryContainer,
-      padding: const EdgeInsets.symmetric(
-        horizontal: AppSpacing.md,
-        vertical: AppSpacing.sm,
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.attach_file, size: 16),
-          const SizedBox(width: AppSpacing.sm),
-          Expanded(
-            child: Text(
-              '本次将发送 $selectedCount 篇笔记的内容',
-              style: theme.textTheme.bodySmall,
-            ),
-          ),
-          TextButton(
-            onPressed: onClear,
-            style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
-            child: const Text('清空'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// 「AI 在等你回答」的提示条。
 ///
 /// 为什么需要一个**常驻提示**而不是弹一次就算了：挂起是持久化的，
@@ -1000,22 +833,20 @@ class _PendingAskBanner extends StatelessWidget {
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
-    required this.workspaceLabel,
+    required this.modelLabel,
     required this.effort,
     required this.sending,
-    required this.onPickWorkspace,
+    required this.onPickModel,
     required this.onPickEffort,
-    required this.onAttach,
     required this.onSend,
   });
 
   final TextEditingController controller;
-  final String workspaceLabel;
+  final String modelLabel;
   final String effort;
   final bool sending;
-  final VoidCallback onPickWorkspace;
+  final VoidCallback onPickModel;
   final VoidCallback onPickEffort;
-  final VoidCallback onAttach;
   final VoidCallback onSend;
 
   @override
@@ -1036,23 +867,23 @@ class _Composer extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // 工作区与思考强度选择行（AI 页底部）
+          // 模型与思考强度选择行（AI 页底部）
           Row(
             children: [
               Expanded(
                 child: InkWell(
-                  onTap: onPickWorkspace,
+                  onTap: onPickModel,
                   borderRadius: AppRadius.cardRadius,
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     child: Row(
                       children: [
-                        Icon(Icons.workspaces_outline,
+                        Icon(Icons.memory_outlined,
                             size: 16, color: theme.colorScheme.onSurfaceVariant),
                         const SizedBox(width: 6),
                         Flexible(
                           child: Text(
-                            '工作区：$workspaceLabel',
+                            '模型：$modelLabel',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall,
@@ -1093,11 +924,6 @@ class _Composer extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              IconButton(
-                tooltip: '选择文件 / 笔记库',
-                onPressed: onAttach,
-                icon: const Icon(Icons.add_circle_outline),
-              ),
               Expanded(
                 child: TextField(
                   controller: controller,

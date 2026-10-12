@@ -29,10 +29,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   bool _testing = false;
   String? _testResult;
 
-  // ⚠️ 这里不加「模型」与「深度整理时启用思考模式」两项 ——
-  // 它们都是装饰性的（存下来了、也显示了，但没有任何调用方读它）：
-  //   · 模型：真实请求全部硬编码 `DeepSeekConfig.modelFlash`
-  //   · 思考开关：AI 页用的是**每个会话**的 `thinkingEffort`，与全局开关无关
+  // ⚠️ 这里不加「默认模型」与「深度整理时启用思考模式」两项：
+  //   · 模型：现在是**每个会话**在 AI 页底部选的（原先是选工作区的位置），
+  //     卡片流/摘要固定 flash；放一个全局开关会与"按会话选"打架。
+  //   · 思考开关：同样用的是**每个会话**的 `thinkingEffort`。
   // 一个改了没反应的开关比没有这个开关更糟（用户会以为他调过了）。
 
   @override
@@ -179,11 +179,11 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
         // 这里不放「模型」「深度整理时启用思考模式」两项（理由见 `_load` 上方的说明）。
         //
-        // 模型只剩一个（`deepseek-flash`），所以不需要选择器；
-        // 思考强度是**每个会话**在 AI 页顶部选的，不放在全局设置里
-        // —— 放这里会让人以为它能影响所有会话。
+        // 模型（`deepseek-flash` / `deepseek-v4-pro`）与思考强度都是**每个会话**
+        // 在 AI 页底部选的，不放在全局设置里 —— 放这里会让人以为它能影响所有会话。
         const SettingsNote(
-          '本 App 固定使用 `deepseek-flash`，思考强度在 AI 页顶部按会话选择。'),
+          '模型与思考强度都在 AI 页底部按会话选择；'
+          '卡片流固定使用 `deepseek-flash`。'),
         const SettingsNote(
           '思考模式下 temperature 参数不生效（官方行为）。'
           '要让输出稳定，靠的是提示词约束与 JSON 输出，不是调温度。',
@@ -263,8 +263,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     try {
       // 输入框里有新 Key 时先用它测试，不落库
       if (pending.isNotEmpty) repo.client.setApiKey(pending);
-      // 只测**实际会用的那个模型**（flash）：不能测设置里选的模型，
-      // 因为真实请求全部硬编码 flash —— 那样测出来的"连接成功"不代表对话能用
+      // 用默认的 flash 做连通性自检：AI 页可按会话选 pro，
+      // 但"连接能不能通"用哪个模型测都行，flash 最省。
       final result =
           await repo.testConnection(model: DeepSeekConfig.modelFlash);
       if (!mounted) return;

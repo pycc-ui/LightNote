@@ -32,14 +32,15 @@
 /// 宁可拆散，也不能切出一片没人能读的东西。
 library;
 
+import '../../../core/util/app_params.dart';
 import 'note_chunk.dart';
 
 /// 切片器本体。
 class NoteChunker {
   NoteChunker._();
 
-  /// 上限（硬约束）。除了不可拆散单元，任何一片都不超过它。
-  static const cap = 700;
+  /// 上限（硬约束）。除了不可拆散单元，任何一片都不超过它。值见 `ChunkLimits`。
+  static const cap = ChunkLimits.noteCap;
 
   /// 下限（**期望值**，不参与合并判断）。
   ///
@@ -47,13 +48,13 @@ class NoteChunker {
   /// 1400 字 → `600 / 600 / 200` 的例子就是填到接近 700 才停
   /// （200×3 = 600，第 4 个会到 800 > cap）。所以这个常量**不参与逻辑**，
   /// 只用来表达"不该切出一堆碎片"这个期望（测试也据此断言）。
-  static const floor = 300;
+  static const floor = ChunkLimits.noteFloor;
 
   /// 短笔记不上标题、不分段，整篇一片。
-  static const shortNoteLimit = 400;
+  static const shortNoteLimit = ChunkLimits.noteShortLimit;
 
   /// 不可拆散单元的硬顶。超过它就得拆——理由见类注释。
-  static const atomicCeiling = 1500;
+  static const atomicCeiling = ChunkLimits.noteAtomicCeiling;
 
   /// 句末标点（把超长段落拆成句子；分隔符留在前一片末尾）。
   static final _sentenceEnd = RegExp(r'[。！？!?…]+');

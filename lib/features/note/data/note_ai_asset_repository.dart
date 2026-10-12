@@ -37,7 +37,7 @@ class NoteAiAssetRepository {
   /// **为什么要防抖**：笔记的 `updatedAt` 只要写一次就变，
   /// 用户改个错别字也会让摘要作废 = 白烧一次 token。
   /// 用"字节数变化比例"衡量"改了多少"，比时间戳贴合意图得多。
-  static const staleRatio = 0.20;
+  static const staleRatio = AiLimits.summaryStaleRatio;
 
   // ==========================================================================
   // 读

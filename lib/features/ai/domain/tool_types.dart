@@ -38,11 +38,6 @@ class ToolSpec {
         },
       };
 
-  /// 分层发送里的"只给名称 + 一句话"形态：把 schema 抹掉，只留名字和描述。
-  ///
-  /// 用来拼 system prompt 里那段"你还有这些工具，需要时用 requestTools 申请"。
-  String toCatalogLine() => '- `$name`：$description';
-
   @override
   String toString() => 'ToolSpec($name)';
 }
