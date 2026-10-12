@@ -13,31 +13,39 @@ import '../domain/note_chunk.dart';
 import 'note_ai_asset_repository.dart';
 import 'note_chunk_repository.dart';
 
-/// 一屏显示几张卡片。
+/// 一屏显示几张卡片（骨架屏与首屏用）。
 ///
-/// **这个不动**：屏幕上一屏就是 3 张。
+/// 屏幕上一屏就是 3 张。
 const kFeedBatchSize = 3;
-
-/// 后台常备几张。低于这个数就在取完一屏后补。
-///
-/// 取 20 ≈ 6~7 屏余量：用户连着刷好几次都不用等生成。
-/// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kFeedGenerateCount] 张），
-/// 所以池子是随着用户下拉逐步涨到这个数的。
-const kFeedPoolTarget = 20;
-
-/// 一次请求生成几张（后台补池用）。
-///
-/// 比 [kFeedBatchSize] 大：一次多拿几张，省往返（素材 prompt 只发一次）。
-/// 但**不能太大**：每张正文 400~800 字，张数越多 JSON 输出越长、越慢，而且
-/// 逼近 8192 的输出上限后会被截断（截断即 JSON 解析失败，整批白烧）。
-/// 配套见 `AiRepository.generateFeedNotes` 的 `maxTokens`。
-const kFeedGenerateCount = 5;
 
 /// 无预留（第一次进、或上次没留成）时，首屏先只生成几张。
 ///
-/// 取一屏：生成 3 张比一次 9 张快得多，先让用户看到内容，剩下的丢后台补池
-/// （见 [FeedRepository.warmUpIfNeeded]）。有预留时这条不生效——预留本来就是秒出。
+/// 取一屏：生成 3 张（并行）比一次生成一批快得多，先让用户看到内容，
+/// 剩下的丢后台补池（见 [FeedRepository.warmUpIfNeeded]）。有预留时不走这条。
 const kFeedFirstScreenCount = kFeedBatchSize;
+
+/// **每次下拉取几张**。
+///
+/// 比一屏（3）少：一次拿 3 张会把后台池子抽得太快，取 2 张更容易让池子跟得上
+/// （首屏仍是 [kFeedFirstScreenCount] 张）。
+const kFeedPullSize = 2;
+
+/// 后台常备几张。低于这个数就在取完一屏后补。
+///
+/// 取 15 ≈ 7 屏余量：用户连着刷好几次都不用等生成。
+/// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kGenParallelism] 张），
+/// 所以池子是随着用户下拉逐步涨到这个数的。
+const kFeedPoolTarget = 15;
+
+/// 补池的**并发路数**：一次最多同时发几路生成请求（≈一次最多生成几张，
+/// 因为每路只要 1 张）。
+///
+/// 单路生成 1 张 ≈ 3.3s；把 N 张拆成 N 个并行单卡请求，N=5 时约 4.4s
+/// （远快于"一个请求里要 N 张"）。所以"多路并行单卡"是补池提速的关键。
+///
+/// 取 6：手机上并发请求是 I/O 等待、不占 CPU，6 路毫无压力；再多的收益递减，
+/// 而且输入 token 会按路数重复（每路都重发一份系统提示词）。
+const kGenParallelism = 6;
 
 /// 摘要的并发生成度。
 ///
@@ -47,35 +55,32 @@ const _summaryParallelism = 4;
 
 /// 每次启动给**下次**预留几张（存进 `feed_reserve` 表）。
 ///
-/// 取 6 = **2 屏**：下次进入先把这 6 张放进内存池，前 3 张当屏秒出，
-/// 剩下 3 张立刻够用户下拉一次（不用等生成）。
+/// 取 6：下次进入先把这 6 张放进内存池，首屏 3 张秒出、又够一次下拉。
 const kFeedReserveSize = 6;
 
 /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
 ///
-/// 取 12（比一屏 3 张大、也比一次生成 5 张大）：连续两批卡片的素材
-/// 不会重叠，用户不会连着看到同一篇笔记的内容。
+/// 取 15：连续两批卡片的素材不会重叠，用户不会连着看到同一篇笔记的内容。
 ///
 /// 只记**笔记**级别、只记内存：不记"用过哪一块"
 /// （块重复概率本来就低，见 `gatherSources` 的说明），
 /// 也不落库（进程重启就重置，代价为零）。
-const kRecentNoteKeep = 12;
+const kRecentNoteKeep = 15;
 
 /// **切片记忆窗口**：最近这么多块不重复取。
 ///
-/// 设计文档原本说"不记录用过的块"，理由是"一篇 10 块，连抽两次命中同一块
-/// 只有 10%"。**那个前提现在不成立**：一次要取 9 份素材，
-/// 一篇 10 块的笔记等于每批用掉 90%，两批之间必然大量重叠。
+/// 一次要取好几份素材，笔记少的时候一篇 10 块等于每批用掉一大半，两批之间必然
+/// 大量重叠，所以必须记。
 ///
-/// 取 60 ≈ 6~7 批的量：笔记多的时候这层记忆自然不起作用（每篇都还有没用过的块），
+/// 取 60：笔记多的时候这层记忆自然不起作用（每篇都还有没用过的块），
 /// 只在笔记少、块被反复取的时候才兜住。
 ///
-/// 只记内存、只记 hash（不存块内容，省内存）：hash 撞了最多是少用一个块，无害。
+/// 只记内存、只记键（不存块内容，省内存）：键撞了最多是少用一个块，无害。
 const kRecentChunkKeep = 60;
 
 /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
 ///
-/// 取 40：够覆盖池子（[kFeedPoolTarget] ≈ 20）+ 预留（6）+ 刚看过的，
+/// 取 40：够覆盖池子（[kFeedPoolTarget] = 15）+ 预留（6）+ 刚看过的，
 /// 又不至于让 prompt 里那串「别重复」清单太长。
 const kRecentTitleKeep = 40;
 
@@ -143,7 +148,8 @@ class FeedSource {
 ///
 /// ## 池子的用法
 ///
-/// 维护一个 [kFeedPoolTarget] 张的缓冲池，页面一次取 [kFeedBatchSize] 张。
+/// 维护一个 [kFeedPoolTarget] 张的缓冲池，页面一次取首屏 [kFeedFirstScreenCount] /
+/// 下拉 [kFeedPullSize] 张。
 /// 池子见底就在后台补——所以"下拉刷新"通常是**瞬间**出内容，不用等 AI；
 /// 只有池子空且恰好没在生成时才会转圈。
 ///
@@ -520,37 +526,34 @@ class FeedRepository {
   // 生成与取用
   // ==========================================================================
 
-  /// 取一屏卡片，并保证后台继续补足池子。
+  /// 取一批卡片，并保证后台继续补足池子。
   ///
-  /// ## 生成**不是**"池子空了才启动"
+  /// [size] 是这一批取几张：首屏传 [kFeedFirstScreenCount]，下拉刷新用默认的
+  /// [kFeedPullSize]。**池里不够 [size] 时有几张给几张**（1、2 张也顶一顶），
+  /// 不会为了凑满而不给。
   ///
-  /// 流程是：
-  ///   1. 池子空 → `await refill`（**唯一会等的地方**，因为不等就没卡片可给）
-  ///   2. 从池子**头部**取 [kFeedBatchSize] 张
-  ///   3. **不管池子还剩多少，都 `unawaited(refill)`** ← 提前启动下一批
+  /// 生成不是"池子空了才启动"：
+  ///   1. 池子空 → `await refill`（唯一会等的地方）
+  ///   2. 从池子头部取 [size] 张
+  ///   3. 不管池子还剩多少，都后台 `refill`（提前启动下一批）
   ///
-  /// 所以第 3 步在每次取卡片后都会跑，池子是在"还有货"的时候就开始补的。
-  /// 真正决定"用户能连刷几次不用等"的是 [kFeedPoolTarget]：
-  /// 常备 20 张 ≈ 6~7 屏，用户连刷好几次才会碰到池子空。
+  /// 真正决定"能连刷几次不用等"的是 [kFeedPoolTarget]。池子真空时只能等，
+  /// 靠把池子备厚来避免走到那一步。
   ///
-  /// 第 1 步的等待无法完全消除——池子真空时只能等，否则就要给用户
-  /// 看空白（比等更糟）。所以只能靠把池子备厚来避免走到那一步。
+  /// 并发安全：第 1、3 步都走 [refill]，内部用 `_inflight` 共用同一个 future
+  /// （同一时刻只会有一批在生成），不会重复烧 token。
   ///
-  /// ## 并发安全
-  ///
-  /// 第 1 步和第 3 步都走 [refill]，它内部用 `_inflight` 共用同一个
-  /// future——**同一时刻只会有一批在生成**，不会重复烧 token。
-  /// [override] **仅供测试**：显式指定来源。
-  ///
-  /// **生产代码不要传。** 不传时内部走 [resolveSource] 现算 ——
-  /// 这样任何触发路径（切 tab、下拉刷新、后台补池）都**不可能用到过期的来源**，
-  /// 也就不会再出现"新建的笔记库要重启才生效"。
-  Future<List<FeedDraft>> takeBatch([FeedSource? override]) async {
+  /// [override] **仅供测试**；生产不传，内部走 [resolveSource] 现算，
+  /// 这样任何触发路径都不可能用到过期的来源。
+  Future<List<FeedDraft>> takeBatch({
+    FeedSource? override,
+    int size = kFeedPullSize,
+  }) async {
     final source = override ?? await resolveSource();
     if (_pool.isEmpty) {
       await refill(source);
     }
-    final take = _pool.length < kFeedBatchSize ? _pool.length : kFeedBatchSize;
+    final take = _pool.length < size ? _pool.length : size;
     final batch = _pool.take(take).toList(growable: false);
     _pool.removeRange(0, take);
 
@@ -579,36 +582,62 @@ class FeedRepository {
   }
 
   Future<void> _doRefill(FeedSource source) async {
-    // **按缺口要，不固定要一批**。
-    //
-    // 固定要 `kFeedGenerateCount`（9）张的话，池子只差 2 张就满的时候，
-    // 那 7 张纯属白烧 token。
-    //
-    // 口径：
-    //   · 缺口 = `kFeedPoolTarget - 池子里现有`（所以"只差一点"就只要一点）
-    //   · 下限 `kFeedBatchSize`：一次至少要够用户刷一屏，否则"补了等于没补"
-    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要太多张
+    // **按缺口要，不固定要一批**：池子只差一点就只要一点，不白烧 token。
+    //   · 缺口 = `kFeedPoolTarget - 池子里现有`
+    //   · 下限 `kFeedPullSize`：一次至少够用户下拉一次
+    //   · 上限 `kGenParallelism`：一次最多这么多路（= 最多这么多张）
     final need = (kFeedPoolTarget - _pool.length)
-        .clamp(kFeedBatchSize, kFeedGenerateCount);
+        .clamp(kFeedPullSize, kGenParallelism);
 
     // 素材尽量凑够 need 份（笔记少就从同一篇多取几块）
     final materials = await gatherSources(source, limit: need);
     if (materials.isEmpty) return; // 没素材，调用方据此显示空状态
 
-    // **张数单独说**：素材凑不够时靠提示词让模型从不同角度补足，
-    // 保证这次生成还是 need 张。同时把"已有的标题"告诉模型，让它避开——
+    // 并发生成（每路单卡、各分配不同素材）。已有标题交给模型避开——
     // 笔记少时切片会反复取到，只靠换块治不了重复。
-    final drafts = await _ai.generateFeedNotes(
-      materials,
-      count: need,
-      avoidTitles: existingTitles(),
-    );
-    _pool.addAll(dropSimilarDrafts(drafts, against: _recentTitles));
+    final drafts = await _generateCardsParallel(materials, need);
+    _pool.addAll(drafts);
     _rememberTitles(_pool.map((d) => d.title));
     // 池子不该无限长：只保留最新的若干张
     while (_pool.length > kFeedPoolTarget * 2) {
       _pool.removeAt(0);
     }
+  }
+
+  /// 并发生成 [count] 张卡：拆成若干路，**每路一个请求、一份素材、1 张卡**。
+  ///
+  /// 实测依据：一个请求里要 N 张是 O(N) 的（N=5 约 12s），而拆成 N 路并行单卡
+  /// 只要 ~4s。每路分**不同素材**，实测标题不会互相撞车（各写各的那一块）。
+  ///
+  /// 素材少于 [count] 时退化成"少几路、每路要 1~2 张"（从同一份素材的不同角度），
+  /// 最后仍由 [dropSimilarDrafts] 兜底去重。
+  Future<List<FeedDraft>> _generateCardsParallel(
+    List<FeedMaterial> materials,
+    int count,
+  ) async {
+    if (materials.isEmpty || count <= 0) return const [];
+
+    // 路数 = min(要几张, 有几份素材, 并发上限)：一路一份素材。
+    final slots = [count, materials.length, kGenParallelism]
+        .reduce((a, b) => a < b ? a : b);
+    // 把 count 张尽量均分到 slots 路
+    final sizes = List.generate(
+      slots,
+      (i) => count ~/ slots + (i < count % slots ? 1 : 0),
+    );
+    final use = materials.take(slots).toList(growable: false);
+
+    final out = <FeedDraft>[];
+    await _runBounded(List.generate(slots, (i) => i), slots, (i) async {
+      final drafts = await _ai.generateFeedNotes(
+        [use[i]],
+        count: sizes[i],
+        avoidTitles: existingTitles(),
+      );
+      out.addAll(drafts);
+    });
+
+    return dropSimilarDrafts(out, against: _recentTitles);
   }
 
   // ==========================================================================
@@ -708,7 +737,7 @@ class FeedRepository {
   //
   // 于是：
   //   · 库里有预留 → 进入秒出，不花一次生成的等待
-  //   · 库里没有   → 当场只生成一屏（比一次 9 张快得多），剩下的后台补
+  //   · 库里没有   → 当场并发生成一屏（比一次生成一批快得多），剩下的后台补
   //     （第一次装 App 必然走这条）
   //
   // 它不影响列表的追加/替换：列表行为由 `InboxPage._loadBatch(first:)` 决定
@@ -738,11 +767,8 @@ class FeedRepository {
         _pool.addAll(reserved);
         // 预留那几张也是"已经生成过"的，列进标题记忆里避免下一批撞车
         _rememberReserved(reserved);
-        // 用现成的 [refill] 补池子，**不要另起一个生成**：
-        // refill 内部有 `_inflight` 防重入，而紧接着 `takeBatch` 自己也会
-        // 调 refill——另起一个会导致进入时并发跑两次生成（双倍 token）。
-        //
-        // 补完再把末尾 3 张留到下次。
+        // 后台补：先把预留填满、再补内存池（见 [_fillPoolForNextTime]）。
+        // 不 await —— 有预留时这一屏已经秒出，后台的事不挡用户。
         unawaited(_fillPoolForNextTime(source));
         return true;
       }
@@ -750,7 +776,8 @@ class FeedRepository {
       // ---- ③ 没有预留：先只生成一屏，秒上屏，剩下的丢后台补 ----
       //
       // 不现场等摘要（allowGenerateSummary: false）：缺摘要先用正文截断兜底，
-      // 真正的摘要丢后台补。生成 [kFeedFirstScreenCount] 张比一次 9 张快得多。
+      // 真正的摘要丢后台补。并发生成 [kFeedFirstScreenCount] 张（3 路单卡）比
+      // 一个请求里要 3 张快得多。
       final materials = await gatherSources(
         source,
         limit: kFeedFirstScreenCount,
@@ -758,15 +785,11 @@ class FeedRepository {
       );
       if (materials.isEmpty) return false; // 没素材，生成不出
 
-      final drafts = await _ai.generateFeedNotes(
-        materials,
-        count: kFeedFirstScreenCount,
-      );
+      final drafts = await _generateCardsParallel(materials, kFeedFirstScreenCount);
       _pool.addAll(drafts);
 
-      // 再把池子补起来、并给下次留预留。不 await：它在后台跑，不影响首屏。
-      // `_fillPoolForNextTime` 内部是 refill + _reserveTail，顺带会把上面
-      // 兜底那批摘要真正生成出来。
+      // 再把池子补起来、并给下次留好预留。不 await：它在后台跑，不影响首屏。
+      // `_fillPoolForNextTime` 会先把预留填满、再补内存池。
       _fillPoolForNextTime(source);
       return true;
     } catch (_) {
@@ -795,42 +818,36 @@ class FeedRepository {
     });
   }
 
-  /// 后台补一批，给下次下拉刷新用；顺便把末尾几张留给再下次。
+  /// 后台补池：**先把下次的预留填满，再补当前内存池**。
   ///
-  /// **不 await**：这是给"下一次"准备的，不该让这一屏等它。
-  /// 失败无所谓——下拉时 [takeBatch] 会按需生成。
+  /// 「预留优先」是刻意的：预留是"下次打开秒出"的本钱，先把它做出来，这一路
+  /// 再并回来补内存池（对应"增加一路先负责填充预留，做完来帮忙"）。
   ///
-  /// 整套步骤都包在 try/catch 里（理由见 [_refillInBackground]）：
-  /// 它是**唯一**会同时碰 `refill` 和 `_reserveTail` 的后台任务，
-  /// 而 `_reserveTail` 失败（比如库已关闭）同样会变成未捕获的异步错误。
-  ///
-  /// 注意：走的是 [refill]，它内部有 `_inflight` 防重入，
-  /// 所以和 `takeBatch` 自己的 refill 不会并发跑两次生成。
+  /// **不 await**：这是给"下一次"和后台准备的，不该让这一屏等它。
+  /// 整套步骤包在 try/catch 里（理由见 [_refillInBackground]）。
   Future<void> _fillPoolForNextTime(FeedSource source) async {
     try {
+      await _fillReserve(source);
       await refill(source);
-      await _reserveTail();
     } catch (e) {
-      debugPrint('[Feed] 后台补池 / 留预留失败（忽略）：$e');
+      debugPrint('[Feed] 后台补预留 / 补池失败（忽略）：$e');
     }
   }
 
-  /// 把池子**末尾**的 [kFeedReserveSize] 张存进 `feed_reserve` 并删掉它们。
+  /// 生成 [kFeedReserveSize] 张存进 `feed_reserve`（给下次启动秒出）。
   ///
-  /// 存末尾而不是开头：开头那几张是这一屏马上要展示的，
-  /// 存它们会导致"下次打开看到和这次一样的内容"。
-  ///
-  /// 存完**从内存池删除**——它们已经落到表里，留在池子里会被当成
-  /// "下一批"重复展示。
-  Future<void> _reserveTail() async {
-    if (_pool.length <= kFeedBatchSize) return; // 不够一屏，没得留
+  /// 与"从池子末尾搬几张过去"不同：这里**单独生成**，所以不会掏空当前内存池。
+  /// 失败或没素材就跳过——预留只是"下次更快"，不该拖累这次。
+  Future<void> _fillReserve(FeedSource source) async {
+    final materials = await gatherSources(source, limit: kFeedReserveSize);
+    if (materials.isEmpty) return;
+    final drafts = await _generateCardsParallel(materials, kFeedReserveSize);
+    if (drafts.isEmpty) return;
 
-    final spare = _pool.length - kFeedBatchSize;
-    final take = spare < kFeedReserveSize ? spare : kFeedReserveSize;
-    final tail = _pool.sublist(_pool.length - take);
-
-    await _db.replaceFeedReserve(tail);
-    _pool.removeRange(_pool.length - take, _pool.length);
+    final reserved = drafts.take(kFeedReserveSize).toList(growable: false);
+    await _db.replaceFeedReserve(reserved);
+    // 预留那几张也是"已经生成过"的，列进标题记忆里避免下一批撞车
+    _rememberReserved(reserved);
   }
 }
 

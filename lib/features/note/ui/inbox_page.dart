@@ -27,7 +27,7 @@ import 'widgets/feed_card.dart';
 ///
 /// ## 生成策略：后台备 6 张、一屏 3 张
 ///
-/// 池子里常备 [kFeedPoolTarget] 张，一屏取 [kFeedBatchSize] 张。
+/// 池子里常备 [kFeedPoolTarget] 张，首屏取 [kFeedFirstScreenCount] 张、下拉 [kFeedPullSize] 张。
 /// 取完立刻在后台补，所以**下拉刷新通常是瞬间出内容**，不用等 AI。
 ///
 /// 生成结果**不落库**：收下才写成笔记。所以杀掉进程后没收下的那批
@@ -190,8 +190,12 @@ class _InboxPageState extends State<InboxPage> {
   Future<void> _loadBatch({bool first = false}) async {
     final feed = context.read<FeedRepository>();
     try {
-      // 不传来源：让仓储层现算，避免用到页面里那份可能过期的 `_source`
-      final batch = await feed.takeBatch();
+      // 不传来源：让仓储层现算，避免用到页面里那份可能过期的 `_source`。
+      // 首屏取 3 张（`kFeedFirstScreenCount`），下拉刷新取 2 张（`kFeedPullSize`）
+      // —— 一次拿太多会把后台池子抽干。
+      final batch = await feed.takeBatch(
+        size: first ? kFeedFirstScreenCount : kFeedPullSize,
+      );
       if (!mounted) return;
 
       if (batch.isEmpty) {
