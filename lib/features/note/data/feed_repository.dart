@@ -32,10 +32,10 @@ const kFeedPullSize = 2;
 
 /// 后台常备几张。低于这个数就在取完一屏后补。
 ///
-/// 取 15 ≈ 7 屏余量：用户连着刷好几次都不用等生成。
+/// 取 8 ≈ 4 屏余量：够用户连刷几次不用等生成。
 /// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kGenParallelism] 张），
 /// 所以池子是随着用户下拉逐步涨到这个数的。
-const kFeedPoolTarget = 15;
+const kFeedPoolTarget = 8;
 
 /// 补池的**并发路数**：一次最多同时发几路生成请求（≈一次最多生成几张，
 /// 因为每路只要 1 张）。
@@ -43,9 +43,9 @@ const kFeedPoolTarget = 15;
 /// 单路生成 1 张 ≈ 3.3s；把 N 张拆成 N 个并行单卡请求，N=5 时约 4.4s
 /// （远快于"一个请求里要 N 张"）。所以"多路并行单卡"是补池提速的关键。
 ///
-/// 取 6：手机上并发请求是 I/O 等待、不占 CPU，6 路毫无压力；再多的收益递减，
-/// 而且输入 token 会按路数重复（每路都重发一份系统提示词）。
-const kGenParallelism = 6;
+/// 取 4（3 路补池 + 1 路余量给预留/收尾）：手机上并发请求是 I/O 等待、不占 CPU，
+/// 4 路很轻；再多的收益递减，而且输入 token 会按路数重复（每路都重发一份系统提示词）。
+const kGenParallelism = 4;
 
 /// 摘要的并发生成度。
 ///
@@ -318,12 +318,12 @@ class FeedRepository {
   /// 摘要生成失败会退回正文截断（见 [_ensureSummary]），保证不会因为一次摘要失败
   /// 就生成不出卡片。
   ///
-  /// [allowGenerateSummary] 为 false 时**不现场调摘要接口**：缺摘要的笔记先用
-  /// 正文截断兜底，真正的摘要丢后台补（首屏提速用，见 `warmUpIfNeeded`）。
+  /// 摘要一律**卡片优先**：缺摘要的笔记先用正文截断兜底（[`_fallbackSummary`]），
+  /// 真正的摘要丢后台 [FeedRepository._backfillSummaries] 补——不为摘要卡住出卡。
+  /// （摘要只作背景，实测对卡片质量影响很小；下次再抽到它时用的就是真摘要。）
   Future<List<FeedMaterial>> gatherSources(
     FeedSource source, {
     int limit = 8,
-    bool allowGenerateSummary = true,
   }) async {
     // 多取一些候选：来源冷却会筛掉最近用过的，得有备选可挑。
     final notes = await _db.notesForFeed(
@@ -368,8 +368,8 @@ class FeedRepository {
     }
     if (chunksOf.isEmpty) return const [];
 
-    // 只给真正会用到的笔记生成摘要。命中的直接用缓存；缺的**并发生成**
-    // （这是网络等待，串行会把首屏拖成 N 倍）。
+    // 只给真正会用到的笔记取摘要：命中的直接用缓存；缺的**先用正文截断兜底**，
+    // 真正的摘要在下面丢后台补（卡片优先，不为摘要等一秒）。
     final summaries = <String, String>{
       for (final id in chunksOf.keys)
         if (cached[id] != null) id: cached[id]!,
@@ -378,18 +378,11 @@ class FeedRepository {
       for (final id in chunksOf.keys)
         if (cached[id] == null) id,
     ];
-    if (allowGenerateSummary) {
-      await _runBounded(missing, _summaryParallelism, (id) async {
-        summaries[id] = await _ensureSummary(noteOf[id]!);
-      });
-    } else {
-      // 首屏路径（[allowGenerateSummary] = false）：不等摘要，先用正文截断兜底，
-      // 真正的摘要丢后台补（摘要只作背景，实测对卡片质量影响很小）。
-      for (final id in missing) {
-        summaries[id] = _fallbackSummary(noteOf[id]!);
-      }
-      _backfillSummaries([for (final id in missing) noteOf[id]!]);
+    // 卡片优先：缺摘要先用正文截断兜底，真正的摘要丢后台补。
+    for (final id in missing) {
+      summaries[id] = _fallbackSummary(noteOf[id]!);
     }
+    _backfillSummaries([for (final id in missing) noteOf[id]!]);
 
     // ---- 轮转取素材，凑够 [limit] 份 ----
     //
@@ -509,18 +502,30 @@ class FeedRepository {
   String _fallbackSummary(Note note) =>
       safeTruncate(note.content.trim(), AiLimits.summaryHardMax);
 
-  /// 后台补摘要（fire-and-forget）：把首屏兜底用过的笔记真正总结一遍并落库。
+  /// 后台补摘要（fire-and-forget）：把兜底用过的笔记真正总结一遍并落库。
   ///
-  /// 并发上限与按需路径一致；失败吞掉（[_ensureSummary] 内部已兜底），
-  /// 不影响任何界面。
+  /// 并发上限 [_summaryParallelism]；失败吞掉（[_ensureSummary] 内部已兜底），
+  /// 不影响任何界面。用 [_summaryBackfillInflight] 去重，避免补池与填预留
+  /// 先后抽到同一篇时重复调一次摘要。
   void _backfillSummaries(List<Note> notes) {
-    if (notes.isEmpty) return;
-    _runBounded(notes, _summaryParallelism, (n) async {
-      await _ensureSummary(n);
+    final todo = [
+      for (final n in notes)
+        if (_summaryBackfillInflight.add(n.id)) n,
+    ];
+    if (todo.isEmpty) return;
+    _runBounded(todo, _summaryParallelism, (n) async {
+      try {
+        await _ensureSummary(n);
+      } finally {
+        _summaryBackfillInflight.remove(n.id);
+      }
     }).catchError((Object e) {
       debugPrint('[Feed] 后台补摘要失败（忽略）：$e');
     });
   }
+
+  /// 正在后台补摘要的笔记 id（去重用，进程内）。
+  final Set<String> _summaryBackfillInflight = {};
 
   // ==========================================================================
   // 生成与取用
@@ -775,13 +780,11 @@ class FeedRepository {
 
       // ---- ③ 没有预留：先只生成一屏，秒上屏，剩下的丢后台补 ----
       //
-      // 不现场等摘要（allowGenerateSummary: false）：缺摘要先用正文截断兜底，
-      // 真正的摘要丢后台补。并发生成 [kFeedFirstScreenCount] 张（3 路单卡）比
-      // 一个请求里要 3 张快得多。
+      // 一律卡片优先：摘要缺了用正文截断兜底、丢后台补（见 gatherSources）。
+      // 并发生成 [kFeedFirstScreenCount] 张（3 路单卡）比一个请求里要 3 张快得多。
       final materials = await gatherSources(
         source,
         limit: kFeedFirstScreenCount,
-        allowGenerateSummary: false,
       );
       if (materials.isEmpty) return false; // 没素材，生成不出
 
