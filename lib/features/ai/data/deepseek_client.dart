@@ -427,6 +427,46 @@ class DeepSeekClient {
     }
   }
 
+  /// 查询账户余额（`GET /user/balance`）。
+  ///
+  /// 失败抛 [DeepSeekException]；没有 Key 时抛 code `no_api_key`。
+  Future<AccountBalance> fetchBalance({CancelToken? cancelToken}) async {
+    if (!hasApiKey) {
+      throw const DeepSeekException('未配置 API Key', code: 'no_api_key');
+    }
+
+    try {
+      final res = await _dio.get<Map<String, dynamic>>(
+        DeepSeekConfig.balancePath,
+        cancelToken: cancelToken,
+        options: Options(
+          headers: {'Authorization': 'Bearer $_apiKey'},
+          // 自己判状态码，才能把 401/402 的响应体读出来
+          validateStatus: (_) => true,
+        ),
+      );
+
+      final status = res.statusCode ?? 0;
+      final data = res.data;
+
+      if (status < 200 || status >= 300) {
+        final msg = data?['error'] is Map
+            ? (data!['error']['message'] ?? '').toString()
+            : 'HTTP $status';
+        throw DeepSeekException(_humanize(msg, status), code: _codeOf(status));
+      }
+
+      return AccountBalance.fromJson(data ?? const {});
+    } on DioException catch (e) {
+      final mapped = _mapDioError(e);
+      throw DeepSeekException(
+        mapped.message,
+        code: mapped.code,
+        isRetryable: mapped.isRetryable,
+      );
+    }
+  }
+
   static TokenUsage _parseUsage(Map usage) {
     int asInt(Object? v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
     return TokenUsage(

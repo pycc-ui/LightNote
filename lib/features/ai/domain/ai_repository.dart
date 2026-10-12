@@ -218,6 +218,12 @@ class AiRepository {
     return content;
   }
 
+  /// 查询 DeepSeek 账户余额（设置页「查看余额」用）。
+  Future<AccountBalance> fetchBalance() async {
+    await ensureReady();
+    return _client.fetchBalance();
+  }
+
   // ---------------------------------------------------------------------------
   // 内部
   // ---------------------------------------------------------------------------

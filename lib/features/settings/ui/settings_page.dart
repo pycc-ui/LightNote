@@ -9,6 +9,7 @@ import '../../../core/prefs/preferences_service.dart';
 import 'pages/about_settings_page.dart';
 import 'pages/ai_settings_page.dart';
 import 'pages/appearance_settings_page.dart';
+import 'pages/balance_page.dart';
 import 'pages/storage_settings_page.dart';
 import 'pages/usage_settings_page.dart';
 
@@ -113,6 +114,13 @@ class _SettingsPageState extends State<SettingsPage> {
           _groupHeader('AI'),
           _group([
             const _AiTile(),
+            _navTile(
+              context,
+              icon: Icons.account_balance_wallet_outlined,
+              title: '查看余额',
+              subtitle: '查询 DeepSeek 账户余额',
+              page: const BalancePage(),
+            ),
             _navTile(
               context,
               icon: Icons.bar_chart_outlined,

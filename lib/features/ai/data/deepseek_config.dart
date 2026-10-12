@@ -9,6 +9,9 @@ class DeepSeekConfig {
   static const baseUrl = 'https://api.deepseek.com';
   static const chatPath = '/chat/completions';
 
+  /// 查询账户余额的端点（`GET`）。
+  static const balancePath = '/user/balance';
+
   /// 官方文档明确：模型名请使用 `deepseek-flash`。
   /// 旧名 `deepseek-v4-flash` 仍可调用但对应模型已下线，请求会由新模型代答。
   static const modelFlash = 'deepseek-flash';
@@ -48,6 +51,65 @@ class TokenUsage {
   @override
   String toString() =>
       'TokenUsage(in: $promptTokens, cached: $cachedPromptTokens, out: $completionTokens)';
+}
+
+/// 账户余额（`GET /user/balance` 的响应）。
+class AccountBalance {
+  const AccountBalance({required this.isAvailable, required this.infos});
+
+  /// 账户是否可用。false = 余额耗尽或被停用，此时任何请求都会以 402 失败。
+  final bool isAvailable;
+
+  /// 各币种余额。DeepSeek 目前只返回一条（CNY）。
+  final List<BalanceInfo> infos;
+
+  static AccountBalance fromJson(Map<String, dynamic> json) {
+    final raw = json['balance_infos'];
+    final infos = <BalanceInfo>[];
+    if (raw is List) {
+      for (final item in raw) {
+        final info = BalanceInfo.fromJson(item);
+        if (info != null) infos.add(info);
+      }
+    }
+    return AccountBalance(isAvailable: json['is_available'] == true, infos: infos);
+  }
+}
+
+/// 单个币种的余额明细。
+///
+/// 金额一律按接口原样用字符串保存：官方按货币精度给值，转 double 再显示容易丢精度。
+class BalanceInfo {
+  const BalanceInfo({
+    required this.currency,
+    required this.totalBalance,
+    required this.grantedBalance,
+    required this.toppedUpBalance,
+  });
+
+  /// 币种，如 `CNY`。
+  final String currency;
+
+  /// 总余额 = 赠送 + 充值。
+  final String totalBalance;
+
+  /// 赠送余额（尚未用完的赠款）。
+  final String grantedBalance;
+
+  /// 充值余额。
+  final String toppedUpBalance;
+
+  static BalanceInfo? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    String s(Object? v) => v == null ? '0' : v.toString();
+    final currency = raw['currency'];
+    return BalanceInfo(
+      currency: currency is String && currency.isNotEmpty ? currency : 'CNY',
+      totalBalance: s(raw['total_balance']),
+      grantedBalance: s(raw['granted_balance']),
+      toppedUpBalance: s(raw['topped_up_balance']),
+    );
+  }
 }
 
 /// 计费：区分高峰/空闲时段，并计入缓存命中折扣。
