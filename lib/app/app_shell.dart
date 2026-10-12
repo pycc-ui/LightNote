@@ -40,6 +40,7 @@ class _HomeShellState extends State<HomeShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
+        indicatorColor: Colors.transparent,
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.edit_outlined),

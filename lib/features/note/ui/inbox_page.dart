@@ -462,23 +462,46 @@ class _FeedSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(
-        AppSpacing.md,
-        AppSpacing.sm,
-        AppSpacing.md,
-        AppSpacing.lg,
-      ),
-      itemCount: kFeedBatchSize,
-      separatorBuilder: (_, __) => const SizedBox(height: kFeedCardGap),
-      itemBuilder: (_, __) => Container(
-        height: 200,
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: AppRadius.cardRadius,
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 一行状态文字：几秒的等待要"看得出来在干活"，而不是像卡住了。
+        // 静态文字、不加无限动画（避免 pumpAndSettle 永不收敛）。
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md,
+            AppSpacing.md,
+            AppSpacing.md,
+            AppSpacing.sm,
+          ),
+          child: Text(
+            '正在用你的笔记生成卡片…',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
         ),
-      ),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              0,
+              AppSpacing.md,
+              AppSpacing.lg,
+            ),
+            itemCount: kFeedBatchSize,
+            separatorBuilder: (_, __) => const SizedBox(height: kFeedCardGap),
+            itemBuilder: (_, __) => Container(
+              height: 200,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: AppRadius.cardRadius,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

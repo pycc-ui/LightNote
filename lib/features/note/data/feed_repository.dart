@@ -20,19 +20,30 @@ const kFeedBatchSize = 3;
 
 /// 后台常备几张。低于这个数就在取完一屏后补。
 ///
-/// 取 12 = **4 屏余量**。用户连刷 3~4 次都不用等生成
-/// （生成一批要 5~10 秒，而连刷几次只要几秒）。
-const kFeedPoolTarget = 12;
+/// 取 20 ≈ 6~7 屏余量：用户连着刷好几次都不用等生成。
+/// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kFeedGenerateCount] 张），
+/// 所以池子是随着用户下拉逐步涨到这个数的。
+const kFeedPoolTarget = 20;
 
-/// 一次请求生成几张。
+/// 一次请求生成几张（后台补池用）。
 ///
-/// 比 [kFeedBatchSize] 大得多：一次请求拿 9 张，比分三次各拿 3 张
-/// 省两次往返，token 成本几乎一样（素材 prompt 只发一次）。
-///
-/// **不能无限大**：一条正文 400~800 字，9 条的 JSON 已经接近 8192 token
-/// 的输出上限，再多会被截断（截断后 JSON 解析失败，整批白烧）。
+/// 比 [kFeedBatchSize] 大：一次多拿几张，省往返（素材 prompt 只发一次）。
+/// 但**不能太大**：每张正文 400~800 字，张数越多 JSON 输出越长、越慢，而且
+/// 逼近 8192 的输出上限后会被截断（截断即 JSON 解析失败，整批白烧）。
 /// 配套见 `AiRepository.generateFeedNotes` 的 `maxTokens`。
-const kFeedGenerateCount = 9;
+const kFeedGenerateCount = 5;
+
+/// 无预留（第一次进、或上次没留成）时，首屏先只生成几张。
+///
+/// 取一屏：生成 3 张比一次 9 张快得多，先让用户看到内容，剩下的丢后台补池
+/// （见 [FeedRepository.warmUpIfNeeded]）。有预留时这条不生效——预留本来就是秒出。
+const kFeedFirstScreenCount = kFeedBatchSize;
+
+/// 摘要的并发生成度。
+///
+/// 摘要生成是**网络等待**、不是 CPU，几路并发就能把 N 篇的串行等待压到约
+/// `⌈N / 并发度⌉` 倍。取 4：够快，又不容易触发服务端限流。
+const _summaryParallelism = 4;
 
 /// 每次启动给**下次**预留几张（存进 `feed_reserve` 表）。
 ///
@@ -42,7 +53,7 @@ const kFeedReserveSize = 6;
 
 /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
 ///
-/// 取 12（比一屏 3 张大、也比一次生成 9 张大）：连续两批卡片的素材
+/// 取 12（比一屏 3 张大、也比一次生成 5 张大）：连续两批卡片的素材
 /// 不会重叠，用户不会连着看到同一篇笔记的内容。
 ///
 /// 只记**笔记**级别、只记内存：不记"用过哪一块"
@@ -64,7 +75,7 @@ const kRecentChunkKeep = 60;
 
 /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
 ///
-/// 取 40 ≈ 4~5 批：够覆盖池子（最多 24 张）+ 预留（6 张）+ 刚看过的，
+/// 取 40：够覆盖池子（[kFeedPoolTarget] ≈ 20）+ 预留（6）+ 刚看过的，
 /// 又不至于让 prompt 里那串「别重复」清单太长。
 const kRecentTitleKeep = 40;
 
@@ -298,12 +309,15 @@ class FeedRepository {
   /// 用过的块也不记：一篇 10 块，连抽两次命中同一块只有 10%；
   /// 而且同一块每次生成的卡片本来就不同。**用一点随机性换零状态管理。**
   ///
-  /// ## 摘要生成失败会退回正文截断
+  /// 摘要生成失败会退回正文截断（见 [_ensureSummary]），保证不会因为一次摘要失败
+  /// 就生成不出卡片。
   ///
-  /// 见 [_ensureSummary]：保证不会因为一次摘要失败就生成不出卡片。
+  /// [allowGenerateSummary] 为 false 时**不现场调摘要接口**：缺摘要的笔记先用
+  /// 正文截断兜底，真正的摘要丢后台补（首屏提速用，见 `warmUpIfNeeded`）。
   Future<List<FeedMaterial>> gatherSources(
     FeedSource source, {
     int limit = 8,
+    bool allowGenerateSummary = true,
   }) async {
     // 多取一些候选：来源冷却会筛掉最近用过的，得有备选可挑。
     final notes = await _db.notesForFeed(
@@ -348,10 +362,27 @@ class FeedRepository {
     }
     if (chunksOf.isEmpty) return const [];
 
-    // 只给真正会用到的笔记生成摘要
-    final summaries = <String, String>{};
-    for (final id in chunksOf.keys) {
-      summaries[id] = cached[id] ?? await _ensureSummary(noteOf[id]!);
+    // 只给真正会用到的笔记生成摘要。命中的直接用缓存；缺的**并发生成**
+    // （这是网络等待，串行会把首屏拖成 N 倍）。
+    final summaries = <String, String>{
+      for (final id in chunksOf.keys)
+        if (cached[id] != null) id: cached[id]!,
+    };
+    final missing = [
+      for (final id in chunksOf.keys)
+        if (cached[id] == null) id,
+    ];
+    if (allowGenerateSummary) {
+      await _runBounded(missing, _summaryParallelism, (id) async {
+        summaries[id] = await _ensureSummary(noteOf[id]!);
+      });
+    } else {
+      // 首屏路径（[allowGenerateSummary] = false）：不等摘要，先用正文截断兜底，
+      // 真正的摘要丢后台补（摘要只作背景，实测对卡片质量影响很小）。
+      for (final id in missing) {
+        summaries[id] = _fallbackSummary(noteOf[id]!);
+      }
+      _backfillSummaries([for (final id in missing) noteOf[id]!]);
     }
 
     // ---- 轮转取素材，凑够 [limit] 份 ----
@@ -465,8 +496,24 @@ class FeedRepository {
     } catch (_) {
       // 落到下面退回正文
     }
-    // 降级：正文截断到摘要上限，形状与摘要一致
-    return safeTruncate(note.content.trim(), AiLimits.summaryHardMax);
+    return _fallbackSummary(note);
+  }
+
+  /// 摘要的降级文本：正文截断到摘要上限，形状与摘要一致。
+  String _fallbackSummary(Note note) =>
+      safeTruncate(note.content.trim(), AiLimits.summaryHardMax);
+
+  /// 后台补摘要（fire-and-forget）：把首屏兜底用过的笔记真正总结一遍并落库。
+  ///
+  /// 并发上限与按需路径一致；失败吞掉（[_ensureSummary] 内部已兜底），
+  /// 不影响任何界面。
+  void _backfillSummaries(List<Note> notes) {
+    if (notes.isEmpty) return;
+    _runBounded(notes, _summaryParallelism, (n) async {
+      await _ensureSummary(n);
+    }).catchError((Object e) {
+      debugPrint('[Feed] 后台补摘要失败（忽略）：$e');
+    });
   }
 
   // ==========================================================================
@@ -484,7 +531,7 @@ class FeedRepository {
   ///
   /// 所以第 3 步在每次取卡片后都会跑，池子是在"还有货"的时候就开始补的。
   /// 真正决定"用户能连刷几次不用等"的是 [kFeedPoolTarget]：
-  /// 常备 12 张 = 4 屏，用户连刷 4~5 次才会碰到池子空。
+  /// 常备 20 张 ≈ 6~7 屏，用户连刷好几次才会碰到池子空。
   ///
   /// 第 1 步的等待无法完全消除——池子真空时只能等，否则就要给用户
   /// 看空白（比等更糟）。所以只能靠把池子备厚来避免走到那一步。
@@ -540,7 +587,7 @@ class FeedRepository {
     // 口径：
     //   · 缺口 = `kFeedPoolTarget - 池子里现有`（所以"只差一点"就只要一点）
     //   · 下限 `kFeedBatchSize`：一次至少要够用户刷一屏，否则"补了等于没补"
-    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要 12 张
+    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要太多张
     final need = (kFeedPoolTarget - _pool.length)
         .clamp(kFeedBatchSize, kFeedGenerateCount);
 
@@ -650,22 +697,22 @@ class FeedRepository {
   // ==========================================================================
   // 跨启动预留
   //
-  // ## 流程（每次进入都会跑）
+  // 流程（每次进入都会跑）：
   //
   // ```
   // ① 先试着从 feed_reserve 表里拉上次存的（最多 kFeedReserveSize 张，消费即清）
-  // ② 有 → 就用它当这一屏，**这次不申请**；同时后台 refill() 按**缺口**补池
-  // ③ 没有 → 才申请：当屏 kFeedBatchSize 张，其余进池子/留给下次
+  // ② 有 → 就用它当这一屏，这次不申请；同时后台 refill() 按缺口补池
+  // ③ 没有 → 只生成首屏 kFeedFirstScreenCount 张（不等摘要），
+  //         其余（补池 + 给下次留预留 + 回填摘要）全丢后台
   // ```
   //
   // 于是：
-  //   · 库里有预留 → 进入**秒出**，不花一次生成的等待
-  //   · 库里没有   → 当场申请（第一次装 App 必然走这条）
+  //   · 库里有预留 → 进入秒出，不花一次生成的等待
+  //   · 库里没有   → 当场只生成一屏（比一次 9 张快得多），剩下的后台补
+  //     （第一次装 App 必然走这条）
   //
-  // ## 它不影响列表的追加/替换
-  //
-  // 列表行为由 `InboxPage._loadBatch(first:)` 决定（首次替换、
-  // 下拉前向追加）。这里只负责"池子里有什么牌"。
+  // 它不影响列表的追加/替换：列表行为由 `InboxPage._loadBatch(first:)` 决定
+  // （首次替换、下拉前向追加），这里只负责"池子里有什么牌"。
   // ==========================================================================
 
   /// 进入时的填充。**优先用数据库里的预留**，没有才申请。
@@ -700,28 +747,27 @@ class FeedRepository {
         return true;
       }
 
-      // ---- ③ 没有预留：才申请 ----
+      // ---- ③ 没有预留：先只生成一屏，秒上屏，剩下的丢后台补 ----
+      //
+      // 不现场等摘要（allowGenerateSummary: false）：缺摘要先用正文截断兜底，
+      // 真正的摘要丢后台补。生成 [kFeedFirstScreenCount] 张比一次 9 张快得多。
       final materials = await gatherSources(
         source,
-        limit: kFeedGenerateCount,
+        limit: kFeedFirstScreenCount,
+        allowGenerateSummary: false,
       );
       if (materials.isEmpty) return false; // 没素材，生成不出
 
       final drafts = await _ai.generateFeedNotes(
         materials,
-        count: kFeedGenerateCount,
+        count: kFeedFirstScreenCount,
       );
       _pool.addAll(drafts);
 
-      // 先给下次留好。放在 await 路径上是刻意的：**写库要写稳**，
-      // 否则用户进入后立刻杀掉 App，这次就没留下预留，下次又得等生成。
-      await _reserveTail();
-
-      // 再把池子补起来。**这一行不能省**：
-      // `_reserveTail` 抽走 kFeedReserveSize 张之后，池子可能只剩一屏，
-      // 首屏一取就空 —— 用户第一次下拉就要等生成。
-      // 不 await：它在后台跑，不影响首屏显示。
-      _refillInBackground(source);
+      // 再把池子补起来、并给下次留预留。不 await：它在后台跑，不影响首屏。
+      // `_fillPoolForNextTime` 内部是 refill + _reserveTail，顺带会把上面
+      // 兜底那批摘要真正生成出来。
+      _fillPoolForNextTime(source);
       return true;
     } catch (_) {
       // 失败：不抛，但必须把已取出的预留放回池子——
@@ -786,4 +832,27 @@ class FeedRepository {
     await _db.replaceFeedReserve(tail);
     _pool.removeRange(_pool.length - take, _pool.length);
   }
+}
+
+/// 以最多 [maxConcurrent] 个并发跑 [task]，把 [items] 逐个喂进去，全部跑完才返回。
+///
+/// 用"多个 worker 抢同一个迭代器"而不是 `Future.wait(全部)`：后者会**同时**
+/// 发起所有请求，容易被服务端限流（429），而摘要是网络等待、本来就只需几路。
+///
+/// 单个任务抛错不会中断其它（由 worker 各自 `await`）；调用方若需要"失败不影响
+/// 结果"，让 [task] 自己吞异常即可。
+Future<void> _runBounded<T>(
+  Iterable<T> items,
+  int maxConcurrent,
+  Future<void> Function(T) task,
+) async {
+  final it = items.iterator;
+  Future<void> worker() async {
+    while (it.moveNext()) {
+      await task(it.current);
+    }
+  }
+
+  final n = maxConcurrent < 1 ? 1 : maxConcurrent;
+  await Future.wait(List.generate(n, (_) => worker()));
 }

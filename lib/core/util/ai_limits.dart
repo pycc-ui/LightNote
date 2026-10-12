@@ -14,14 +14,14 @@ class AiLimits {
   // ---- 摘要 ----
 
   /// 摘要目标长度（字）
-  static const summaryTargetMin = 150;
-  static const summaryTargetMax = 250;
+  static const summaryTargetMin = 120;
+  static const summaryTargetMax = 200;
 
   /// 摘要硬上限（字）。超过就截断。
   ///
   /// 提示词里也要求不超过这个数，但不能只靠提示词——模型基本不守字数
   /// （要求 60 字会返回 160 字），所以代码里必须兜底。
-  static const summaryHardMax = 300;
+  static const summaryHardMax = 220;
 
   // ---- 标签 ----
 

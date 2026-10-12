@@ -132,7 +132,7 @@ class AiPrompts {
 - 特别保留那些**有启发性、反直觉、具体**的点（数字、反例、可操作的技巧）
 - 不要泛泛而谈，不要写"本文介绍了……"这类空话
 
-长度要求：**150~250 字**，**绝对不超过 300 字**。
+长度要求：**120~200 字**，**绝对不超过 220 字**。
 
 格式要求：
 - 只用简洁的陈述句，连成一段
@@ -260,7 +260,7 @@ cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**�
       sb.writeln('【素材 ${i + 1}】');
       sb.writeln('标题：${m.title.isEmpty ? '（无标题）' : m.title}');
       sb.writeln('摘要（整体背景，仅作参考）：');
-      sb.writeln(_clip(m.summary, limit: 800));
+      sb.writeln(_clip(m.summary, limit: AiLimits.summaryHardMax));
       sb.writeln('原文切片（卡片必须基于它）：');
       sb.writeln(_clip(m.chunk, limit: 1200));
       sb.writeln();

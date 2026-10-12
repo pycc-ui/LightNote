@@ -138,12 +138,10 @@ class AiRepository {
           thinking: deepThinking,
           // 额度要跟"一次生成几张 × 每张多长"匹配。
           //
-          // 一次给 9 份素材（= 最多 9 张卡），每张正文 400-800 字：
-          // 最坏 9 × 800 ≈ 7200 token，加 JSON 结构开销会顶到 8192 边缘。
-          // 而**额度不够会被截断，截断后 JSON 解析失败 = 整批白烧**，
-          // 所以这里给足余量。
+          // 一次给 kFeedGenerateCount(5) 份素材（= 最多 5 张卡），每张正文 400-800 字：
+          // 最坏 5 × 800 ≈ 4000 token，加 JSON 结构开销也在 8192 以内。给到 16384
+          // 是留足余量——**额度不够会被截断，截断后 JSON 解析失败 = 整批白烧**。
           //
-          // 上限不是瓶颈：`DeepSeekConfig.maxOutputTokens = 384000`。
           // 调大 `kFeedGenerateCount` 时这里要跟着一起调。
           maxTokens: 16384,
         );
