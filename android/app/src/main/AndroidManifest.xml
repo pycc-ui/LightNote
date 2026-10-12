@@ -1,10 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 网络（AI 功能需要）。**这是唯一需要的权限。**
-         曾经还声明了 CAMERA / READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE / RECORD_AUDIO，
-         那是模板留下的：代码里既没有拍照、没有相册选图（界面明确「不支持插图」），
-         也没有任何录音实现（产品明确「不做语音输入」）。
-         声明用不到的权限只有两个后果：用户在系统权限页看到麦克风/相机权限而困惑，
-         以及上架审核时解释不清。**真要用相机/相册/录音时再加回来。** -->
+   
     <uses-permission android:name="android.permission.INTERNET"/>
 
     <application

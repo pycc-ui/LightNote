@@ -34,6 +34,20 @@ class AiLimits {
   /// 单个标签的**英文字母**上限
   static const tagMaxLatin = 12;
 
+  // ---- 卡片（AI 生成的轻笔记）----
+
+  /// 卡片**标题**上限（字）。提示词要求 ≤30，这里给一倍余量兜底。
+  ///
+  /// 与 [titleHardMax] 分开：卡片标题是"卡片上唯一显示的文字"，
+  /// 30 字和 200 字在卡片上完全是两种东西，不能共用一个上限。
+  static const feedCardTitleMax = 60;
+
+  /// 卡片**正文**上限（字）。提示词要求 400–800，这里给两倍余量。
+  ///
+  /// 为什么必须有：正文会被收进笔记、也会进 prompt。模型偶尔会跑飞
+  /// （实测有返回几千字的），`feed_reserve` 表不该被一张卡片塞满。
+  static const feedCardBodyMax = 2000;
+
   // ---- 笔记正文（软上限 + 硬保护）----
 
   /// 软上限：超过就轻提示"注意编辑流畅度"
@@ -45,7 +59,11 @@ class AiLimits {
   /// 硬上限：超过就拒绝保存
   static const noteHardBytes = 100 * 1024;
 
-  /// 标题上限（字）。超出截断——标题也会进 prompt。
+  /// 单行短字段的上限（字）：笔记标题、笔记库名、会话标题、卡片标题……
+  ///
+  /// 超出**截断**（不是拒绝）：这类字段进 prompt、也上界面，一个几万字的
+  /// "标题"能直接把一次请求撑爆，而用户真正想表达的早就写完了。
+  /// 凡是"名字/标题"类字段都该走这一个常量，别各写各的数字。
   static const titleHardMax = 200;
 
   /// 按 UTF-8 字节数计算长度。
@@ -193,9 +211,19 @@ String normalizeTag(String raw) {
 /// 而不是让 `prompts.dart` 反向依赖一个 repository。
 String sanitizeTag(String raw) => normalizeTag(raw);
 
-/// `String.characters` 的最小实现（避免为一个扩展引入 characters 包）。
+/// `String.characters` 的最小实现。
 ///
 /// 只处理 BMP + 代理对，对标签这种短文本足够。
+///
+/// ## 为什么不直接用 `characters` 包
+///
+/// 早先这里的注释写的是"避免为一个扩展引入 characters 包"，**那个理由是错的**：
+/// `characters` 本来就在 `pubspec.lock` 里（flutter 带进来的**传递**依赖）。
+/// 真正的理由是**别直接 import 传递依赖** —— 那样上游一改版本就编译不过，
+/// 要 import 就得在 `pubspec.yaml` 里显式声明（本项目对
+/// `path_provider_platform_interface` 就是这么做的）。
+/// 为一个 15 行的扩展多一条直接依赖不划算，所以留着手写版本；
+/// 但**理由要写对**，否则下一个人会以为"这个包不存在"。
 extension _Runes on String {
   Iterable<String> get characters {
     final out = <String>[];

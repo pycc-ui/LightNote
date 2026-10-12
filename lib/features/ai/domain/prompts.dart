@@ -89,9 +89,18 @@ class AiPrompts {
   // 用户提示词构造
   // ---------------------------------------------------------------------------
 
-  /// 单次请求的正文上限（字符）。超过则先截断并提示用户分段，
-  /// 避免请求体过大导致超时或费用失控。
-  static const maxBodyChars = 200000;
+  /// **单篇摘要**输入正文的上限（字符）。
+  ///
+  /// ## 为什么从 200000 改成 20000
+  ///
+  /// 早先这里是 200000，注释写着"避免请求体过大导致费用失控"—— 但那条理由是假的：
+  /// 笔记保存时已经被 100 KB 硬上限挡住（≈3.4 万汉字），所以 20 万字的截断
+  /// **永远触发不了**，等于没有上限。
+  ///
+  /// 现在按**成本**定：摘要是 ≤300 字的概括，给模型 2 万字足够吃下要点，
+  /// 再长只是把 token 花在它已经概括过的内容上。2 万字也是真能触发到的
+  /// （3 万字以上的笔记会被截断），并且在提示里**明说被截断了**。
+  static const summaryInputMaxChars = 20000;
 
   // ==========================================================================
   // 笔记的 AI 摘要（持久化，供卡片流当素材）
@@ -304,11 +313,13 @@ cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**�
       if (item is! Map) continue;
       final d = FeedDraft.fromJson(Map<String, dynamic>.from(item));
       if (!d.isValid) continue;
-      // 标签做规整：模型不守长度，5 汉字 / 12 字母的约束必须在代码里兜底，
-      // 否则卡片上会出现一长串文字当"标签"。
+      // 标题与正文也要兜底：提示词要求"标题 ≤30 字、正文 400–800 字"，
+      // 但模型偶尔会跑飞（实测有返回几千字的），而卡片正文会被收进笔记、
+      // 也会进 prompt，`feed_reserve` 不该被一张卡片塞满。
+      // 与标签同一套思路：**模型的自我约束不算约束，代码里兜底才算**。
       drafts.add(FeedDraft(
-        title: d.title,
-        body: d.body,
+        title: safeTruncate(d.title.trim(), AiLimits.feedCardTitleMax),
+        body: safeTruncate(d.body.trim(), AiLimits.feedCardBodyMax),
         tag: sanitizeTag(d.tag),
       ));
     }
@@ -340,7 +351,7 @@ cards 的顺序要和素材顺序一一对应，**不要合并、不要遗漏**�
       '5. 控制在 300 字以内。\n'
       '直接输出摘要正文，不要任何前缀或标题。';
 
-  static String _clip(String content, {int limit = maxBodyChars}) {
+  static String _clip(String content, {int limit = summaryInputMaxChars}) {
     if (content.length <= limit) return content;
     return '${content.substring(0, limit)}\n\n'
         '（注：原文过长，以上为前 $limit 字，已被截断）';

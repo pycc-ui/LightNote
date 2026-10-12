@@ -1,6 +1,7 @@
 import 'package:uuid/uuid.dart';
 
 import '../../../core/db/app_database.dart';
+import '../../../core/util/ai_limits.dart';
 
 /// 笔记库仓储。
 ///
@@ -30,10 +31,9 @@ class NotebookRepository {
   Future<Notebook> create({String name = '新笔记库'}) async {
     final now = DateTime.now().toUtc();
     final id = _uuid.v4();
-    final clean = name.trim().isEmpty ? '新笔记库' : name.trim();
     await _db.upsertNotebook(NotebooksCompanion.insert(
       id: id,
-      name: clean,
+      name: _cleanName(name),
       createdAt: now,
       updatedAt: now,
     ));
@@ -42,7 +42,21 @@ class NotebookRepository {
 
   Future<void> rename(String id, String name) async {
     if (name.trim().isEmpty) return;
-    await _db.renameNotebook(id, name);
+    await _db.renameNotebook(id, _cleanName(name));
+  }
+
+  /// 笔记库名的**唯一收口处**：界面（新建/重命名）与 AI 的
+  /// `createNotebook` / `renameNotebook` 都走上面两个方法，所以上限只写一次。
+  ///
+  /// 上限与"标题"共用 [AiLimits.titleHardMax]：这类**单行短字段**会进 prompt、
+  /// 也要上界面，几百字的"名字"没有意义，只会把界面撑坏。
+  /// （笔记库名原先没有任何上限。）
+  static String _cleanName(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return '新笔记库';
+    return t.length > AiLimits.titleHardMax
+        ? safeTruncate(t, AiLimits.titleHardMax)
+        : t;
   }
 
   /// 删除笔记库。里面的笔记会回到「我的轻笔记」，不会跟着被删。

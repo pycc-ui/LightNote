@@ -7,6 +7,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lightnote/core/db/app_database.dart';
 import 'package:lightnote/core/db/models.dart';
+import 'package:lightnote/core/util/ai_limits.dart';
 import 'package:lightnote/core/util/text_utils.dart';
 import 'package:lightnote/features/ai/domain/prompts.dart';
 import 'package:lightnote/features/note/data/notebook_repository.dart';
@@ -75,6 +76,40 @@ void main() {
 
     test('完全无法解析返回 null', () {
       expect(AiPrompts.extractJson('不是 JSON'), isNull);
+    });
+  });
+
+  group('AiPrompts.parseFeedCards 的长度兜底', () {
+    // 提示词要求"标题 ≤30 字、正文 400–800 字"，但**模型的自我约束不算约束**：
+    // 实测会返回几千字的正文，而卡片正文会被收进笔记、也会进 prompt。
+    // （卡片字段上限的完整清单见《软件理念设计》第 3 节。）
+
+    test('标题/正文超长各自截断，标签照常规整', () {
+      final raw = jsonEncode({
+        'cards': [
+          {'title': '标' * 200, 'body': '正' * 5000, 'tag': '#记忆'},
+        ],
+      });
+
+      final cards = AiPrompts.parseFeedCards(raw);
+
+      expect(cards, hasLength(1));
+      // `safeTruncate` 截到上限并补省略号（"被截了"的可见标记）
+      expect(cards!.single.title, '${'标' * AiLimits.feedCardTitleMax}…');
+      expect(cards.single.body, '${'正' * AiLimits.feedCardBodyMax}…');
+      expect(cards.single.tag, '记忆', reason: '标签仍然剥掉 # 号');
+    });
+
+    test('没超长的原样通过（别把正常卡片也改了）', () {
+      final raw = jsonEncode({
+        'cards': [
+          {'title': '抄书是最没用的努力', 'body': '正文内容。', 'tag': '笔记法'},
+        ],
+      });
+
+      final cards = AiPrompts.parseFeedCards(raw);
+      expect(cards!.single.title, '抄书是最没用的努力');
+      expect(cards.single.body, '正文内容。');
     });
   });
 

@@ -142,12 +142,15 @@ void main() {
     testWidgets('已加入时图标换成移除样式', (tester) async {
       await pumpCard(tester, tag: '记忆', added: true);
       expect(find.byIcon(Icons.remove_circle_outline), findsOneWidget);
-      expect(find.byIcon(Icons.bolt_outlined), findsNothing);
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
     });
 
-    testWidgets('未加入时是闪电图标', (tester) async {
+    testWidgets('未加入时是编辑图标（不是移除图标）', (tester) async {
+      // 图标换过一次：原先用 `Icons.bolt_outlined`（闪电），现在用
+      // `Icons.edit_outlined`（铅笔）。这条只保证"两种状态长得不一样"，
+      // 具体哪个图标由产品决定 —— 换了图标就同步改这里的一个常量。
       await pumpCard(tester, tag: '记忆', added: false);
-      expect(find.byIcon(Icons.bolt_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
       expect(find.byIcon(Icons.remove_circle_outline), findsNothing);
     });
   });

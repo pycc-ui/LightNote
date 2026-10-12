@@ -42,6 +42,19 @@ class TextUtils {
     return cjk + latin;
   }
 
+  /// **Markdown 正文的字数**（先剥 Markdown 再数）。
+  ///
+  /// ## 为什么必须只有这一个入口
+  ///
+  /// `notes.wordCount` 有三个写入方（编辑页保存、AI 的 `createNote` / `updateNote`）。
+  /// 早先编辑页走的是"剥 Markdown 后中文按字 + 英文按词"，而 AI 那条路写的是
+  /// `content.length`（UTF-16 码元数，连代码块里的符号都算）—— 同一篇笔记，
+  /// 手写和 AI 写出来的字数口径不一样，列表里显示的数字就没法比。
+  ///
+  /// 所以字数这件事收敛到这一个函数：**先 [toPlainText]，再 [wordCount]**。
+  static int wordCountOfMarkdown(String markdown) =>
+      wordCount(toPlainText(markdown));
+
   /// 生成列表页预览文本
   static String excerpt(String content, {int max = 200}) {
     final plain = toPlainText(content).replaceAll('\n', ' ');

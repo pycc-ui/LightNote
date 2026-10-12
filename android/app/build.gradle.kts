@@ -87,6 +87,22 @@ android {
             }
         }
     }
+    
+    applicationVariants.all {
+        outputs.all {
+            // 确保输出文件是 .apk 类型
+            if (this is com.android.build.gradle.internal.api.BaseVariantOutputImpl && outputFileName.endsWith(".apk")) {
+                val appName = "LightNote"
+                val versionName = defaultConfig.versionName
+                val buildType = name // variant.name
+                // 拼接新文件名
+                val newApkName = "${appName}-v${versionName}-${buildType}.apk"
+                
+                // 应用新文件名
+                outputFileName = newApkName
+            }
+        }
+    }
 }
 
 kotlin {

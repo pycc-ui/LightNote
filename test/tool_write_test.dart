@@ -426,6 +426,105 @@ void main() {
     });
   });
 
+  group('★ AI 写笔记受**与编辑页同一套**上限约束', () {
+    // 编辑页在 100 KB 处拒绝保存、标题超 200 字截断；AI 走的是另一条写入路径，
+    // 早先完全不受约束（同一张表两条路，一条有上限一条没有）。
+
+    test('createNote：正文到硬上限 → 失败、**不落盘、也不弹确认**', () async {
+      final (executor: ex, seen: seen) = agreeing();
+      // 100 KB 硬上限：中文一字 3 字节，写 40 万字肯定超
+      final huge = '很长的正文。' * 20000;
+
+      final r = await ex.execute('createNote', {
+        'title': '太大',
+        'content': huge,
+      });
+
+      expect(r.ok, isFalse);
+      expect(r.error, contains('硬上限'));
+      expect(seen, isEmpty, reason: '注定写不进去的事不该让用户点确认');
+      expect(await db.allActiveNotes(), isEmpty, reason: '一条都不该写进去');
+    });
+
+    test('createNote：标题超 200 字被**截断**（与编辑页一样，不是拒绝）', () async {
+      final (executor: ex, seen: _) = agreeing();
+      final longTitle = '标' * 260;
+
+      final data = okData(await ex.execute('createNote', {
+        'title': longTitle,
+        'content': '正文。',
+      }));
+
+      // `safeTruncate` 截到 200 字并**补一个省略号**（那是给用户看的"被截了"标记）
+      expect(data['title'], '${'标' * 200}…');
+    });
+
+    test('updateNote：改完超上限 → 失败，正文一个字都不改', () async {
+      final note = await notes.createInbox(title: 'N', content: '原文。');
+      final (executor: ex, seen: _) = agreeing();
+
+      final r = await ex.execute('updateNote', {
+        'noteId': note.id,
+        'expectedText': '原文。',
+        'newContent': '很长的正文。' * 20000,
+      });
+
+      expect(r.ok, isFalse);
+      expect(r.error, contains('硬上限'));
+      expect((await notes.byId(note.id))!.content, '原文。');
+    });
+
+    test('appendToNote：追加后超上限 → 失败（不然"只加一点"能绕过去）', () async {
+      final note = await notes.createInbox(title: 'N', content: '很长的正文。' * 20000);
+      final (executor: ex, seen: _) = agreeing();
+
+      final r = await ex.execute('appendToNote', {
+        'noteId': note.id,
+        'text': '再来一句。',
+      });
+
+      expect(r.ok, isFalse);
+      expect(r.error, contains('硬上限'));
+      expect((await notes.byId(note.id))!.content, '很长的正文。' * 20000);
+    });
+  });
+
+  group('★ 派生字段的口径与编辑页完全一致', () {
+    // `notes.excerpt` / `notes.wordCount` 一列多写：编辑页与 AI 两条路。
+    // 早先 AI 那条用的是"自己那套"（预览 80 字、字数 content.length），
+    // 于是同一篇笔记，AI 写过和人改过在列表里显示的数字不一样。
+
+    test('AI 写过的笔记，excerpt / wordCount 与 NoteRepository 写出来的一致', () async {
+      final (executor: ex, seen: _) = agreeing();
+      const md = '# 标题\n\n**粗体**与 `代码`，还有 [链接](http://x) 与 English words.';
+
+      final data = okData(await ex.execute('createNote', {'content': md}));
+      final byAi = (await notes.byId('${data['noteId']}'))!;
+
+      // 同样内容由 `NoteRepository` 直接写一份作对照
+      final byRepo = await notes.createInbox(title: '', content: md);
+
+      expect(byAi.excerpt, byRepo.excerpt);
+      expect(byAi.wordCount, byRepo.wordCount);
+      // 顺手钉一下口径本身：Markdown 噪声（`#`、`**`、链接 URL）不该被算进去
+      expect(byAi.excerpt, isNot(contains('**')));
+      expect(byAi.excerpt, isNot(contains('http')));
+    });
+  });
+
+  group('笔记库名的上限只有一处收口', () {
+    test('超长名字被截断（界面与 AI 的 createNotebook 走同一个方法）', () async {
+      final repo = NotebookRepository(db);
+      // 截到 200 字 + 省略号（与标题同一套 `safeTruncate`）
+      final nb = await repo.create(name: '库' * 260);
+      expect(nb.name, '${'库' * 200}…');
+
+      final (executor: ex, seen: _) = agreeing();
+      final data = okData(await ex.execute('createNotebook', {'name': '库' * 300}));
+      expect(data['name'], '${'库' * 200}…');
+    });
+  });
+
   group('写完之后切片跟着走', () {
     test('改完正文，切片与新的正文一致（搜索才不会指错）', () async {
       final note = await notes.createInbox(

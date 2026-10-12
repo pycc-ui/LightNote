@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/db/app_database.dart';
+import '../../../core/util/text_utils.dart';
 import 'note_chunk_repository.dart';
 
 /// 笔记仓储：所有写操作集中在这里，保证 updatedAt / excerpt / wordCount
@@ -10,6 +11,14 @@ import 'note_chunk_repository.dart';
 /// 「轻笔记」与「笔记库」是同一张表的两种视图，靠 `isInbox` 与 `notebookId` 区分：
 ///   轻笔记：isInbox = true 且 notebookId 为空
 ///   笔记库：isInbox = false（已归档），可归属某个笔记库
+///
+/// ## 派生字段的口径只有一处实现
+///
+/// `excerpt` / `wordCount` 走 [TextUtils]（`core/util/text_utils.dart`）。
+/// 本文件底层早先还抄过一份同名的私有实现，理由写的是"core 层不该反向依赖
+/// feature 层"—— 那个理由**读错了依赖方向**：`text_utils` 就在 `core/util/`，
+/// `features/ → core/` 正是允许的方向。于是同一篇笔记由页面写和由 AI 写，
+/// 字数与预览的口径不一样。
 class NoteRepository {
   NoteRepository(this._db) : _chunks = NoteChunkRepository(_db);
 
@@ -100,8 +109,8 @@ class NoteRepository {
       content: Value(content),
       notebookId: Value(notebookId),
       isInbox: Value(isInbox),
-      excerpt: Value(_excerpt(content)),
-      wordCount: Value(_wordCount(content)),
+      excerpt: Value(TextUtils.excerpt(content)),
+      wordCount: Value(TextUtils.wordCountOfMarkdown(content)),
       createdAt: now,
       updatedAt: now,
     ));
@@ -125,8 +134,8 @@ class NoteRepository {
       id: Value(id),
       title: Value(nextTitle),
       content: Value(nextContent),
-      excerpt: Value(_excerpt(nextContent)),
-      wordCount: Value(_wordCount(nextContent)),
+      excerpt: Value(TextUtils.excerpt(nextContent)),
+      wordCount: Value(TextUtils.wordCountOfMarkdown(nextContent)),
       createdAt: Value(existing.createdAt),
       updatedAt: Value(DateTime.now().toUtc()),
       deletedAt: Value(existing.deletedAt),
@@ -206,57 +215,4 @@ class NoteRepository {
   }
 
   Future<void> setPinned(String id, bool pinned) => _db.setPinned(id, pinned);
-}
-
-// ============================================================================
-// 派生字段计算
-//
-// 这两个函数刻意留在本文件而不是复用 core/util/text_utils.dart：
-// text_utils 里的同族函数返回 Color/extension，属于 UI 侧工具；
-// 而 core 层（含 app_database）不应该反向依赖 feature 层。
-// 纯文本处理就几十行，重复实现比引入反向依赖更干净。
-// ============================================================================
-
-final _mdNoise = RegExp(
-  r'```[\s\S]*?```' // 代码块
-  r'|!\[[^\]]*\]\([^)]*\)' // 图片
-  r'|\[([^\]]*)\]\([^)]*\)' // 链接保留文字
-  r'|^\s{0,3}#{1,6}\s*' // 标题标记
-  r'|[*_~`>|-]+', // 强调/引用/列表符号
-  multiLine: true,
-);
-
-final _linkPattern = RegExp(r'\[([^\]]*)\]\([^)]*\)');
-
-/// Markdown → 纯文本（用于预览与字数统计）
-String _toPlainText(String markdown) {
-  final s = markdown.replaceAllMapped(_mdNoise, (m) {
-    final link = _linkPattern.firstMatch(m.group(0)!);
-    return link?.group(1) ?? '';
-  });
-  return s.replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
-}
-
-String _excerpt(String content, {int max = 200}) {
-  final plain = _toPlainText(content).replaceAll('\n', ' ');
-  if (plain.length <= max) return plain;
-  return '${plain.substring(0, max)}…';
-}
-
-/// 中文按字计、英文按词计。
-/// 直接按空格切会把整段中文算成 1 个「词」，所以必须分开处理。
-int _wordCount(String content) {
-  final text = _toPlainText(content);
-  final cjk = RegExp(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]')
-      .allMatches(text)
-      .length;
-  final latin = RegExp(r'[A-Za-z0-9]+')
-      .allMatches(
-        text.replaceAll(
-          RegExp(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]'),
-          ' ',
-        ),
-      )
-      .length;
-  return cjk + latin;
 }

@@ -534,20 +534,29 @@ class FeedRepository {
   }
 
   Future<void> _doRefill(FeedSource source) async {
-    // 素材尽量凑够 kFeedGenerateCount 份（笔记少就从同一篇多取几块）
-    final materials = await gatherSources(
-      source,
-      limit: kFeedGenerateCount,
-    );
+    // **按缺口要，不固定要一批**。
+    //
+    // 早先这里无论池子里有多少，一次都要 `kFeedGenerateCount`（9）张；
+    // 而池子只差 2 张就满的时候，那 7 张纯属白烧 token。
+    //
+    // 现在的口径：
+    //   · 缺口 = `kFeedPoolTarget - 池子里现有`（所以"只差一点"就只要一点）
+    //   · 下限 `kFeedBatchSize`：一次至少要够用户刷一屏，否则"补了等于没补"
+    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要 12 张，
+    //     与改之前一样是 9 张
+    final need = (kFeedPoolTarget - _pool.length)
+        .clamp(kFeedBatchSize, kFeedGenerateCount);
+
+    // 素材尽量凑够 need 份（笔记少就从同一篇多取几块）
+    final materials = await gatherSources(source, limit: need);
     if (materials.isEmpty) return; // 没素材，调用方据此显示空状态
 
     // **张数单独说**：素材凑不够时靠提示词让模型从不同角度补足，
-    // 保证这次生成还是 kFeedGenerateCount 张，池子能一次补满。
-    // 同时把"已有的标题"告诉模型，让它避开——笔记少时切片会反复取到，
-    // 只靠换块治不了重复。
+    // 保证这次生成还是 need 张。同时把"已有的标题"告诉模型，让它避开——
+    // 笔记少时切片会反复取到，只靠换块治不了重复。
     final drafts = await _ai.generateFeedNotes(
       materials,
-      count: kFeedGenerateCount,
+      count: need,
       avoidTitles: existingTitles(),
     );
     _pool.addAll(dropSimilarDrafts(drafts, against: _recentTitles));
@@ -647,10 +656,9 @@ class FeedRepository {
   // ## 流程（每次进入都会跑）
   //
   // ```
-  // ① 先试着从 feed_reserve 表里拉上次存的 3 条（消费即清）
-  // ② 有 → 就用它当这一屏，**这次不申请**；同时后台申请新的 6 张
-  //        给下拉刷新用（前 3 张进池子，后 3 张入库留给再下次）
-  // ③ 没有 → 才申请 6 张：前 3 张当屏，后 3 张入库留给下次
+  // ① 先试着从 feed_reserve 表里拉上次存的（最多 kFeedReserveSize 张，消费即清）
+  // ② 有 → 就用它当这一屏，**这次不申请**；同时后台 refill() 按**缺口**补池
+  // ③ 没有 → 才申请：当屏 kFeedBatchSize 张，其余进池子/留给下次
   // ```
   //
   // 于是：

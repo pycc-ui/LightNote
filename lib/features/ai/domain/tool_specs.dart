@@ -155,11 +155,13 @@ final kCoreTools = <AgentTool>[
     spec: ToolSpec(
       name: 'createNote',
       description: '新建一条笔记。**只在用户明确要求"记下来/新建"时用**，'
-          '不要为了"整理"而擅自建笔记。',
+          '不要为了"整理"而擅自建笔记。'
+          '一篇正文**不超过 80 KB**（约 2.7 万汉字），太长会被 App 拒绝——'
+          '内容多请拆成多篇，而不是硬塞进一篇。',
       parameters: _obj(
         {
-          'title': _str('标题，没有就给空串'),
-          'content': _str('正文（Markdown）'),
+          'title': _str('标题，没有就给空串；超 200 字会被截断'),
+          'content': _str('正文（Markdown），≤80 KB；再长请分多篇'),
           'notebookId': _str('放进哪个笔记库；不填就是「我的轻笔记」'),
         },
         required: ['content'],
@@ -173,13 +175,14 @@ final kCoreTools = <AgentTool>[
       name: 'updateNote',
       description: '修改一条笔记的某一段。**必须给 expectedText**（要改的那段原文），'
           'App 会先确认这段还在——不在就说明笔记变了，需要重新定位。'
-          '写入前会把「改前 vs 改后」给用户确认。',
+          '写入前会把「改前 vs 改后」给用户确认。'
+          '改完若整篇超过 80 KB 会被拒绝（与用户手写同一个上限）。',
       parameters: _obj(
         {
           'noteId': _str('笔记 id'),
           'expectedText': _str('要替换掉的那段**原文**（用于确认定位没错）'),
           'newContent': _str('替换成什么'),
-          'title': _str('要改标题时给新标题（可选）'),
+          'title': _str('要改标题时给新标题（可选）；超 200 字会被截断'),
         },
         required: ['noteId'],
       ),
@@ -288,7 +291,8 @@ final kCommonTools = <AgentTool>[
       description: '在一条笔记的**末尾追加**一段内容。'
           '**追加就用它，不要用 updateNote 把整篇重写一遍**——'
           '重写要先读到全文，既贵又容易抄漏。'
-          '追加前不需要先读，写入前会把「追加什么」给用户确认。',
+          '追加前不需要先读，写入前会把「追加什么」给用户确认。'
+          '追加后整篇超过 80 KB 会被拒绝，那时请新建一篇。',
       parameters: _obj(
         {
           'noteId': _str('笔记 id'),

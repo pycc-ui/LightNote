@@ -133,29 +133,49 @@ void main() {
     });
   });
 
-  group('保存后：小改动不重切，大改动才切', () {
+  group('保存后：按长度差决定要不要重切', () {
     test('还没切过 → 切', () async {
       final note = await notes.createInbox(title: '长', content: body(20));
       expect(await chunks.onNoteSaved(note.id, note.content), isTrue);
       expect(await db.chunkCount(note.id), greaterThan(0));
     });
 
-    test('**小改动不重切**（偏移留给读时自愈）', () async {
+    test('**内容一字未变 → 不重切**（重复保存不该白干一次切片）', () async {
       final note = await notes.createInbox(title: '长', content: body(20));
       await chunks.rebuild(note.id, note.content);
       final before = (await db.chunksOf(note.id)).map((r) => r.contentHash).toList();
 
-      // 改一个错别字：长度几乎没变
-      final edited = '${note.content}嗯';
-      final did = await chunks.onNoteSaved(note.id, edited);
+      // 同一个正文再保存一次：长度差为 0
+      final did = await chunks.onNoteSaved(note.id, note.content);
 
-      expect(did, isFalse, reason: '小改动不该在这里重切');
+      expect(did, isFalse, reason: '没变就不该重切');
       expect((await db.chunksOf(note.id)).map((r) => r.contentHash).toList(),
           before,
           reason: '片应当原样不动');
     });
 
-    test('长度变化超过 20% → 主动重切', () async {
+    test('**改一个错别字也重切**（`staleRatio = 0`：宁可多切一次）', () async {
+      // 这一条盯的是一个**产品决定**（见 `NoteChunkRepository.staleRatio`）：
+      // 早先阈值是 20%，小改动留给读片时的 hash 自愈；后来改成 0 ——
+      // 因为"改得少"不等于"改得不重要"（纠正一个错别字正是最该立刻生效的改动），
+      // 而自愈只在**有人真的读到那一片**时才发生。
+      //
+      // 代价如实写在这里：每次保存都会重切一次（纯函数 + 一次事务内的删/插），
+      // 换来的是"片永远指向当前正文"。
+      final note = await notes.createInbox(title: '长', content: body(20));
+      await chunks.rebuild(note.id, note.content);
+      final before = (await db.chunksOf(note.id)).map((r) => r.contentHash).toList();
+
+      final edited = '${note.content}嗯';
+      final did = await chunks.onNoteSaved(note.id, edited);
+
+      expect(did, isTrue, reason: '哪怕只多一个字，也要重切');
+      expect((await db.chunksOf(note.id)).map((r) => r.contentHash).toList(),
+          isNot(before),
+          reason: '重切过就不该还是旧 hash（否则等于没切）');
+    });
+
+    test('长度变化很大 → 同样重切', () async {
       final note = await notes.createInbox(title: '长', content: body(20));
       await chunks.rebuild(note.id, note.content);
 

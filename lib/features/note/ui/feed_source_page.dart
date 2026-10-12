@@ -176,7 +176,7 @@ class _FeedSourcePageState extends State<FeedSourcePage> {
                   onChanged: (v) => setState(() => _includeUnfiled = v),
                   title: const Text('包含我的轻笔记'),
                   subtitle: const Text('还没归档到任何笔记库的笔记，也拿来当素材'),
-                  secondary: const Icon(Icons.bolt_outlined),
+                  secondary: const Icon(Icons.edit_outlined),
                 ),
 
                 const Divider(height: 1),

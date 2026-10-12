@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 
 import '../../../core/db/app_database.dart';
+import '../../../core/util/ai_limits.dart';
+import '../../../core/util/text_utils.dart';
 import '../../note/data/note_ai_asset_repository.dart';
 import '../../note/data/notebook_repository.dart';
 import '../../note/data/note_chunk_repository.dart';
@@ -314,6 +316,12 @@ class ToolExecutor {
   ///
   /// 所有修改路径都走它：正文变了而切片不重切的话，搜索与 `readChunk`
   /// 就会指向错位置（而且不会报错）。
+  ///
+  /// ## 派生字段的口径与编辑页**完全一致**
+  ///
+  /// `excerpt` / `wordCount` 走 [TextUtils]，与 `NoteRepository` 用的是同一实现。
+  /// 早先这里自己写了一套（预览 80 字、字数用 `content.length`），于是同一篇笔记
+  /// "AI 写过"和"人改过"在列表里显示的字数与预览不一样。
   Future<void> _writeNote(
     Note before, {
     required String title,
@@ -324,11 +332,11 @@ class ToolExecutor {
       notebookId: Value(before.notebookId),
       title: Value(title),
       content: Value(content),
-      excerpt: Value(_excerptOf(content)),
+      excerpt: Value(TextUtils.excerpt(content)),
       source: Value(before.source),
       isInbox: Value(before.isInbox),
       pinned: Value(before.pinned),
-      wordCount: Value(content.length),
+      wordCount: Value(TextUtils.wordCountOfMarkdown(content)),
       lastAiAt: Value(before.lastAiAt),
       createdAt: Value(before.createdAt),
       updatedAt: Value(DateTime.now().toUtc()),
@@ -337,13 +345,45 @@ class ToolExecutor {
     await _chunks.rebuild(before.id, content);
   }
 
+  /// 落盘前的**同一套上限**（与编辑页逐条对齐）。
+  ///
+  /// ## 为什么必须在这里拦
+  ///
+  /// 编辑页在 100 KB 处**拒绝保存**、标题超 200 字**截断**，但 AI 走的是另一条
+  /// 写入路径 —— 早先它完全不受约束：`createNote` 可以让一篇笔记任意长、
+  /// 标题任意长。同一张表两条写入路径，一条有上限一条没有，
+  /// 那"上限"就只是一句 UI 层的口号。
+  ///
+  /// 两条规则与编辑页一致：
+  ///   · **标题截断**：标题会进 prompt，几万字的"标题"能撑爆一次请求；
+  ///   · **正文到硬上限就失败**：不是截断 —— 截断等于**悄悄删掉用户的内容**，
+  ///     而 AI 完全可以拆成多篇。失败原因写清楚，模型会换方案。
+  ///
+  /// 返回 `(清理过的标题, 失败结果?)`；失败结果非空时**不要再写库**。
+  ({String title, ToolResult? error}) _fitForSave(String title, String content) {
+    final clean = title.trim();
+    final safeTitle = clean.length > AiLimits.titleHardMax
+        ? safeTruncate(clean, AiLimits.titleHardMax)
+        : clean;
+
+    final bytes = AiLimits.byteLength(content);
+    if (bytes >= AiLimits.noteHardBytes) {
+      final kb = (bytes / 1024).toStringAsFixed(1);
+      final hardKb = AiLimits.noteHardBytes ~/ 1024;
+      return (
+        title: safeTitle,
+        error: ToolResult.failure(
+          '正文有 $kb KB，超过 $hardKb KB 的硬上限，App 拒绝保存'
+          '（用户手写到这么大也会被拒）。请改成多篇：每篇控制在 80 KB 以内，'
+          '或者先精简内容再写。',
+        ),
+      );
+    }
+    return (title: safeTitle, error: null);
+  }
+
   /// 内容 hash（快照比对用）
   static int _hashOf(String s) => s.hashCode;
-
-  static String _excerptOf(String content) {
-    final flat = content.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return flat.length > 80 ? '${flat.substring(0, 80)}…' : flat;
-  }
 
   // ==========================================================================
   // 只读工具
@@ -725,11 +765,17 @@ class ToolExecutor {
   // ==========================================================================
 
   Future<ToolResult> _createNote(Map<String, Object?> a) async {
-    final title = (_str(a, 'title') ?? '').trim();
+    final rawTitle = (_str(a, 'title') ?? '').trim();
     final content = _str(a, 'content');
     if (content == null) {
       return ToolResult.failure('createNote 需要 `content`（正文）。');
     }
+    // 上限检查放在**确认层之前**：让用户去确认一件注定写不进去的事，
+    // 既浪费一次点击，也会让他以为"我同意了却没生效"。
+    final fit = _fitForSave(rawTitle, content);
+    if (fit.error != null) return fit.error!;
+    final title = fit.title;
+
     final notebookId = _str(a, 'notebookId');
     if (notebookId != null && await _db.getNotebook(notebookId) == null) {
       return ToolResult.failure(
@@ -833,6 +879,10 @@ class ToolExecutor {
         ? text.trim()
         : '${body.trimRight()}\n\n${text.trim()}';
 
+    // 追加也会把笔记推过硬上限 —— 拦在确认层之前，理由同 createNote
+    final fit = _fitForSave(note.title, next);
+    if (fit.error != null) return fit.error!;
+
     // 追加**不要求**先读过这篇，所以这里不是"必须拦"的粗筛，
     // 只是"如果它确实读过、而读完之后用户又改过"就提醒一句。
     final seen = _snapshot[noteId];
@@ -914,6 +964,11 @@ class ToolExecutor {
     final seen = _snapshot[noteId];
     final changedSinceRead = seen != null && seen != _hashOf(note.content);
 
+    // ---- ②b 上限：与编辑页同一套（标题截断、正文到硬上限失败）----
+    // 也在确认层之前：不让人去确认一件写不进去的事。
+    final fit = _fitForSave(newTitle ?? note.title, nextBody);
+    if (fit.error != null) return fit.error!;
+
     // ---- ③ 确认层：改前 vs 改后 ----
     final (ok, denied) = await _ask(
       toolByName('updateNote')!,
@@ -934,7 +989,10 @@ class ToolExecutor {
     if (!ok) return denied!;
 
     _rememberUndo(note);
-    await _writeNote(note, title: newTitle ?? note.title, content: nextBody);
+    // 只改正文时**别动标题**：`fit.title` 会把超长标题截断，而那属于
+    // "顺手改了用户没要求改的字段"（老笔记可能有超长标题，与本次编辑无关）。
+    final titleForWrite = newTitle == null ? note.title : fit.title;
+    await _writeNote(note, title: titleForWrite, content: nextBody);
 
     return ToolResult.success({
       'noteId': note.id,

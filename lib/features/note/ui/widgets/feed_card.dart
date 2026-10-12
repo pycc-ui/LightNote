@@ -175,7 +175,7 @@ class FeedCard extends StatelessWidget {
                         icon: Icon(
                           addedToInbox
                               ? Icons.remove_circle_outline
-                              : Icons.bolt_outlined,
+                              : Icons.edit_outlined,
                           size: 16,
                         ),
                         label: Text(
