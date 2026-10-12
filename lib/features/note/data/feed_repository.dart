@@ -77,11 +77,11 @@ const kRecentTitleKeep = 40;
 // 于是"默认全选 + 我的轻笔记"**不需要写任何东西**；而**新建的笔记库不在排除集里，
 // 自然就被勾选** —— 见 [FeedRepository.resolveSource]。
 //
-// ## 历史（为什么不是"包含集"）
+// 为什么是排除集而不是"包含集"
 //
-// 早先用 `feed_source_notebooks`（**包含集**）+ `feed_source_initialized`
-// + `feed_source_customized` 三个 key，靠"存一份快照 + 把缺的库补回来"实现同一件事。
-// 那套有两个毛病：
+// 包含集（`feed_source_notebooks` + `feed_source_initialized` +
+// `feed_source_customized` 三个 key，靠"存一份快照 + 把缺的库补回来"实现同一件事）
+// 有两个毛病：
 //
 //   ① 一个 id"不在集合里"**分不清**"从没见过"和"用户取消的"，
 //      所以必须再加 `customized` 标记来区分"用户改过没有"；
@@ -89,7 +89,7 @@ const kRecentTitleKeep = 40;
 //      `IndexedStack` 保活、切标签不重建页面 —— 于是**用户在笔记库页新建的库
 //      不会进来源**，要重启 App 才对。
 //
-// 改成排除集之后：①无歧义（不在排除集 = 包含）、②不需要对账（每次现算）。
+// 排除集没有这些问题：不在排除集 = 包含（无歧义），每次现算（不需要对账）。
 // 三个旧 key 全部停用；**新 key 必须换名字**，否则老的"包含集"会被当成"排除集"读，
 // 语义正好反过来（把用户所有库都排除掉）。
 const _kSourceExcluded = 'feed_source_excluded';
@@ -126,11 +126,9 @@ class FeedSource {
 /// 不是已有笔记的视图。所以这里不再"抽取已有笔记"，
 /// 而是"取素材 -> 调 AI 生成 -> 放进内存池"。
 ///
-/// ## 为什么不落库
-///
-/// 产品决定：生成结果**只放内存**，用户点「加入我的轻笔记」时才写成
-/// 真正的笔记。好处是不用新表、不扰动数据；代价是杀掉进程后
-/// 没被收下的那批就没了（下次会重新生成，内容不同）。
+/// 生成结果**只放内存**，不落库：用户点「加入我的轻笔记」时才写成真正的笔记。
+/// 好处是不用新表、不扰动数据；代价是杀掉进程后没被收下的那批就没了
+/// （下次会重新生成，内容不同）。
 ///
 /// ## 池子的用法
 ///
@@ -138,10 +136,10 @@ class FeedSource {
 /// 池子见底就在后台补——所以"下拉刷新"通常是**瞬间**出内容，不用等 AI；
 /// 只有池子空且恰好没在生成时才会转圈。
 ///
-/// 早先这里还有一整套"笔记消费状态"（`note_feed_state` 表：到期时间、
-/// 间隔天数、难度因子、收藏）。那套是为"复习已有笔记"设计的，
-/// 现在卡片是 AI 新生成的、不复用同一条内容，所以不再需要。
-/// 那张表（连同 `idx_feed_due` / `idx_feed_starred` 两条索引）**已在 v8 删除**。
+/// 这里不存"笔记消费状态"（`note_feed_state` 表：到期时间、间隔天数、难度因子、
+/// 收藏）—— 那套是为"复习已有笔记"设计的，而卡片是 AI 新生成的、不复用同一条
+/// 内容，所以不再需要。那张表（连同 `idx_feed_due` / `idx_feed_starred` 两条索引）
+/// 已在 v8 删除。
 class FeedRepository {
   FeedRepository(this._db, this._ai, {NoteAiAssetRepository? assets})
       : _assets = assets ?? NoteAiAssetRepository(_db),
@@ -281,18 +279,18 @@ class FeedRepository {
 
   /// 按来源配置取素材：**每条笔记给一份「摘要 + 一块随机切片」**。
   ///
-  /// ## 为什么是"摘要 + 切片"
+  /// 素材是"摘要 + 切片"：
   ///
   /// | 内容 | 作用 | 性质 |
   /// |---|---|---|
   /// | 摘要 | 整体背景 | 概括，AI 生成，**存库复用** |
   /// | 切片 | 具体内容 | 原文片段，**不失真，现切不存** |
   ///
-  /// 只发摘要是试过的，结果是**卡片大而空**——摘要天生概括，
+  /// 只发摘要的话**卡片大而空**——摘要天生概括，
   /// AI 拿到概括只能再概括一遍。切片是原文，里面才有具体数字、
   /// 具体说法、具体例子可以参考。
   ///
-  /// ## 为什么不存切片、不记录用过的块
+  /// 切片不存库、用过的块也不记：
   ///
   /// 切片完全由正文决定，存下来只会带来"与正文不一致 / 改了要重切 /
   /// 建表迁移处理失效"一整条链路，而切一遍是毫秒级。
@@ -360,8 +358,8 @@ class FeedRepository {
     //
     // ⚠️ **这里不能让"素材数 = 笔记数"。**
     //
-    // 曾经写成"一篇笔记一份素材"，于是库里只有 3 条笔记时**只能生成 3 张卡**：
-    // 内存池永远补不满，用户等了一次又一次。这是实测被用户抓到的回归。
+    // 不能让"素材数 = 笔记数"：那样库里只有 3 条笔记时**只能生成 3 张卡**，
+    // 内存池永远补不满，用户等了一次又一次。
     //
     // 切片设计的本来好处就是"同一篇笔记能出很多块"，正好用来解耦：
     // 笔记少就**从同一篇笔记取不同的片**，每片说的是不同的事，
@@ -372,7 +370,7 @@ class FeedRepository {
     //
     // ---- 排序：**最近没用过的片排前面**（依据是落库的 last_used_at）----
     //
-    // 持久化是关键：早先只在内存里记（`_recentChunks`），**重启即失效**，
+    // 持久化是关键：只在内存里记（`_recentChunks`），**重启即失效**，
     // 于是每次冷启动都会重新抽到同一批片，卡片大段重复。
     final order = chunksOf.keys.toList()..shuffle(_random);
     final ordered = <String, List<NoteChunk>>{};
@@ -536,14 +534,13 @@ class FeedRepository {
   Future<void> _doRefill(FeedSource source) async {
     // **按缺口要，不固定要一批**。
     //
-    // 早先这里无论池子里有多少，一次都要 `kFeedGenerateCount`（9）张；
-    // 而池子只差 2 张就满的时候，那 7 张纯属白烧 token。
+    // 固定要 `kFeedGenerateCount`（9）张的话，池子只差 2 张就满的时候，
+    // 那 7 张纯属白烧 token。
     //
-    // 现在的口径：
+    // 口径：
     //   · 缺口 = `kFeedPoolTarget - 池子里现有`（所以"只差一点"就只要一点）
     //   · 下限 `kFeedBatchSize`：一次至少要够用户刷一屏，否则"补了等于没补"
-    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要 12 张，
-    //     与改之前一样是 9 张
+    //   · 上限 `kFeedGenerateCount`：冷启动（池子空）时不会一次要 12 张
     final need = (kFeedPoolTarget - _pool.length)
         .clamp(kFeedBatchSize, kFeedGenerateCount);
 
@@ -727,7 +724,7 @@ class FeedRepository {
       _refillInBackground(source);
       return true;
     } catch (_) {
-      // 失败：不抛，但**必须把已取出的预留放回池子**——
+      // 失败：不抛，但必须把已取出的预留放回池子——
       // 表里已经删了，不还回去就真的丢了。
       if (reserved.isNotEmpty && _pool.isEmpty) _pool.addAll(reserved);
       return false;
@@ -736,13 +733,11 @@ class FeedRepository {
 
   /// 后台补池（fire-and-forget）。
   ///
-  /// ## 为什么必须在这里吞异常
-  ///
-  /// 这几处调用都在 `unawaited` 里，异常没人接 → 变成**未捕获的异步错误**。
-  /// 实测踩过：`warmup_test` 的 `tearDown` 关掉数据库之后，后台任务才走到
-  /// 查库那一步，于是抛出
-  /// `Bad state: Can't re-open a database after closing it`，
-  /// 而这个异常被算到**上一个测试**头上，看起来像完全无关的失败。
+  /// 这里必须吞异常：这几处调用都在 `unawaited` 里，异常没人接 → 变成
+  /// **未捕获的异步错误**。数据库在后台任务完成前就被关掉时（`warmup_test` 的
+  /// `tearDown` 就是这样），后台查库会抛
+  /// `Bad state: Can't re-open a database after closing it`，而这个异常会被算到
+  /// **上一个测试**头上，看起来像完全无关的失败。
   ///
   /// 吞掉是安全的：补池是**尽力而为**——真失败了下拉刷新时
   /// [takeBatch] 会按需生成，用户不会缺内容。

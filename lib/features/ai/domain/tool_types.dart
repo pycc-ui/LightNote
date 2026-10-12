@@ -79,7 +79,7 @@ class AgentMessage {
   factory AgentMessage.assistant(String text, {List<ToolCall> toolCalls = const []}) =>
       AgentMessage(role: 'assistant', content: text, toolCalls: toolCalls);
 
-  /// 工具执行结果。**必须带 [toolCallId]**，否则协议拒绝整条请求。
+  /// 工具执行结果。必须带 [toolCallId]，否则协议拒绝整条请求。
   factory AgentMessage.tool({
     required String toolCallId,
     required String content,

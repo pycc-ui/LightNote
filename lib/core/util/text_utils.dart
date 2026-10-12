@@ -17,7 +17,7 @@ class TextUtils {
   /// 把 Markdown 粗加工成纯文本，用于 excerpt 与字数统计。
   ///
   /// 用 `replaceAllMapped` 而不是 `replaceAll`：后者只接受字符串替换值，
-  /// 传回调会报 argument_type_not_assignable（这是最初的编译错误之一）。
+  /// 传回调会报 argument_type_not_assignable。
   static String toPlainText(String markdown) {
     final s = markdown.replaceAllMapped(_mdNoise, (m) {
       // 链接只保留显示文字
@@ -42,16 +42,11 @@ class TextUtils {
     return cjk + latin;
   }
 
-  /// **Markdown 正文的字数**（先剥 Markdown 再数）。
+  /// Markdown 正文的字数（先剥 Markdown 再数）。
   ///
-  /// ## 为什么必须只有这一个入口
-  ///
-  /// `notes.wordCount` 有三个写入方（编辑页保存、AI 的 `createNote` / `updateNote`）。
-  /// 早先编辑页走的是"剥 Markdown 后中文按字 + 英文按词"，而 AI 那条路写的是
-  /// `content.length`（UTF-16 码元数，连代码块里的符号都算）—— 同一篇笔记，
-  /// 手写和 AI 写出来的字数口径不一样，列表里显示的数字就没法比。
-  ///
-  /// 所以字数这件事收敛到这一个函数：**先 [toPlainText]，再 [wordCount]**。
+  /// `notes.wordCount` 有三个写入方（编辑页保存、AI 的 `createNote` / `updateNote`），
+  /// 它们必须口径一致，否则同一篇笔记手写和 AI 写出来的字数不一样，列表里的数字没法比。
+  /// 所以字数这件事收敛到这一个函数：先 [toPlainText]，再 [wordCount]。
   static int wordCountOfMarkdown(String markdown) =>
       wordCount(toPlainText(markdown));
 
@@ -64,10 +59,7 @@ class TextUtils {
 
   /// 组装「复制全文」的内容：标题（若有）+ 正文，便于粘到别处。
   ///
-  /// **只收字符串、不收 `Note`**：这里是纯文本工具，不该反向依赖数据库模型。
-  ///
-  /// > 早先它在 `core/export/markdown_export_service.dart` 里（那个文件同时
-  /// > 管 Markdown 导出）。导出功能删除后只剩这一个函数有用，就搬到这里。
+  /// 只收字符串、不收 `Note`：这里是纯文本工具，不该反向依赖数据库模型。
   static String noteCopyText({
     required String title,
     required String content,
@@ -94,9 +86,7 @@ class TextUtils {
 
 /// 搜索结果里高亮关键词时用的文本切片工具。
 ///
-/// 它和 [TextUtils] 一样是纯文本处理，所以放在这里；早先它和 Markdown 导出
-/// 挤在同一个文件里（`core/export/markdown_export_service.dart`），
-/// 导出功能删除后搬了过来。
+/// 和 [TextUtils] 一样是纯文本处理，所以放在这里。
 class HighlightUtils {
   HighlightUtils._();
 

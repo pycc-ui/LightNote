@@ -179,7 +179,7 @@ class _DiffBlock extends StatelessWidget {
 
 /// 弹出答题界面，返回用户的选择。
 ///
-/// **永远可以取消**（返回 [AskResult.cancelled]）："拒绝"是合法回答，
+/// 永远可以取消（返回 [AskResult.cancelled]）："拒绝"是合法回答，
 /// 也是用户从挂起状态脱身的唯一出口 —— 没有它，用户关掉 App 就永久挂起。
 Future<AskResult> showAskSheet(
   BuildContext context,
@@ -314,7 +314,7 @@ class _AskSheetState extends State<_AskSheet> {
             border: OutlineInputBorder(),
           ),
           // ⚠️ 必须重建：「确定」的可用性取决于输入内容。
-          // 少了这一句，用户打完字按钮还是灰的 —— **根本提交不了**（实测踩到）。
+          // 少了这一句，用户打完字按钮还是灰的，根本提交不了。
           onChanged: (_) => setState(() {}),
           onSubmitted: (_) {
             if (_canSubmit) _submit();

@@ -74,7 +74,7 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
   void _toast(String message) {
     if (!mounted) return;
     // 走 LogBar 而不是直接 showSnackBar：LogBar 里显式设了 persist: false，
-    // 避免以后给提示加「撤销」按钮时踩到"带 action 的 SnackBar 永不消失"那个坑。
+    // 避免以后给提示加「撤销」按钮时又碰上"带 action 的 SnackBar 永不消失"那个坑。
     LogBar.info(context, message);
   }
 
@@ -357,7 +357,7 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
     final viaShareSheet = target?.viaShareSheet ?? false;
 
     // 用户在保存对话框里取消了 —— 就到此为止。
-    // 早先这里会"兜底写进私有目录"，那等于用户没要也硬给他留一份，已去掉。
+    // 不要"兜底写进私有目录"：那等于用户没要也硬给他留一份。
     final targetPath = target?.path;
     if (targetPath == null) return;
 

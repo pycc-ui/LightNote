@@ -58,12 +58,10 @@ class AskRequest {
 
 /// **挂起中的一次提问** —— 存进 `ai_messages.pendingAction`。
 ///
-/// ## 为什么要连 `messages` 一起存
-///
-/// "如果只存问题，用户回答之后拿什么接着跑？" —— 恢复时要重建的是
-/// **提问那一刻的整段对话**（含此前几轮的工具往来），因为工具的结果
-/// 并不落库（见 `AiChatRepository.send` 的说明）。
-/// 只存 `question` 的话，用户回答完只能从头再来一遍。
+/// 为什么连 `messages` 一起存：恢复时要重建的是**提问那一刻的整段对话**
+/// （含此前几轮的工具往来），因为工具的结果并不落库（见
+/// `AiChatRepository.send` 的说明）。只存 `question` 的话，用户回答完只能
+/// 从头再来一遍。
 ///
 /// 存的是 JSON 字符串，所以**跨重启有效** —— 这正是"不用超时"的前提：
 /// 用户三小时后才回答也行，甚至重启 App 之后也行。
@@ -153,7 +151,7 @@ class PendingAsk {
           if (m is! Map) continue;
           final role = m['role'];
           if (role is! String) continue;
-          // ⚠️ `tool_calls` **必须一起还原**：协议要求 `role: tool` 的结果
+          // ⚠️ `tool_calls` 必须一起还原：协议要求 `role: tool` 的结果
           // 必须被前面 assistant 的 `tool_calls` 引用，否则整条请求会被拒。
           // 丢掉的话用户一回答就报错（而且是接口层面的错，很难查）。
           final calls = <ToolCall>[];
@@ -286,7 +284,7 @@ class AskSource {
 ///
 /// ## 只有一种形状
 ///
-/// 回灌给模型的 JSON **永远是这四个 key**，用不到的给 `null`：
+/// 回灌给模型的 JSON 永远是这四个 key，用不到的给 `null`：
 ///
 /// ```json
 /// { "status": "answered" | "cancelled",

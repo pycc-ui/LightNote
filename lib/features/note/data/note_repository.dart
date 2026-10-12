@@ -15,10 +15,9 @@ import 'note_chunk_repository.dart';
 /// ## 派生字段的口径只有一处实现
 ///
 /// `excerpt` / `wordCount` 走 [TextUtils]（`core/util/text_utils.dart`）。
-/// 本文件底层早先还抄过一份同名的私有实现，理由写的是"core 层不该反向依赖
-/// feature 层"—— 那个理由**读错了依赖方向**：`text_utils` 就在 `core/util/`，
-/// `features/ → core/` 正是允许的方向。于是同一篇笔记由页面写和由 AI 写，
-/// 字数与预览的口径不一样。
+/// 不要再抄一份私有实现，理由"core 层不该反向依赖 feature 层"读错了依赖方向：
+/// `text_utils` 就在 `core/util/`，`features/ → core/` 正是允许的方向。
+/// 口径不一致的话，同一篇笔记由页面写和由 AI 写，字数与预览会不一样。
 class NoteRepository {
   NoteRepository(this._db) : _chunks = NoteChunkRepository(_db);
 
@@ -120,7 +119,7 @@ class NoteRepository {
   /// 保存正文。派生字段（excerpt / wordCount）在这里统一重算。
   ///
   /// 用 upsert 而不是 update：upsert 内部是 INSERT ... ON CONFLICT DO UPDATE，
-  /// 所以**必须带齐所有「非空且无默认值」的列**（createdAt 就是这种列），
+  /// 所以必须带齐所有「非空且无默认值」的列（createdAt 就是这种列），
   /// 否则 Drift 会在写库前抛 InvalidDataException。
   /// 这些值从已读出的 existing 行原样带回，语义不变。
   Future<void> saveContent(String id, {String? title, String? content}) async {
@@ -161,7 +160,7 @@ class NoteRepository {
   /// 逻辑删除 + **清掉切片**。
   ///
   /// ⚠️ 切片表的外键带 `ON DELETE CASCADE`，但项目用的是**软删除**
-  /// （`deleted_at` 置位、行还在），级联**根本不会触发**。软删的笔记若还留着片，
+  /// （`deleted_at` 置位、行还在），级联根本不会触发。软删的笔记若还留着片，
   /// 搜索就会把"命中哪一片"算到已删的笔记头上，用户点进去发现笔记没了。
   ///
   /// 恢复（[restore]）时切片会被按需重建（读路径发现 0 片就现切），

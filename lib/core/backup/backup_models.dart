@@ -11,7 +11,7 @@
 ///     └── lightnote.sqlite            SQLite 数据库快照
 /// ```
 ///
-/// 刻意**不包含** API Key：它在系统钥匙串里，不属于笔记数据，
+/// 刻意不包含 API Key：它在系统钥匙串里，不属于笔记数据，
 /// 备份包通常会被放到网盘或聊天记录里，不能顺手把密钥也带出去。
 library;
 
@@ -25,7 +25,7 @@ const kBackupFormatVersion = 1;
 
 /// 清单中数据库条目的固定路径。
 ///
-/// **必须与 `kDatabaseFileName` 保持同步**（`lightnote.sqlite`）：
+/// 必须与 `kDatabaseFileName` 保持同步（`lightnote.sqlite`）：
 /// 导出时按这个路径往 zip 里塞库，导入时按这个路径找库，
 /// 两处不一致会直接导致"备份包里找不到数据库文件"。
 const kBackupDbEntryPath = 'data/lightnote.sqlite';
@@ -38,14 +38,9 @@ const kBackupManifestPath = 'backup.json';
 /// 导入前给用户看「这个包里有 42 条笔记、3 个笔记库」比看一堆时间戳有用得多，
 /// 也是防止"选错了一个空备份把自己数据覆盖掉"的最后一道提示。
 ///
-/// 早先这里还有 `cards` / `reviews` 两项（记忆卡片与复习流水）。
-/// 功能删掉后一并移除：**新备份里没有这两张表了**，留着字段只会
-/// 让每次备份都在 `SELECT COUNT(*) FROM cards` 上抛"表不存在"。
-/// 老备份包里的这两个键会被 [fromJson] 自然忽略。
-///
-/// `tags` 同理：它是「用户手动标签」那张表（外加 `note_tags`）的行数，
-/// 两张表都已在 schema v9 删除。**新备份不再统计标签**，
-/// 老备份包里的 `tags` 键同样被 [fromJson] 忽略。
+/// 只有 `notes` 与 `notebooks` 两项。`cards` / `reviews` / `tags` 的统计随对应
+/// 功能删除一并移除：新备份里没有这些表，留着字段只会让每次备份在
+/// `SELECT COUNT(*)` 上抛"表不存在"。老备份包里的这些键会被 [fromJson] 忽略。
 class BackupStats {
   const BackupStats({
     required this.notes,

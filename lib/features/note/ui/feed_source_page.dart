@@ -28,9 +28,9 @@ import '../data/notebook_repository.dart';
 /// `true`  = 选择**真的有变化**（外层据此丢掉旧池子重抽一批）
 /// `false` = 用户没改（或按了恢复默认之前的返回键）—— **不写库**
 ///
-/// "没改就不写"很重要：以前无条件写，于是用户只要打开这页点一下「保存」，
+/// "没改就不写"很重要：无条件写的话，用户只要打开这页点一下「保存」，
 /// 哪怕一个字没动，也会被记成"用户接管了来源"，之后新建的笔记库
-/// **永远不再自动加入**。
+/// 永远不再自动加入。
 class FeedSourcePage extends StatefulWidget {
   const FeedSourcePage({super.key});
 
@@ -176,7 +176,7 @@ class _FeedSourcePageState extends State<FeedSourcePage> {
                   onChanged: (v) => setState(() => _includeUnfiled = v),
                   title: const Text('包含我的轻笔记'),
                   subtitle: const Text('还没归档到任何笔记库的笔记，也拿来当素材'),
-                  secondary: const Icon(Icons.edit_outlined),
+                  secondary: const Icon(Icons.edit),
                 ),
 
                 const Divider(height: 1),

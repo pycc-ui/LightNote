@@ -43,15 +43,13 @@ enum _FeedPhase { loading, ready, noSource, noMaterial, error }
 
 /// 一屏里的一张卡片。
 ///
-/// ## 为什么 "已加入" 不存成字段
+/// "已加入"不存成字段，而是**按内容从数据库实时推导**：收下后我们记住写出的
+/// 笔记 id（[noteId]），是否"已加入"由 [`_InboxPageState._unfiledById`] 里还能
+/// 不能找到它来决定。
 ///
-/// 早先 `_Card` 里有一个 `added` 布尔值，收下时置 true。问题是它只是
-/// **本页面的内存状态**：用户跑到笔记库页把那条笔记删了，卡片这边
-/// 完全不知道，还显示着「已加入」，再点也没反应——一个真的对不上号的 bug。
-///
-/// 现在改成**按内容从数据库实时推导**：收下后我们记住写出的笔记 id
-/// （[noteId]），是否"已加入"由 [`_InboxPageState._unfiledById`] 里还能不能
-/// 找到它来决定。数据库变了两边一起变，不存在状态不同步。
+/// 不能记成 `_Card` 上的一个 `added` 布尔值：那只是本页面的内存状态，
+/// 用户跑到笔记库页把那条笔记删了，卡片这边完全不知道，还显示着「已加入」，
+/// 再点也没反应。按数据库推导的话数据库变了两边一起变，不存在状态不同步。
 class _Card {
   const _Card({required this.draft, this.noteId});
 
@@ -86,12 +84,11 @@ class _InboxPageState extends State<InboxPage> {
 
   // ⚠️ 这里**故意不缓存来源**。
   //
-  // 曾经有一个 `_source` 字段：`initState` 里解析一次存下来，`takeBatch(_source)`
-  // 一直用它。而三个 tab 是 `IndexedStack` 保活的，切标签不重建页面、`initState`
-  // 不再触发 —— 于是用户在笔记库页**新建的笔记库永远进不了这次会话的来源**，
-  // 要重启 App 才对。
+  // 缓存的话（比如 `initState` 里解析一次存下来、`takeBatch` 一直用它）会踩一个坑：
+  // 三个 tab 是 `IndexedStack` 保活的，切标签不重建页面、`initState` 不再触发 ——
+  // 于是用户在笔记库页**新建的笔记库永远进不了这次会话的来源**，要重启 App 才对。
   //
-  // 现在来源由 `FeedRepository.resolveSource()` **每次现算**，
+  // 所以来源由 `FeedRepository.resolveSource()` **每次现算**，
   // 页面只在"判断要不要显示引导"时就地取一次，用完即弃。
   String? _error;
 
@@ -186,15 +183,10 @@ class _InboxPageState extends State<InboxPage> {
   /// | 下拉刷新 `_refresh` | `false` | **前向追加**：新的 3 张插到列表**最前面** |
   ///
   /// 所以下拉刷新是**累积**的：3 张 → 6 张 → 9 张…，最新的一批在最上面。
-  /// 这是"前向追加"的语义，来自提交 0962466，**不要改成替换**。
+  /// 这是"前向追加"的语义（来自提交 0962466），**不要改成替换**。
   ///
-  /// > 教训：这里曾经被我误改成"只替换、不追加"。那是错的——
-  /// > 我把 `first` 参数和追加分支整个删掉了。**用户的历史改动都有原因，
-  /// > 不要擅自改。**
-  ///
-  /// > 另：「切后台回来卡片自己往后追加」是**另一个原因**——我擅自加了
-  /// > 一层"滚到底自动加载"，而窗口重新布局也会产生滚动通知，被误当成
-  /// > 用户滚到底。那一层已移除，追加只由**下拉刷新**触发。
+  /// 追加只由**下拉刷新**触发。不要再加一层"滚到底自动加载"：窗口重新布局
+  /// 也会产生滚动通知，会被误当成用户滚到底，于是切后台回来卡片就自己往后追加。
   Future<void> _loadBatch({bool first = false}) async {
     final feed = context.read<FeedRepository>();
     try {
@@ -248,8 +240,7 @@ class _InboxPageState extends State<InboxPage> {
     // 详情页里点了「加入我的轻笔记」。
     //
     // **不需要在这里改状态**：写库之后未归档笔记的流会推新数据，
-    // `_isAdded` 自然变成 true。以前这里手动置 `added: true`，
-    // 正是那个"和数据库对不上"的来源。
+    // `_isAdded` 自然变成 true。（手动置状态就会"和数据库对不上"。）
     if (result == true && mounted) {
       // 只为把 id 记下来（内容被改过时还能靠它认出这条）
       // 触发一次重建，让流的最新数据生效
@@ -356,8 +347,8 @@ class _InboxPageState extends State<InboxPage> {
       // 订阅「我的轻笔记」，让卡片上的"已加入"始终等于数据库的真相。
       //
       // 这个流一变（收下 / 在笔记库页删除 / 编辑页清空 / 从笔记库移回），
-      // 卡片状态就跟着变。以前状态记在页面内存里，所以从笔记库删掉之后
-      // 这边还显示「已加入」——两边对不上。
+      // 卡片状态就跟着变。状态记在页面内存里的话，从笔记库删掉之后这边还会
+      // 显示「已加入」——两边对不上。
       body: StreamBuilder<List<Note>>(
         stream: context.read<NoteRepository>().watchUnfiled(),
         builder: (context, snap) {

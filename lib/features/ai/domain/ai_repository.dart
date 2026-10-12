@@ -31,22 +31,16 @@ class AiRepository {
 
   /// 读 Key 并交给 client。**重复调用是安全的**。
   ///
-  /// 这个方法原先由 `main.dart` 在一个 post-frame 回调里"发了不等"地调用：
+  /// ⚠️ 不要把"Key 已就绪"当成调用方的前置条件。这个方法和
+  /// `InboxPage._bootstrap` 都挂在 post-frame 回调上，**两者没有先后保证**：
   ///
-  /// ```dart
-  /// WidgetsBinding.instance.addPostFrameCallback((_) {
-  ///   context.read<AiRepository>().init();   // 没有 await
-  /// });
-  /// ```
-  ///
-  /// 而 `InboxPage._bootstrap` 同样挂在 post-frame 上。**两者没有先后保证**：
   /// 一旦预热先跑，client 里还没有 Key，请求立刻以 `no_api_key` 失败 →
   /// 预热静默退回、`takeBatch` 也失败 → 用户看到「生成失败」和重试按钮，
-  /// 手点一次才好。**这就是"配好 Key 重启还要手动重试"的根因**（已用测试证实）。
+  /// 手点一次才好。这就是"配好 Key 重启还要手动重试"的根因。
   ///
-  /// 修法不是在 main 里补一个 await（那只是把顺序碰对，下次改别处又会踩），
-  /// 而是让每个真正要发请求的方法都先 `await ensureReady()`——
-  /// 谁先用谁负责把 Key 准备好。
+  /// 所以每个真正要发请求的方法都先 `await ensureReady()`：谁先用谁负责把 Key
+  /// 准备好，而不是靠调用顺序碰运气（在 main 里补一个 await 只是把顺序碰对，
+  /// 下次改别处又会踩）。
   Future<void> init() {
     if (_initialized) return Future.value();
     final running = _initInflight;
@@ -110,11 +104,10 @@ class AiRepository {
   /// [avoidTitles] 是已经生成过的标题（池子 + 预留）。库里笔记少时切片会被
   /// 反复取到，让模型主动避开这些标题才能真的不重复。
   ///
-  /// > 曾经把 `count` 删掉、写成"一份素材一张卡"，结果**素材数被笔记数卡死**：
-  /// > 库里只有 3 条笔记就只能出 3 张卡，内存池永远补不满，
-  /// > 用户等一次只拿到几张。这是被用户抓到的回归，别再犯。
+  /// > `count` 不能被省掉、写成"一份素材一张卡"：那样素材数会被笔记数卡死 ——
+  /// > 库里只有 3 条笔记就只能出 3 张卡，内存池永远补不满，用户等一次只拿到几张。
   ///
-  /// 关思考模式：实测它会吃光额度，`max_tokens=20` 时正文直接返回空字符串。
+  /// 关思考模式：它会吃光额度，`max_tokens=20` 时正文直接返回空字符串。
   /// 生成创意文本不需要长链推理，关掉更快更省。
   Future<List<FeedDraft>> generateFeedNotes(
     List<FeedMaterial> materials, {
@@ -265,7 +258,7 @@ class AiRepository {
   /// 返回值已经过 [AiLimits.summaryHardMax] 硬截断——**模型不守字数**，
   /// 兜底必须在这里做，否则 300 字的要求会变成 600 字的实际消耗。
   ///
-  /// 关思考模式：摘要不需要长链推理，而且实测思考会吃掉大量额度。
+  /// 关思考模式：摘要不需要长链推理，而且思考会吃掉大量额度。
   Future<String> summarizeNote({
     required String title,
     required String content,

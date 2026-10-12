@@ -88,11 +88,11 @@ class PreferencesService {
   Future<void> writeFontScale(double scale) =>
       _db.writeSetting(_kFontScale, scale.toStringAsFixed(2));
 
-  // ⚠️ 这里原先有"自动保存开关"（`editor_auto_save`）。
-  // **已移除**：保存方式改成手动（编辑态右上角一个勾），没有可配的余地，
-  // 留一个永远读不到的 key 只会让下一个人以为还有这个功能。
+  // ⚠️ 这里不放"自动保存开关"（`editor_auto_save`）：保存是手动的（编辑态右上角
+  // 一个勾），没有可配的余地，留一个永远读不到的 key 只会让下一个人以为还有
+  // 这个功能。
   //
-  // 切片也因此变得可预期：正文只在用户按下保存那一下才写库，
+  // 这也让切片变得可预期：正文只在用户按下保存那一下才写库，
   // "什么时候重切"不再受输入节奏影响。
 
   // ---- 一次性任务的幂等标记 ----

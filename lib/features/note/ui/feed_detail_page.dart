@@ -73,7 +73,7 @@ class _FeedDetailPageState extends State<FeedDetailPage> {
                         height: 14,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Icon(Icons.bolt_outlined, size: 18),
+                    : const Icon(Icons.edit, size: 18),
                 label: const Text('加入我的轻笔记'),
               )
             else

@@ -6,11 +6,10 @@ import '../../../../core/theme/dimens.dart';
 ///
 /// ## 卡片上只有标题
 ///
-/// 早先的版本在卡片上放过"摘要/预览"，结果怎么定义都别扭：
-///   · 用正文截取 -> 摘要是"正文的前面部分"，读起来像被截断
-///   · 让 AI 单独生成摘要 -> 要维护两个内容字段，还得反复调字数
+/// 卡片就是标题（至多 3 行），点进去看正文。别在卡片上放"摘要/预览"，
+/// 那种东西怎么定义都别扭：用正文截取的话摘要是"正文的前面部分"，读起来像被
+/// 截断；让 AI 单独生成摘要又要维护两个内容字段、还得反复调字数。
 ///
-/// 最终简化成：**卡片就是标题（至多 3 行），点进去看正文。**
 /// 所以标题必须一个人承担"让人想点进去"的责任——它得是有钩子的一句话，
 /// 而不是「间隔重复」这种干标签（提示词里专门强调了这点）。
 ///
@@ -69,7 +68,7 @@ class FeedCard extends StatelessWidget {
       child: Card(
         margin: EdgeInsets.zero,
         clipBehavior: Clip.antiAlias,
-        // 描边：深色模式下卡片与背景色差很小，实测几乎看不出边界。
+        // 描边：深色模式下卡片与背景色差很小，不加描边几乎看不出边界。
         shape: RoundedRectangleBorder(
           borderRadius: AppRadius.cardRadius,
           side: BorderSide(color: scheme.outlineVariant),
@@ -83,7 +82,7 @@ class FeedCard extends StatelessWidget {
               // 用 spaceBetween 把"元信息 + 按钮"推到底部。
               // **不能用 Spacer**：Spacer 是 flex，会把 Column 撑满外层
               // ConstrainedBox 的 maxHeight，于是 1 行标题的卡片也占满
-              // 2/3 屏、中间一大片空白（实测踩过）。
+              // 2/3 屏、中间一大片空白。
               // spaceBetween 在内容本来就矮时不会额外撑高。
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -131,8 +130,7 @@ class FeedCard extends StatelessWidget {
                 // 用 `spaceBetween` 而不是 `Spacer` 把两端撑开：
                 // 只有两个"端点"子项时，spaceBetween 的行为最直白——
                 // 第一个贴左、最后一个贴右，中间的空白它来分配。
-                // （这块之前用过 `Spacer` + `Flexible`，实测容易出
-                // 意外的分配结果，按钮会浮在中间偏左。）
+                // （`Spacer` + `Flexible` 容易出意外的分配结果，按钮会浮在中间偏左。）
                 //
                 // `SizedBox(width: double.infinity)` 保证这一行占满
                 // 卡片的可用宽度；否则它可能按内容收缩。
@@ -166,8 +164,8 @@ class FeedCard extends StatelessWidget {
                       // 左下角是标签、右下角是这个按钮——按产品要求布局。
                       //
                       // 按钮是个**开关**：未加入时橙色「加入我的轻笔记」，
-                      // 加入后变成「从我的轻笔记移出」。早先加入后是禁用
-                      // 变灰，用户以为坏了——其实是想撤销的，没有入口。
+                      // 加入后变成「从我的轻笔记移出」。加入后禁用变灰是不行的，
+                      // 用户以为坏了——其实是想撤销却找不到入口。
                       FilledButton.tonalIcon(
                         onPressed: addedToInbox
                             ? onRemoveFromInbox
@@ -175,7 +173,7 @@ class FeedCard extends StatelessWidget {
                         icon: Icon(
                           addedToInbox
                               ? Icons.remove_circle_outline
-                              : Icons.edit_outlined,
+                              : Icons.edit,
                           size: 16,
                         ),
                         label: Text(

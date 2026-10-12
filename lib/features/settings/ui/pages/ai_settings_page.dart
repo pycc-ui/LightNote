@@ -10,9 +10,8 @@ import '../widgets/settings_scaffold.dart';
 
 /// AI 设置：只有 API Key（保存 / 测试连接 / 删除）。
 ///
-/// 曾经还有「模型」「思考模式」「数据授权」三项，**都已移除** ——
-/// 前两项是装饰性的（存了没人读），第三项与 AI 页的授权横幅重复，
-/// 而那条横幅后来也按设计定案整体去掉了。
+/// 「模型」「思考模式」「数据授权」这三项都已移除：前两项是装饰性的（存了没人读），
+/// 第三项与 AI 页的授权横幅重复，而那条横幅也按设计定案整体去掉了。
 class AiSettingsPage extends StatefulWidget {
   const AiSettingsPage({super.key});
 
@@ -30,11 +29,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   bool _testing = false;
   String? _testResult;
 
-  // ⚠️ 这里原先有「模型」与「深度整理时启用思考模式」两项，**已移除** ——
-  // 两者都是装饰性的（存下来了、也显示了，但没有任何调用方读它）：
+  // ⚠️ 这里不加「模型」与「深度整理时启用思考模式」两项 ——
+  // 它们都是装饰性的（存下来了、也显示了，但没有任何调用方读它）：
   //   · 模型：真实请求全部硬编码 `DeepSeekConfig.modelFlash`
-  //   · 思考开关：AI 页用的是**每个会话**的 `thinkingEffort`，
-  //     与这个全局开关无关
+  //   · 思考开关：AI 页用的是**每个会话**的 `thinkingEffort`，与全局开关无关
   // 一个改了没反应的开关比没有这个开关更糟（用户会以为他调过了）。
 
   @override
@@ -63,7 +61,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   void _toast(String message) {
     if (!mounted) return;
     // 走 LogBar 而不是直接 showSnackBar：LogBar 里显式设了 persist: false，
-    // 避免以后给提示加「撤销」按钮时踩到"带 action 的 SnackBar 永不消失"那个坑。
+    // 避免以后给提示加「撤销」按钮时又碰上"带 action 的 SnackBar 永不消失"那个坑。
     LogBar.info(context, message);
   }
 
@@ -179,9 +177,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           ),
         ),
 
-        // 「模型」与「深度整理时启用思考模式」两项已移除，见 `_load` 上方的说明。
+        // 这里不放「模型」「深度整理时启用思考模式」两项（理由见 `_load` 上方的说明）。
         //
-        // 模型只剩一个（`deepseek-flash`），所以这里不需要选择器；
+        // 模型只剩一个（`deepseek-flash`），所以不需要选择器；
         // 思考强度是**每个会话**在 AI 页顶部选的，不放在全局设置里
         // —— 放这里会让人以为它能影响所有会话。
         const SettingsNote(
@@ -191,8 +189,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           '要让输出稳定，靠的是提示词约束与 JSON 输出，不是调温度。',
         ),
 
-        // 授权确认机制**整体已去掉**（用户定案）：设置里不再有开关，
-        // AI 页也不再有首次授权横幅与发送闸门 —— 插上 Key 直接能用。
+        // 授权确认机制整体不做（用户定案）：设置里没有开关，AI 页也没有首次授权
+        // 横幅与发送闸门 —— 插上 Key 直接能用。
         //
         // 下面这条是**告知**，不是需要点同意的确认：它说清什么会被发出去，
         // 但不会挡住任何人。设计上"轻"优先，不把隐私做成一个功能。
@@ -265,8 +263,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     try {
       // 输入框里有新 Key 时先用它测试，不落库
       if (pending.isNotEmpty) repo.client.setApiKey(pending);
-      // 只测**实际会用的那个模型**：以前这里用的是设置里选的模型，
-      // 但真实请求全部硬编码 flash —— 测出来的"连接成功"不代表对话能用
+      // 只测**实际会用的那个模型**（flash）：不能测设置里选的模型，
+      // 因为真实请求全部硬编码 flash —— 那样测出来的"连接成功"不代表对话能用
       final result =
           await repo.testConnection(model: DeepSeekConfig.modelFlash);
       if (!mounted) return;

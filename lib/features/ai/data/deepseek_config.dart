@@ -1,8 +1,8 @@
 /// DeepSeek 模型与计费常量。
 ///
 /// 价格来源：https://api-docs.deepseek.com/zh-cn/quick_start/pricing
-/// 单位：元 / 百万 tokens。价格是官方 2026 年公布的档位，
-/// **变动频繁**，如需精确对账请在设置页允许用户覆盖。
+/// 单位：元 / 百万 tokens。价格是官方 2026 年公布的档位，变动频繁，
+/// 如需精确对账请在设置页允许用户覆盖。
 class DeepSeekConfig {
   DeepSeekConfig._();
 
@@ -13,10 +13,8 @@ class DeepSeekConfig {
   /// 旧名 `deepseek-v4-flash` 仍可调用但对应模型已下线，请求会由新模型代答。
   static const modelFlash = 'deepseek-flash';
 
-  // 曾经还有一个 `modelPro`（`deepseek-v4-pro`）与一张模型选择表，
-  // **已移除**：设置里能选它，但所有真实请求都硬编码 flash ——
-  // 那是个改了没反应的开关。要用 pro 就得先真的把它接进调用链。
-
+  // 不再提供 pro 模型选择：设置里能选、但所有真实请求都硬编码 flash 的开关
+  // 等于改了没反应。要用 pro 就得先真的把它接进调用链。
 
   /// 上下文 1M / 最大输出 384K。实际调用请留出余量，
   /// 单次请求正文建议不超过 20 万字符，超长笔记应先分段。

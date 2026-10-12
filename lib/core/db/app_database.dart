@@ -160,7 +160,7 @@ class AppDatabase extends _$AppDatabase {
             // ⚠️ 这里**不要**紧跟 CREATE INDEX。
             // `m.createTable()` 的 DDL 是**延迟到迁移回调结束后**才执行的，
             // 所以在同一个回调里建索引会报
-            // `no such table: main.ai_note_summaries`（实测踩过）。
+            // `no such table: main.ai_note_summaries`。
             // 索引统一放到下面 `onUpgrade` 的末尾。
             //
             // 同一批建的 `note_ai_tags`（每篇笔记的 AI 标签）**已在 v8 删除**：
@@ -248,7 +248,7 @@ class AppDatabase extends _$AppDatabase {
             }
 
             // 2) 两个表改名。做法与 v2→v3 的 `folders` → `notebooks` 完全一致：
-            //    改类名会让 drift 认为"旧表不存在"，**必须**显式 RENAME，
+            //    改类名会让 drift 认为"旧表不存在"，必须显式 RENAME，
             //    否则老库升级会丢掉这两张表的全部数据。
             //
             //    onUpgrade 里读不到探测结果（drift 的 customSelect 在迁移阶段
@@ -273,7 +273,7 @@ class AppDatabase extends _$AppDatabase {
           // 只建表，**不在迁移里回填**。
           //
           // 为什么不在迁移里回填：drift 的 `customSelect` 在迁移回调里拿不到数据
-          // （见上面 8→9 那段注释里踩过的同一个坑），而回填需要读全部笔记正文。
+          // （与上面 8→9 那段注释是同一个坑），而回填需要读全部笔记正文。
           // 硬凑出来的话，几万条笔记会在升级那一刻卡住启动，而且**中断了就只
           // 回填了一半**，很难判断哪些补过哪些没补。
           //
@@ -321,7 +321,7 @@ class AppDatabase extends _$AppDatabase {
           // 大库上会明显变慢，而且很难发现。
           await _createIndexes();
 
-          // 本次（v1 内部，未发布）的调整记录，保留作历史参考：
+          // v1 内部（未发布）那批调整的历史记录，保留作参考：
           //   notes: archived        -> is_inbox
           //   notes: content_format  -> source（默认值 markdown -> local）
           //   notes: 新增 folder_id
@@ -862,8 +862,8 @@ class AppDatabase extends _$AppDatabase {
 
   /// 清空 AI 调用审计。
   ///
-  /// 早先这里还顺手删 `note_summaries`（「AI 整理要点」的落库结果）。
-  /// 该功能移除后表也没了，所以只剩调用记录要清。
+  /// 只清 `ai_calls`。「AI 整理要点」的 `note_summaries` 已随功能一起删除，
+  /// 没有别的表要动。
   Future<void> clearAiHistory() => delete(aiCalls).go();
 
   // ==========================================================================
@@ -872,12 +872,10 @@ class AppDatabase extends _$AppDatabase {
 
   /// 会话列表：按最近活动倒序，**且只列有消息的**。
   ///
-  /// ## 为什么把"空会话"挡在列表外
-  ///
-  /// 一条消息都没有的会话，用户点进去也看不到任何东西 —— 它只是早先
-  /// "点一下新建就在库里落一行"留下的空壳（那个 bug 已修，见
-  /// `AiPage._newConversation` 的说明）。留着它们的后果很具体：它们的时间戳最新，
-  /// 于是排在列表最前面，也会被"打开上次的会话"选中 —— 用户一进来看到的是空白。
+  /// 一条消息都没有的会话，用户点进去也看不到任何东西，却因为时间戳最新而排在
+  /// 列表最前面、还会被"打开上次的会话"选中 —— 一进来看到的是空白。它们是
+  /// "点一下新建就在库里落一行"留下的空壳（现在新建不再落库，见
+  /// `AiPage._newConversation` 的说明）。
   ///
   /// 这里**只是不显示，不删行**：删除是破坏性动作（本项目的规矩是先问再做），
   /// 而这个列表本来就是"给用户挑会话"的视图，空会话不构成一个可挑的东西。

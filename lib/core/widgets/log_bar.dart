@@ -25,7 +25,7 @@ import '../theme/dimens.dart';
 ///
 /// ## 一、为什么每个 SnackBar 都要显式写 `persist`
 ///
-/// 这是本项目踩过的一个真实 bug：**带操作按钮的提示弹出来永远不消失**。
+/// 不显式写会踩到一个坑：**带操作按钮的提示弹出来永远不消失**。
 ///
 /// 原因在 Flutter 源码里（`snack_bar.dart`）：
 ///
@@ -163,7 +163,7 @@ abstract final class LogBar {
     );
   }
 
-  /// 耗时任务的长驻提示（带转圈），**必须**用返回的句柄 [LogBarHandle.close] 收起。
+  /// 耗时任务的长驻提示（带转圈），必须用返回的句柄 [LogBarHandle.close] 收起。
   ///
   /// 调用方务必用 `try / finally` 包起来，保证任何返回路径都会收起：
   ///
@@ -176,10 +176,10 @@ abstract final class LogBar {
   /// }
   /// ```
   ///
-  /// **不这么写就会泄漏**：busy 是常驻的，一旦某条 `return` 越过了
+  /// 不这么写就会泄漏：busy 是常驻的，一旦某条 `return` 越过了
   /// `close()`，那条转圈提示会一直挡在屏幕上（兜底 5 分钟），
-  /// 期间所有其它提示都会排队等它。本项目在 AI 整理与生成卡片两处
-  /// 都犯过这个错（`if (!mounted) return;` 写在 `close()` 之前）。
+  /// 期间所有其它提示都会排队等它。AI 整理与生成卡片两处都出过这个错
+  ///（`if (!mounted) return;` 写在 `close()` 之前）。
   static LogBarHandle busy(BuildContext context, String message) {
     final messenger = ScaffoldMessenger.of(context);
     _busyActive = true;

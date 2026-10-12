@@ -1,29 +1,26 @@
-/// 一片切片：**只是"原文的哪一段"的描述，不存正文副本**。
+/// 一片切片：只是"原文的哪一段"的描述，不存正文副本。
 ///
-/// ## 为什么不存正文
-///
-/// 存正文等于把全部笔记文本**再存一份**（库里的文本量翻倍）。
+/// 不存正文的原因：存正文等于把全部笔记文本再存一份（库里的文本量翻倍）。
 /// 只存偏移的话，读片 = 用 `[start, end)` 从 `notes.content` 切出来，
-/// **永远和正文一致**，不存在"片正文过期"这种状态。
+/// 永远和正文一致，不存在"片正文过期"这种状态。
 ///
-/// 代价：正文改了偏移就错了。但那错的是**位置**、不是**内容**，
-/// 而且可以被检出（比 `contentHash`），不符就当场重切一次（见
-/// `NoteChunkRepository`）。
+/// 代价：正文改了偏移就错了。但那错的是位置、不是内容，而且可以被检出
+/// （比 `contentHash`），不符就当场重切一次（见 `NoteChunkRepository`）。
 ///
-/// ## 字段
+/// 字段：
 ///
 /// | 字段 | 用途 |
 /// |---|---|
 /// | [index] | 顺序号。AI 的 `readChunk(noteId, index)` 与搜索结果的"定位到这片"都用它 |
 /// | [heading] | 标题路径（`工作 / 项目A / 风险`），给 AI 当上下文、给搜索页当副标题 |
 /// | [level] | 这一片来自几级标题（0 = 无标题） |
-/// | [start] / [end] | **左闭右开**，偏移基于**原始** `content`（不归一化） |
+/// | [start] / [end] | 左闭右开，偏移基于原始 `content`（不归一化） |
 /// | [charCount] | `end - start`，即 `content.substring(start, end).length` |
 /// | [contentHash] | 自愈用：读片时比对，不符说明正文变了、偏移失效 |
 /// | [lastUsedAt] | 卡片流上次把这一片做成素材的时间（null = 从没用过） |
-/// | [nextWindowStart] | 卡片流下次开窗口的起点（**相对本片起点**），见 `FeedWindow` |
+/// | [nextWindowStart] | 卡片流下次开窗口的起点（相对本片起点），见 `FeedWindow` |
 ///
-/// 后两个字段是**卡片流的状态**，不属于"片是什么"。放在这里是因为它们就存在
+/// 后两个字段是卡片流的状态，不属于"片是什么"。放在这里是因为它们就存在
 /// `note_chunks` 表的同一条记录上（同一行、同一生命周期），单独拆一个类型的话
 /// 每次取片都要按 `(noteId, idx)` 去别处查状态。
 class NoteChunk {
@@ -45,7 +42,7 @@ class NoteChunk {
   final int end;
   final int contentHash;
 
-  /// 卡片流上次用掉这一片的时间。**null = 从没用过**（排序时排最前）。
+  /// 卡片流上次用掉这一片的时间。null = 从没用过（排序时排最前）。
   final DateTime? lastUsedAt;
 
   /// 卡片流下次开窗口的起点（相对 [start] 的偏移）。0 = 从头开始。
@@ -81,7 +78,7 @@ class NoteChunk {
     return content.substring(start, end);
   }
 
-  /// 这一片的正文 hash（**必须与 [contentHash] 同算法**）。
+  /// 这一片的正文 hash（必须与 [contentHash] 同算法）。
   ///
   /// 用 Dart 的 `String.hashCode` 而不是加密 hash：这里只需要"变了没有"，
   /// 不需要抗碰撞，而 `hashCode` 零成本。

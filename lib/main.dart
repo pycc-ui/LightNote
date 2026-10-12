@@ -130,9 +130,9 @@ class LightNoteApp extends StatelessWidget {
           update: (_, db, client, previous) =>
               previous ?? AiRepository(db: db, client: client),
         ),
-        // FeedRepository 依赖 AiRepository，**必须排在它后面**。
+        // FeedRepository 依赖 AiRepository，必须排在它后面。
         // Provider 是惰性解析的：写在前面会在第一次读取时抛
-        // "Could not find the correct Provider<AiRepository>"（实测踩过）。
+        // "Could not find the correct Provider<AiRepository>"。
         ProxyProvider2<AppDatabase, AiRepository, FeedRepository>(
           update: (_, db, ai, previous) =>
               previous ?? FeedRepository(db, ai),
@@ -250,9 +250,9 @@ class _StartupGateState extends State<_StartupGate> {
 
     // 示例数据必须在**任何页面构建之前**写好。
     //
-    // 它以前挂在 AI 页的 _bootstrap 里，只有打开 AI 页才写。改动后
-    // 轻笔记页是消费流、要从库里抽卡片，首屏就需要笔记库已存在——
-    // 挂到页面上会让首屏看起来是空的。示例数据属于启动职责。
+    // 挂在页面上（比如某个页的 _bootstrap）不行：轻笔记页是消费流、要从库里
+    // 抽卡片，首屏就需要笔记库已存在，挂到页面上会让首屏看起来是空的。
+    // 示例数据属于启动职责。
     //
     // 写失败不抛（SeedBootstrap 内部已 try/catch）：宁可空库也要能启动。
     await SeedBootstrap.run(

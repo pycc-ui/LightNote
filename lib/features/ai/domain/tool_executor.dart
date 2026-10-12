@@ -57,10 +57,8 @@ typedef ToolConfirmFn = Future<bool> Function(ToolConfirmRequest request);
 
 /// **App 侧的工具执行器**：AI 提出调用 → 这里真正去做。
 ///
-/// ## 为什么安全要靠这一层，而不是靠模型
-///
-/// `askUser` 是模型**自愿**调用的。它忘了调，删除就直接执行了。
-/// 所以风险分级（[ToolRisk]）由 [toolByName] 上的定义给出，
+/// 安全必须靠这一层，不能靠模型：`askUser` 是模型**自愿**调用的，它忘了调，
+/// 删除就直接执行了。所以风险分级（[ToolRisk]）由 [toolByName] 上的定义给出，
 /// **执行器在动手之前先查级别**：删除类必须先弹确认，模型绕不过去。
 /// 见《AI接入设计》的「工具清单、风险分级与调用约定」一节。
 ///
@@ -320,8 +318,8 @@ class ToolExecutor {
   /// ## 派生字段的口径与编辑页**完全一致**
   ///
   /// `excerpt` / `wordCount` 走 [TextUtils]，与 `NoteRepository` 用的是同一实现。
-  /// 早先这里自己写了一套（预览 80 字、字数用 `content.length`），于是同一篇笔记
-  /// "AI 写过"和"人改过"在列表里显示的字数与预览不一样。
+  /// 自己另写一套（比如预览 80 字、字数用 `content.length`）的话，同一篇笔记
+  /// "AI 写过"和"人改过"在列表里显示的字数与预览会不一样。
   Future<void> _writeNote(
     Note before, {
     required String title,
@@ -347,12 +345,10 @@ class ToolExecutor {
 
   /// 落盘前的**同一套上限**（与编辑页逐条对齐）。
   ///
-  /// ## 为什么必须在这里拦
-  ///
-  /// 编辑页在 100 KB 处**拒绝保存**、标题超 200 字**截断**，但 AI 走的是另一条
-  /// 写入路径 —— 早先它完全不受约束：`createNote` 可以让一篇笔记任意长、
-  /// 标题任意长。同一张表两条写入路径，一条有上限一条没有，
-  /// 那"上限"就只是一句 UI 层的口号。
+  /// 必须有这一层：编辑页在 100 KB 处**拒绝保存**、标题超 200 字**截断**，
+  /// 但 AI 走的是另一条写入路径。不加约束的话 `createNote` 可以让一篇笔记任意长、
+  /// 标题任意长 —— 同一张表两条写入路径，一条有上限一条没有，那"上限"就只是一句
+  /// UI 层的口号。
   ///
   /// 两条规则与编辑页一致：
   ///   · **标题截断**：标题会进 prompt，几万字的"标题"能撑爆一次请求；
@@ -626,8 +622,8 @@ class ToolExecutor {
       'charCount': note.content.length,
       'chunkCount': chunks.length,
       'hasSummary': summary != null,
-      // 摘要 ≤300 字，比正文便宜一个数量级，有就直接给 —— 但它是**旧版本**
-      // 的概括（正文改多了会作废，作废了这里就是 false），所以标注清楚。
+      // 摘要 ≤300 字，比正文便宜一个数量级，有就直接给 —— 但它是按旧内容生成的
+      // 概括（正文改多了会作废，作废了这里就是 false），所以标注清楚。
       if (summary != null) 'summary': summary,
       'hint': '这里没有正文。看目录用 listChunks(noteId)，'
           '看内容用 readChunk(noteId, index)。',
@@ -836,10 +832,9 @@ class ToolExecutor {
 
   /// 在笔记**末尾追加**一段内容。
   ///
-  /// ## 为什么单独给一个工具，而不是让模型用 `updateNote` 拼全文
-  ///
-  /// "把这段加到末尾"用 `updateNote` 要这么干：先 `readChunk` 读出全文
-  /// （几千字进上下文），再把「原文 + 新内容」整体写回去。中间任何一次抄漏
+  /// 单独给一个工具（而不是让模型用 `updateNote` 拼全文）的理由：
+  /// "把这段加到末尾"用 `updateNote` 要先 `readChunk` 读出全文
+  /// （几千字进上下文），再把「原文 + 新内容」整体写回去，中间任何一次抄漏
   /// 都会**静默丢掉内容** —— 而它看起来完全像成功。
   ///
   /// 追加不需要读全文：拼接由 App 在本地做，模型只出"加什么"。
@@ -918,11 +913,10 @@ class ToolExecutor {
 
   /// 改笔记的某一段。
   ///
-  /// ## 为什么用锚点而不是"第几段"
-  ///
-  /// AI 读到"第 3 段"之后，用户往前面插了一段 —— 再按 index 3 改就**改错地方**，
-  /// 而且改得毫无声息。`expectedText` 校验的是"要改的那段原文还在不在"，
-  /// 不在就返回错误让 AI 重新定位。见《AI接入设计》的「参数锚点」一节。
+  /// 这里用 `expectedText` 锚点而不是"第几段"：AI 读到"第 3 段"之后，用户往前面
+  /// 插了一段 —— 再按 index 3 改就**改错地方**，而且改得毫无声息。`expectedText`
+  /// 校验的是"要改的那段原文还在不在"，不在就返回错误让 AI 重新定位。
+  /// 见《AI接入设计》的「参数锚点」一节。
   Future<ToolResult> _updateNote(Map<String, Object?> a) async {
     final noteId = _str(a, 'noteId');
     if (noteId == null) return ToolResult.failure('updateNote 需要 `noteId`。');
@@ -941,7 +935,7 @@ class ToolExecutor {
       );
     }
 
-    // ---- ① 锚点校验：**必须**通过，否则宁可失败也不写到别处 ----
+    // ---- ① 锚点校验：必须通过，否则宁可失败也不写到别处 ----
     var nextBody = note.content;
     if (newContent != null) {
       if (expected == null || expected.isEmpty) {
@@ -1184,9 +1178,9 @@ class ToolExecutor {
   // 内部实现仍然是**软删除**（`deletedAt` 置位、行还在）——那是为了防 bug、
   // 留后路，而不是给用户一个回收站入口。
   //
-  // ## 为什么删笔记要连切片一起清
-  // 外键虽然带 `ON DELETE CASCADE`，但软删**不会触发**级联。留着片的话，
-  // 搜索会把"命中哪一片"算到已删的笔记头上，用户点进去发现笔记没了。
+  // 删笔记要连切片一起清：外键虽然带 `ON DELETE CASCADE`，但软删**不会触发**
+  // 级联。留着片的话，搜索会把"命中哪一片"算到已删的笔记头上，用户点进去发现
+  // 笔记没了。
   // ==========================================================================
 
   Future<ToolResult> _deleteNote(Map<String, Object?> a) async {
