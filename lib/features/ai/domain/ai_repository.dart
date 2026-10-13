@@ -97,21 +97,13 @@ class AiRepository {
   /// 提示词要求卡片基于这段原文展开，这样卡片才具体。
   /// 详见 [FeedMaterial] 与 `AiPrompts.feedSystem`。
   ///
-  /// [count] 是**要几张卡片**，和素材份数是两件事：
-  /// 素材够就一份一张；素材不够时提示词会要求从同一份素材的不同角度补足。
-  /// 不传则退化为"一份素材一张卡片"。
-  ///
   /// [avoidTitles] 是已经生成过的标题（池子 + 预留）。库里笔记少时切片会被
   /// 反复取到，让模型主动避开这些标题才能真的不重复。
-  ///
-  /// > `count` 不能被省掉、写成"一份素材一张卡"：那样素材数会被笔记数卡死 ——
-  /// > 库里只有 3 条笔记就只能出 3 张卡，内存池永远补不满，用户等一次只拿到几张。
   ///
   /// 关思考模式：它会吃光额度，`max_tokens=20` 时正文直接返回空字符串。
   /// 生成创意文本不需要长链推理，关掉更快更省。
   Future<List<FeedDraft>> generateFeedNotes(
     List<FeedMaterial> materials, {
-    int? count,
     List<String> avoidTitles = const [],
     String model = DeepSeekConfig.modelFlash,
     bool deepThinking = false,
@@ -131,7 +123,6 @@ class AiRepository {
           systemPrompt: AiPrompts.feedSystem,
           userPrompt: AiPrompts.feedUser(
             materials,
-            count: count,
             avoidTitles: avoidTitles,
           ),
           model: model,

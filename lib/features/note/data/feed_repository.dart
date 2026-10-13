@@ -513,13 +513,14 @@ class FeedRepository {
     }
   }
 
-  /// 并发生成 [count] 张卡：拆成若干路，**每路一个请求、一份素材、1 张卡**。
+  /// 并发生成：拆成若干路，**每路一个请求、一份素材、只出 1 张卡**。
   ///
   /// 实测依据：一个请求里要 N 张是 O(N) 的（N=5 约 12s），而拆成 N 路并行单卡
   /// 只要 ~4s。每路分**不同素材**，实测标题不会互相撞车（各写各的那一块）。
   ///
-  /// 素材少于 [count] 时退化成"少几路、每路要 1~2 张"（从同一份素材的不同角度），
-  /// 最后仍由 [dropSimilarDrafts] 兜底去重。
+  /// 只出这么多张：想多出卡就得多给素材（`gatherSources` 的 `limit`），
+  /// 而不是让模型对着一份素材写多张——那样它只会"换个说法重复"。
+  /// 各路结果仍由 [dropSimilarDrafts] 兜底去重。
   Future<List<FeedDraft>> _generateCardsParallel(
     List<FeedMaterial> materials,
     int count,
@@ -529,18 +530,12 @@ class FeedRepository {
     // 路数 = min(要几张, 有几份素材, 并发上限)：一路一份素材。
     final slots = [count, materials.length, kGenParallelism]
         .reduce((a, b) => a < b ? a : b);
-    // 把 count 张尽量均分到 slots 路
-    final sizes = List.generate(
-      slots,
-      (i) => count ~/ slots + (i < count % slots ? 1 : 0),
-    );
     final use = materials.take(slots).toList(growable: false);
 
     final out = <FeedDraft>[];
     await _runBounded(List.generate(slots, (i) => i), slots, (i) async {
       final drafts = await _ai.generateFeedNotes(
         [use[i]],
-        count: sizes[i],
         avoidTitles: existingTitles(),
       );
       out.addAll(drafts);

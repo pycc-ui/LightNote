@@ -236,8 +236,8 @@ void main() {
 
     test('极端情况：多条短笔记（各只有 1 块）就只凑到笔记条数', () async {
       // 短笔记整篇一块，切不出第二块——素材数到这里确实是上限。
-      // 张数由提示词兜底（"同一份素材可以写多张，抓不同的具体内容"），
-      // 见 AiPrompts.feedUser 的 count < materials.length 分支。
+      // 现在并行单卡是"一路一份素材、只出 1 张"，所以卡片数就跟着素材数；
+      // 素材少就少出几张，不再靠"同一份素材多写几张"补。
       for (var i = 0; i < 3; i++) {
         await notes.createInbox(title: '短$i', content: '很短的一段正文$i。');
       }
