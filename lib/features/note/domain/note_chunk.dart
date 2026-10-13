@@ -11,8 +11,8 @@
 ///
 /// | 字段 | 用途 |
 /// |---|---|
-/// | [index] | 顺序号。AI 的 `readChunk(noteId, index)` 与搜索结果的"定位到这片"都用它 |
-/// | [heading] | 标题路径（`工作 / 项目A / 风险`），给 AI 当上下文、给搜索页当副标题 |
+/// | [index] | 顺序号。搜索结果的"定位到这片"与卡片流取片都用它 |
+/// | [heading] | 标题路径（`工作 / 项目A / 风险`），给搜索页当副标题、给卡片流当上下文 |
 /// | [level] | 这一片来自几级标题（0 = 无标题） |
 /// | [start] / [end] | 左闭右开，偏移基于原始 `content`（不归一化） |
 /// | [charCount] | `end - start`，即 `content.substring(start, end).length` |

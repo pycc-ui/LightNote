@@ -228,7 +228,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除 API Key'),
-        content: const Text('删除后 AI 功能将不可用，已生成的摘要与卡片不受影响。'),
+        content: const Text('删除后 AI 功能将不可用，已生成的卡片不受影响。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),

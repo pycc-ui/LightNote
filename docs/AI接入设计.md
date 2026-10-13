@@ -21,7 +21,7 @@
 |---|---|
 | Base URL | `https://api.deepseek.com` |
 | 对话端点 | `POST /chat/completions` |
-| 模型名 | `deepseek-flash`（`modelFlash`，默认）；`deepseek-v4-pro`（`modelPro`）。**AI 助手页按会话选**（原先是选工作区的位置），卡片流/摘要固定 flash |
+| 模型名 | `deepseek-flash`（`modelFlash`，默认）；`deepseek-v4-pro`（`modelPro`）。**AI 助手页按会话选**（原先是选工作区的位置），卡片流固定 flash |
 | 上下文 / 最大输出（常量声明） | `maxContextTokens = 1000000` / `maxOutputTokens = 384000` |
 | 连接超时 | 20 秒 |
 | 读超时 | 5 分钟 |
@@ -31,10 +31,11 @@
 1. **模型名用 `deepseek-flash`。** config 注释写明：旧名 `deepseek-v4-flash` 仍可调用，但对应模型已下线，
    请求会由新模型代答。
 2. **AI 助手页可以按会话选 flash / pro。** 模型存在会话记录里（复用 `workspace_scope` 列，
-   见《数据库设计》），`AiChatRepository._drive` 把会话的模型传给 `streamAgent`。
-   **卡片生成与摘要是高频成本大头，固定用 flash**，不读会话选择（避免误选 pro 把成本抬三倍）。
+   语义已改为存模型名，见《数据库设计》），`AiChatRepository._drive` 把会话的模型传给 `streamAgent`。
+   **卡片生成是高频成本大头，固定用 flash**，不读会话选择（避免误选 pro 把成本抬三倍）。
    历史压缩也固定 flash。
-3. `maxOutputTokens = 384000` 只是声明，从不是实际用量——每次调用都显式给 `max_tokens`（见 1.2 末）。
+3. `maxOutputTokens = 384000` 只是声明，从不是实际用量——具体调用各自给 `max_tokens`（卡片生成 / 自检 /
+   `completeJson`；对话路径不传，见 1.2 末）。
 
 ### 1.2 三种请求体
 
@@ -97,7 +98,7 @@
 | `thinking` | 永远显式带上 `enabled` / `disabled`，从不省略。原因见第 2 节坑 1 |
 | `reasoning_effort` | 只在 `thinking: enabled` 时带（默认 `high`；AI 页实际传 `medium` / `high`） |
 | `temperature` | 只在 `thinking: disabled` 且调用方显式传了才带。思考模式下传了不报错也不生效，所以代码干脆不传，避免误导后来者 |
-| `max_tokens` | 实际用到：卡片生成 `2048`（`AiLimits.feedMaxOutputTokens`，从 16384 收下来防跑飞）、单篇摘要 `1200`、连通性自检 `64`、`completeJson` 默认 `4096` |
+| `max_tokens` | 实际用到：卡片生成 `2048`（`AiLimits.feedMaxOutputTokens`，从 16384 收下来防跑飞）、连通性自检 `64`、`completeJson` 默认 `4096`；`streamAgent` 不传（留给模型默认） |
 
 `response_format` 用的是官方 JSON Output，官方要求 prompt 里出现 "json" 字样并给出输出样例——
 `prompts.dart` 顶部把这条和「前缀稳定」一起写成两条硬性约束。
@@ -121,7 +122,7 @@
 
 事件类型（UI 消费的就是这几个）：`AiChunk`（增量正文）、`AiReasoning`（思维链）、`AiDone`、`AiError`。
 AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished` / `AgentAwaitingUser` /
-`AgentFailed` / `AgentToolStarted` / `AgentToolDone` / `AgentToolsGranted`（思维链在 agent 路径被丢弃、不展示）。
+`AgentFailed` / `AgentToolStarted` / `AgentToolDone`（思维链在 agent 路径被丢弃、不展示）。
 
 三个容易写错的边界：
 
@@ -138,13 +139,15 @@ AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished
 
 **工具定义（`tools` 数组元素）**
 
+`tools` 里只有两个：`run`（执行命令脚本）与 `askUser`（挂起提问）。`run` 的定义长这样：
+
 ```json
 {"type": "function",
  "function": {"name": "run", "description": "在用户的笔记库上执行命令脚本……", "parameters": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}}}
 ```
 
 `description` 是写给模型看的：写「什么时候用它」，不是「它是干什么的」。命令的**语法与清单**写在
-system prompt 里（约 400 token），不塞进工具 schema —— 这样 22 个工具的定义开销收敛成一个。
+system prompt 里（约 400 token），不塞进工具 schema —— 这样原来 22 个工具的定义开销收敛成两个。
 
 **流式回来的 `tool_calls` 是分片的**（同一 `index` 可能来多块，后面几块只有 `arguments`）：
 
@@ -187,7 +190,6 @@ system prompt 里（约 400 token），不塞进工具 schema —— 这样 22 �
 |---|---|
 | AI 助手页 | 用户在页面选思考强度：`低` → 关闭；`中` / `高` → 开启（`thinkingEnabled: _effort != 'low'`） |
 | 卡片生成 | 关闭（`deepThinking: false` 默认） |
-| 单篇摘要 | 关闭 |
 | 更早历史的压缩摘要 | 关闭（`streamChat` 不传 `thinking`） |
 | 连通性自检 | 关闭 |
 | ~~`organize` / `ask`~~ | 两条路径都已不在代码里（`organize` 的 prompt 与调用都已删除；`ask` 只剩 `askUser` 提示词、无调用方），所以不再有"默认值"可列 |
@@ -205,8 +207,8 @@ system prompt 里（约 400 token），不塞进工具 schema —— 这样 22 �
 1. **解析侧三级降级**（`AiPrompts.extractJson`）：直接 `jsonDecode` → 剥掉 ```` ```json ```` 围栏后重试 →
    花括号配对截取第一个完整对象。
 2. **调用侧重试**：`completeJson` 遇到空正文直接抛 `DeepSeekException(code: 'json_empty')`
-   （不静默返回空串），由调用方决定。卡片生成最多 2 次尝试，`json_empty` 也会重试；单篇摘要也是 2 次尝试，
-   但 JSON 解析失败才重试，`json_empty` 与其它不可重试错误直接记录失败。
+   （不静默返回空串），由调用方决定。卡片生成最多 2 次尝试：`json_empty`、可重试错误、以及 JSON 解析
+   失败都会重试，其它不可重试错误直接记录失败。
 
 失败就是失败，只留一条 `ai_calls` 审计记录，没有「保留原文给用户手动确认」这条路。
 
@@ -249,7 +251,7 @@ uncached = promptTokens - cached
 
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
-| system prompt 前缀稳定 | `prompts.dart` 硬性约束：不把时间戳、随机 ID、笔记 ID 放进 system prompt 开头；变化的东西一律 append 在末尾——更早历史的摘要拼在末尾（`withSummary`），工具目录拼在末尾（`_systemWithCatalog`） | 命中上下文缓存后输入价降到 1/50（flash） |
+| system prompt 前缀稳定 | `prompts.dart` 硬性约束：不把时间戳、随机 ID、笔记 ID 放进 system prompt 开头；变化的东西一律 append 在末尾——更早历史的摘要拼在末尾（`withSummary`） | 命中上下文缓存后输入价降到 1/50（flash） |
 | 会话历史只带最近 5 轮 | `maxHistoryRounds = 5`（一轮 = 一问一答，从倒数第 5 条 `user` 消息起） | 历史是每条消息都重发的，不设限就是 `O(N²)`；钉死之后总成本回到 `O(N)` |
 | 单条历史截断 500 字 | `maxHistoryChars = 500`，截断处显式标「…（已截断）」，让模型知道后面还有 | 长的历史回答不原样重发 |
 | 更早的历史压成一段摘要 | 窗口之外的轮次压成一段摘要，存进 `app_kv`（键 `ai_history_summary_<会话id>`），只生成一次，之后每轮直接读；删会话时一并清掉 | 不再每轮重复支付更早历史的输入；也不再每轮多付一次「压缩」调用 |
@@ -288,12 +290,8 @@ uncached = promptTokens - cached
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
 | 卡片流并发单卡 | 一路一个请求、只要 1 张（`kGenParallelism = 4` 路），各分配不同素材 | 实测一个请求要 N 张是 O(N)（N=5 约 12s），而并行单卡只要 ~4s；额度从 `16384` 收到 `AiLimits.feedMaxOutputTokens = 2048`（正常远用不到，纯防跑飞——一次跑飞就是几千 token）。无预留时首屏只先生成 3 张（`kFeedFirstScreenCount`），其余后台补 |
-| 素材是 300 字的窗口 | 每份素材 300 字（`FeedWindow.chars`），一次最多 4 份 → 4 × 300 = 1200 ≤ `batchBudget = 4000` | 提示词长度、成本估算都围绕「一份素材 300 字」设计（从 400 收到 300） |
-| 摘要持久化复用 | 摘要存进 `ai_note_summaries`（一篇笔记一条，新摘要覆盖旧的），卡片流下次直接用；只为真正会用到的笔记生成摘要；生成失败退回正文截断 | 摘要是长期复用的资产，不是每次重新生成；退化路径不额外花钱 |
-| 摘要失效只在变化够大时 | 用源正文的 UTF-8 字节数判断是否过期，变化幅度要超过 `staleRatio = 0.20` 才重生成——不看 `updatedAt` | 用户改个错别字不会让摘要作废，避免「每次编辑都白烧一次调用」 |
-| 摘要输出硬截断 | `summaryHardMax = 120` 字（目标 80–120，`max_tokens = 1200`） | 模型不守字数，代码必须兜底；摘要只作卡片流的背景，120 字够用 |
-| 摘要一律卡片优先 | 任何路径缺摘要都先用正文截断兜底、**丢后台**并发生成（`_backfillSummaries`，4 路），不为摘要卡住出卡 | 摘要只作背景、实测对卡片质量影响很小；生成后落库复用，下次抽到它用的就是真摘要 |
-| 标签只在输出侧约束 | 每张卡 2–6 个标签，每个 ≤5 个汉字 / ≤12 个英文字母 | 控制输出 token，顺带保证卡片显示不炸 |
+| 素材是 400 字的窗口 | 每份素材 400 字（`FeedWindow.chars` = `FeedLimits.windowChars`），一次最多 4 份 → 4 × 400 = 1600 ≤ `FeedWindow.batchBudget = 4000`（= `FeedLimits.windowBatchBudget`） | 提示词长度、成本估算都围绕「一份素材 400 字」设计 |
+| 标签只在输出侧约束 | 每张卡 1 个标签，≤5 个汉字 / ≤12 个英文字母 | 控制输出 token，顺带保证卡片显示不炸 |
 | 卡片上只有标题，不单独生成摘要 | 提示词只要求标题是「有钩子的一句话」（早先试过单独生成卡片摘要，模型不守字数：要求 45–60 字稳定返回 116–160 字） | 每张卡少一次摘要生成，也少一个要维护的内容字段 |
 | 素材不重复 | 笔记级冷却：最近 `kRecentNoteKeep = 15` 张卡片里同一篇笔记最多出现 1 次（内存，不落库） | 连着拿同一篇素材会生成高度雷同的卡片，等于白烧 |
 | 同一批生成并发去重 | `refill()` 用 `_inflight` 复用同一个 future，而 `takeBatch` 取完一屏自己也会调它 | 进页面时「拉预留 + 后台补池」不会并发跑两次生成（双倍 token） |
@@ -311,7 +309,6 @@ uncached = promptTokens - cached
 | 单次脚本命令条数 / 循环次数 / 总耗时 | 50 条 / 100 次 / 10 秒 |
 | 单次 `sed -n` 读行数 / `grep` 返回条数 | 200 行 / 50 条 |
 | 生成类调用的重试次数 | 2 次尝试（即最多重试 1 次），不无限重试 |
-| prompt 正文上限常量 | `AiPrompts.summaryInputMaxChars = 20000`（`noteSummaryUser` 用它截单条正文）。按成本定、且真能触发：摘要是 ≤120 字的概括，2 万字够用；3 万字以上的笔记会被截断，提示里明说被截了 |
 
 另外，写笔记侧的上限也间接保护了 AI 成本：标题超 200 字截断（标题会进 prompt）；笔记正文按 UTF-8 字节
 分档 80KB / 90KB / 100KB，到 100KB 拒绝落盘（见 `app_params.dart`、`note_editor_page.dart`）。
@@ -333,7 +330,7 @@ uncached = promptTokens - cached
 
 ## 4. AI Agent：工具约定、挂起与确认
 
-> 出处：`tool_specs.dart`（清单 / 风险 / 分层）、`tool_executor.dart`（执行 / 上限 / 确认 / 撤销栈）、
+> 出处：`tool_specs.dart`（清单 / 风险）、`tool_executor.dart`（执行 / 上限 / 确认 / 撤销栈）、
 > `agent_loop.dart`（循环 / 上限 / 事件）、`ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、
 > `ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库）、`history_chunker.dart`（会话切片）。
 > 协议报文（`tools` / `tool_calls` / `role: tool`）见 1.4，事件类型见 1.3，省 token 的角度见 3.2（3）。
@@ -446,7 +443,7 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 而是回一条明确的失败："这一轮已经问过 5 次了，不要再问。请用现有信息给出最好的答案……"。
 
 > 只有 `askUser` 的次数被带回来了：`maxRounds` 在每次 `run()` 里重新从 0 数，挂起恢复后轮数预算会重置；
-> `_drive` 每次都新建 `ToolExecutor`，所以撤销栈与读片快照也不跨 `run()`（既包括挂起恢复，也包括下一句
+> `_drive` 每次都新建 `ToolExecutor`，所以撤销栈也不跨 `run()`（既包括挂起恢复，也包括下一句
 > 用户输入）。
 
 **选项为什么由 App 现查**（`AskResolver`）：模型只给筛选条件
@@ -537,9 +534,9 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 ### 4.7 验收口径与上线后要观察什么（AI 行为）
 
-**可断言的验收口径**（这些点都有对应测试文件：`tool_executor_test` / `tool_write_test` /
-`tool_delete_test` / `agent_loop_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` /
-`history_summary_test` / `tool_specs_test`；是否全绿以 `flutter test` 为准）：
+**可断言的验收口径**（这些点都有对应测试文件：`agent_loop_test` / `agent_dialogs_test` /
+`deepseek_tool_calling_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` /
+`history_summary_test` / `history_chunker_test`；是否全绿以 `flutter test` 为准）：
 
 - [x] `run` 的脚本能读能写：`ls`/`stat`/`sed -n`/`grep` 批量执行、一次性回灌
 - [x] 写命令逐条弹确认；用户拒绝则**跳过这一条、继续下一条**
@@ -551,7 +548,7 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 > 旧的验收项（`listChunks` / `readChunk` 预算、`expectedText` 锚点、`requestTools`、批量工具）随
 > 命令语言改造已作废；对应的旧测试文件（`tool_specs_test` / `tool_executor_test` / `tool_delete_test` /
-> `tool_write_test` / `agent_workspace_test` 等）需要按新工具层重写。
+> `tool_write_test` / `agent_workspace_test` 等）已不在仓库里，验收改由上面列出的测试承担。
 
 > **真机端到端（`agent_live_test.dart` / `agent_search_live_test.dart`）：未做。**
 > 那 3 份真机测试已删除（不会真的去跑，留着只是维护负担）。代价是"协议报文形状 / 模型会不会主动调工具 /
@@ -582,7 +579,7 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 |---|---|
 | `id` | uuid |
 | `note_id` | 可空（见 5.4） |
-| `task` | `organize` / `feed_generate` / `ask` / `agent` / `note_summary` |
+| `task` | 实际会出现：`feed_generate` / `agent`；`organize` / `ask` / `note_summary` 已无调用方 |
 | `model` | 模型名 |
 | `thinking_enabled` | 思考模式是否开启 |
 | `prompt_tokens` / `completion_tokens` | 用量 |
@@ -597,12 +594,11 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 ### 5.2 谁写、写什么
 
 - 统一入口是 `AiRepository._logCall`；写库失败静默吞掉，审计不能影响主流程。
-- 业务调用（`feed_generate` / `note_summary` / `ask` / `organize`）各自记一条，成功与失败都记
-  （失败带 `error_code`）。
+- 业务调用（`feed_generate` 等）各自记一条，成功与失败都记（失败带 `error_code`）。
 - AI 助手是另一条：`AiChatRepository._log` → `AiRepository.logChatCall`，`task = 'agent'`。它记的是整轮
   累计用量（多轮工具往返合起来记一条）——只记最后一次会让「工具用得越多、成本越低」这种假象出现。
-- `task` 的 `organize` 与 `ask` 两条路径当前没有调用方，所以实际会出现的 `task` 是 `agent` /
-  `feed_generate` / `note_summary`。
+- `task` 的 `organize` / `ask` / `note_summary` 三条路径当前没有调用方（`note_summary` 随笔记摘要
+  一起删除），所以实际会出现的 `task` 是 `agent` / `feed_generate`。
 
 ### 5.3 用量页怎么对上
 
@@ -621,7 +617,7 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 2. **`agent` 那条的成本会偏高。** `logChatCall` 收下了当轮带缓存折扣的 `costCents`，却把它丢掉，只用
    `TokenUsage(prompt, completion)` 重新估算（`cachedPromptTokens` 留空）——等于按未命中价计价。缓存命中越多，
    这条记录越偏高。已无调用方的 `ask` 路径同样把命中量丢掉了。
-3. **`note_id` 实际上全是空。** 所有有调用方的写入点都传 `noteId: null`（`feed_generate` / `note_summary`
-   显式传 null，`agent` 由 `logChatCall` 固定传 null）；唯一传了 noteId 的 `organize` 没有调用方。
+3. **`note_id` 实际上全是空。** 所有有调用方的写入点都传 `noteId: null`（`feed_generate` 显式传
+   null，`agent` 由 `logChatCall` 固定传 null）；传了 noteId 的 `organize` 没有调用方。
    所以「按笔记对账」现在做不到。
 4. **价格是代码常量、无节假日日历、无用户覆盖**：节假日会被算成高峰；官方调价后 App 里的估算不会自动跟着变。

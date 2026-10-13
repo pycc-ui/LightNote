@@ -26,7 +26,7 @@
 library;
 
 // ============================================================================
-// 文本类内容的上限（摘要 / 标签 / 标题 / 笔记正文）
+// 文本类内容的上限（标签 / 标题 / 笔记正文 / 卡片）
 // ============================================================================
 
 abstract final class AiLimits {
@@ -84,22 +84,22 @@ abstract final class FeedLimits {
   static const pullSize = 2;
 
   /// 后台常备几张（池子的目标值，不是下限）。
-  static const poolTarget = 8;
+  static const poolTarget = 6;
 
   /// 补池的并发路数（≈一次最多生成几张）。
-  static const genParallelism = 4;
+  static const genParallelism = 3;
 
   /// 每次启动给**下次**预留几张（存进 `feed_reserve`）。
-  static const reserveSize = 6;
+  static const reserveSize = 3;
 
   /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
   static const recentNoteKeep = 15;
 
   /// **切片记忆窗口**：最近这么多块不重复取（会话内快速过滤）。
-  static const recentChunkKeep = 60;
+  static const recentChunkKeep = 30;
 
   /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
-  static const recentTitleKeep = 40;
+  static const recentTitleKeep = 20;
 
   /// 一份素材的字符数（从片里开出的窗口大小）。
   ///

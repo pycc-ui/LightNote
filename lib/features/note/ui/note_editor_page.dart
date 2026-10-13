@@ -246,7 +246,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
   /// 落盘时用的标题：先按硬上限截断。
   ///
-  /// 为什么标题也要限：它会被拼进摘要的 prompt，
+  /// 为什么标题也要限：它会被拼进卡片生成的 prompt，
   /// 一个几万字的"标题"能直接把一次请求撑爆。
   /// 截断而不是拒绝——标题过长是异常情况，但没必要为此挡住整篇笔记的保存。
   String get _titleForSave =>

@@ -112,7 +112,7 @@ class AiConversations extends Table {
   /// `AiModel.parse`，认不出 pro 就回默认的 flash，不会因为老值而选到
   /// 不存在的模型。
   ///
-  /// 卡片流与摘要**不读这一列**（它们固定用 flash）。
+  /// 卡片流**不读这一列**（固定用 flash）。
   TextColumn get workspaceScope => text().withDefault(const Constant(''))();
 
   /// 思考强度：low / medium / high
@@ -228,7 +228,7 @@ class FeedReserve extends Table {
 /// 是因为有下面三个只有持久化才能满足的需求：
 ///
 ///   · 搜索要返回"命中哪一片"（`chunkIndex` / `heading`）
-///   · AI 的 `readChunk(noteId, index)` 需要稳定的片索引
+///   · 卡片流要按片开窗口取素材
 ///   · 搜索结果要能跳到原文那一段
 ///
 /// 代价就是要维护重切链路（防抖、阈值、事务、自愈），这一条在设计里是明确认下的。
@@ -258,7 +258,7 @@ class NoteChunks extends Table {
   TextColumn get noteId =>
       text().references(Notes, #id, onDelete: KeyAction.cascade)();
 
-  /// 顺序号，0 起。**AI 的 `readChunk(noteId, idx)` 用的就是它。**
+  /// 顺序号，0 起。**搜索返回的"命中哪一片"用的就是它。**
   IntColumn get idx => integer()();
 
   /// 标题路径，如 `工作 / 项目A / 风险`。无标题时为空串。

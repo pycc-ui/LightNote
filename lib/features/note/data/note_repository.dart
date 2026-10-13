@@ -174,7 +174,7 @@ class NoteRepository {
   ///
   /// 左滑删除是"乐观删除 + 撤销"（删完在提示条上留一个撤销），
   /// 所以需要恢复入口。逻辑删除让这件事很便宜：清空 `deletedAt` 即可，
-  /// 卡片、AI 摘要等关联都还在。
+  /// 卡片、切片等关联都还在。
   Future<void> restore(String id) => _db.restoreNote(id);
 
   // ---- 批量操作（多选模式用）----
