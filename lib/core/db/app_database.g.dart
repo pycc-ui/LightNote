@@ -180,7 +180,7 @@ class Notebook extends DataClass implements Insertable<Notebook> {
   final String id;
   final String name;
 
-  /// 用于列表展示排序。**不再是"同层内"排序**——没有层了。
+  /// 用于列表展示排序。没有层级，所以不是「同层内」排序。
   final int sortOrder;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -2065,31 +2065,17 @@ class $AiConversationsTable extends AiConversations
 class AiConversation extends DataClass implements Insertable<AiConversation> {
   final String id;
 
-  /// 工作区（**AI 能看到哪些笔记**），JSON。
+  /// **本会话使用的模型名**（`deepseek-flash` / `deepseek-v4-pro`）。
   ///
-  /// ## 为什么不再是"一个笔记库 id"
+  /// ⚠️ 列名仍是历史遗留的 `workspace_scope`（不改列名 = 不动表结构 =
+  /// 不需要迁移，也不需要重跑代码生成）。它原本存的是「工作区」的 JSON；
+  /// 工作区取消后，这个位置改成了**选模型**，于是这一列被复用为模型名。
   ///
-  /// 原先是 `workspaceNotebookId TEXT`（单个笔记库）。但工作区有三态：
-  /// **不选择 / 全体空间 / 选择目录**，而"选择目录"还能多选、并且单独决定
-  /// 要不要带上「我的轻笔记」。一个 id 表达不了。
+  /// 老会话里存的可能是旧的 JSON（`{"mode":…}`）或空串 —— 解析统一走
+  /// `AiModel.parse`，认不出 pro 就回默认的 flash，不会因为老值而选到
+  /// 不存在的模型。
   ///
-  /// 形状（`AgentWorkspace.toJson`）：
-  /// ```json
-  /// { "mode": "none" | "all" | "pick",
-  ///   "notebookIds": ["…"],       // 仅 pick
-  ///   "includeUnfiled": false }   // 仅 pick
-  /// ```
-  ///
-  /// 三态的含义：
-  ///   · `none` —— 不选择，AI 看不到任何笔记（只能靠用户显式附上的文件）
-  ///   · `all`  —— **全部笔记库 + 我的轻笔记**
-  ///   · `pick` —— 指定的若干笔记库，`includeUnfiled` 另外决定要不要带上轻笔记
-  ///
-  /// 空串 = 还没设过 → 按 [WorkspaceMode.none] 处理（**保守**：
-  /// 老会话不给 AI 任何笔记范围，而不是突然让它看见全部）。
-  ///
-  /// ⚠️ 这个范围**同时是 AI 工具的范围**：`searchNotes` / `listNotes`
-  /// 会被它限制。否则"选了库 A"却还能搜到库 B，工作区就只是个标签。
+  /// 卡片流与摘要**不读这一列**（它们固定用 flash）。
   final String workspaceScope;
 
   /// 思考强度：low / medium / high
@@ -2524,7 +2510,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
   final String? pendingAction;
 
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
-  /// 设计稿 SQL 里写的是 INTEGER，Drift 会自动转成 Unix 时间戳存储，等价。
+  /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。
   final DateTime createdAt;
   const AiMessage({
     required this.id,
@@ -2966,432 +2952,6 @@ class AppKvCompanion extends UpdateCompanion<AppKvData> {
   }
 }
 
-class $AiNoteSummariesTable extends AiNoteSummaries
-    with TableInfo<$AiNoteSummariesTable, AiNoteSummary> {
-  @override
-  final GeneratedDatabase attachedDatabase;
-  final String? _alias;
-  $AiNoteSummariesTable(this.attachedDatabase, [this._alias]);
-  static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
-  @override
-  late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
-    'note_id',
-    aliasedName,
-    false,
-    type: DriftSqlType.string,
-    requiredDuringInsert: true,
-    defaultConstraints: GeneratedColumn.constraintIsAlways(
-      'REFERENCES notes (id) ON DELETE CASCADE',
-    ),
-  );
-  static const VerificationMeta _summaryMeta = const VerificationMeta(
-    'summary',
-  );
-  @override
-  late final GeneratedColumn<String> summary = GeneratedColumn<String>(
-    'summary',
-    aliasedName,
-    false,
-    type: DriftSqlType.string,
-    requiredDuringInsert: true,
-  );
-  static const VerificationMeta _modelMeta = const VerificationMeta('model');
-  @override
-  late final GeneratedColumn<String> model = GeneratedColumn<String>(
-    'model',
-    aliasedName,
-    false,
-    type: DriftSqlType.string,
-    requiredDuringInsert: false,
-    defaultValue: const Constant(''),
-  );
-  static const VerificationMeta _sourceBytesMeta = const VerificationMeta(
-    'sourceBytes',
-  );
-  @override
-  late final GeneratedColumn<int> sourceBytes = GeneratedColumn<int>(
-    'source_bytes',
-    aliasedName,
-    false,
-    type: DriftSqlType.int,
-    requiredDuringInsert: false,
-    defaultValue: const Constant(0),
-  );
-  static const VerificationMeta _createdAtMeta = const VerificationMeta(
-    'createdAt',
-  );
-  @override
-  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
-    'created_at',
-    aliasedName,
-    false,
-    type: DriftSqlType.dateTime,
-    requiredDuringInsert: true,
-  );
-  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
-    'updatedAt',
-  );
-  @override
-  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
-    'updated_at',
-    aliasedName,
-    false,
-    type: DriftSqlType.dateTime,
-    requiredDuringInsert: true,
-  );
-  @override
-  List<GeneratedColumn> get $columns => [
-    noteId,
-    summary,
-    model,
-    sourceBytes,
-    createdAt,
-    updatedAt,
-  ];
-  @override
-  String get aliasedName => _alias ?? actualTableName;
-  @override
-  String get actualTableName => $name;
-  static const String $name = 'ai_note_summaries';
-  @override
-  VerificationContext validateIntegrity(
-    Insertable<AiNoteSummary> instance, {
-    bool isInserting = false,
-  }) {
-    final context = VerificationContext();
-    final data = instance.toColumns(true);
-    if (data.containsKey('note_id')) {
-      context.handle(
-        _noteIdMeta,
-        noteId.isAcceptableOrUnknown(data['note_id']!, _noteIdMeta),
-      );
-    } else if (isInserting) {
-      context.missing(_noteIdMeta);
-    }
-    if (data.containsKey('summary')) {
-      context.handle(
-        _summaryMeta,
-        summary.isAcceptableOrUnknown(data['summary']!, _summaryMeta),
-      );
-    } else if (isInserting) {
-      context.missing(_summaryMeta);
-    }
-    if (data.containsKey('model')) {
-      context.handle(
-        _modelMeta,
-        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
-      );
-    }
-    if (data.containsKey('source_bytes')) {
-      context.handle(
-        _sourceBytesMeta,
-        sourceBytes.isAcceptableOrUnknown(
-          data['source_bytes']!,
-          _sourceBytesMeta,
-        ),
-      );
-    }
-    if (data.containsKey('created_at')) {
-      context.handle(
-        _createdAtMeta,
-        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
-      );
-    } else if (isInserting) {
-      context.missing(_createdAtMeta);
-    }
-    if (data.containsKey('updated_at')) {
-      context.handle(
-        _updatedAtMeta,
-        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
-      );
-    } else if (isInserting) {
-      context.missing(_updatedAtMeta);
-    }
-    return context;
-  }
-
-  @override
-  Set<GeneratedColumn> get $primaryKey => {noteId};
-  @override
-  AiNoteSummary map(Map<String, dynamic> data, {String? tablePrefix}) {
-    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
-    return AiNoteSummary(
-      noteId: attachedDatabase.typeMapping.read(
-        DriftSqlType.string,
-        data['${effectivePrefix}note_id'],
-      )!,
-      summary: attachedDatabase.typeMapping.read(
-        DriftSqlType.string,
-        data['${effectivePrefix}summary'],
-      )!,
-      model: attachedDatabase.typeMapping.read(
-        DriftSqlType.string,
-        data['${effectivePrefix}model'],
-      )!,
-      sourceBytes: attachedDatabase.typeMapping.read(
-        DriftSqlType.int,
-        data['${effectivePrefix}source_bytes'],
-      )!,
-      createdAt: attachedDatabase.typeMapping.read(
-        DriftSqlType.dateTime,
-        data['${effectivePrefix}created_at'],
-      )!,
-      updatedAt: attachedDatabase.typeMapping.read(
-        DriftSqlType.dateTime,
-        data['${effectivePrefix}updated_at'],
-      )!,
-    );
-  }
-
-  @override
-  $AiNoteSummariesTable createAlias(String alias) {
-    return $AiNoteSummariesTable(attachedDatabase, alias);
-  }
-}
-
-class AiNoteSummary extends DataClass implements Insertable<AiNoteSummary> {
-  final String noteId;
-
-  /// 摘要正文。**硬上限 300 字**，写入前已截断（见 AiRepository.summarizeNote）。
-  final String summary;
-
-  /// 生成时用的模型，便于以后判断是否需要因换模型而重生成。
-  final String model;
-
-  /// 生成时笔记正文的 **UTF-8 字节数**。
-  ///
-  /// 用它而不是 `updatedAt` 判断过期：`updatedAt` 只要写一次就变，
-  /// 用户改个错别字也会让摘要作废，等于每次编辑都白烧一次 token。
-  /// 字节数够用来判断"内容变了多少"，配合 [AiRepository] 里的
-  /// 20% 阈值就实现了防抖。
-  final int sourceBytes;
-  final DateTime createdAt;
-  final DateTime updatedAt;
-  const AiNoteSummary({
-    required this.noteId,
-    required this.summary,
-    required this.model,
-    required this.sourceBytes,
-    required this.createdAt,
-    required this.updatedAt,
-  });
-  @override
-  Map<String, Expression> toColumns(bool nullToAbsent) {
-    final map = <String, Expression>{};
-    map['note_id'] = Variable<String>(noteId);
-    map['summary'] = Variable<String>(summary);
-    map['model'] = Variable<String>(model);
-    map['source_bytes'] = Variable<int>(sourceBytes);
-    map['created_at'] = Variable<DateTime>(createdAt);
-    map['updated_at'] = Variable<DateTime>(updatedAt);
-    return map;
-  }
-
-  AiNoteSummariesCompanion toCompanion(bool nullToAbsent) {
-    return AiNoteSummariesCompanion(
-      noteId: Value(noteId),
-      summary: Value(summary),
-      model: Value(model),
-      sourceBytes: Value(sourceBytes),
-      createdAt: Value(createdAt),
-      updatedAt: Value(updatedAt),
-    );
-  }
-
-  factory AiNoteSummary.fromJson(
-    Map<String, dynamic> json, {
-    ValueSerializer? serializer,
-  }) {
-    serializer ??= driftRuntimeOptions.defaultSerializer;
-    return AiNoteSummary(
-      noteId: serializer.fromJson<String>(json['noteId']),
-      summary: serializer.fromJson<String>(json['summary']),
-      model: serializer.fromJson<String>(json['model']),
-      sourceBytes: serializer.fromJson<int>(json['sourceBytes']),
-      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
-      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
-    );
-  }
-  @override
-  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
-    serializer ??= driftRuntimeOptions.defaultSerializer;
-    return <String, dynamic>{
-      'noteId': serializer.toJson<String>(noteId),
-      'summary': serializer.toJson<String>(summary),
-      'model': serializer.toJson<String>(model),
-      'sourceBytes': serializer.toJson<int>(sourceBytes),
-      'createdAt': serializer.toJson<DateTime>(createdAt),
-      'updatedAt': serializer.toJson<DateTime>(updatedAt),
-    };
-  }
-
-  AiNoteSummary copyWith({
-    String? noteId,
-    String? summary,
-    String? model,
-    int? sourceBytes,
-    DateTime? createdAt,
-    DateTime? updatedAt,
-  }) => AiNoteSummary(
-    noteId: noteId ?? this.noteId,
-    summary: summary ?? this.summary,
-    model: model ?? this.model,
-    sourceBytes: sourceBytes ?? this.sourceBytes,
-    createdAt: createdAt ?? this.createdAt,
-    updatedAt: updatedAt ?? this.updatedAt,
-  );
-  AiNoteSummary copyWithCompanion(AiNoteSummariesCompanion data) {
-    return AiNoteSummary(
-      noteId: data.noteId.present ? data.noteId.value : this.noteId,
-      summary: data.summary.present ? data.summary.value : this.summary,
-      model: data.model.present ? data.model.value : this.model,
-      sourceBytes: data.sourceBytes.present
-          ? data.sourceBytes.value
-          : this.sourceBytes,
-      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
-      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
-    );
-  }
-
-  @override
-  String toString() {
-    return (StringBuffer('AiNoteSummary(')
-          ..write('noteId: $noteId, ')
-          ..write('summary: $summary, ')
-          ..write('model: $model, ')
-          ..write('sourceBytes: $sourceBytes, ')
-          ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
-          ..write(')'))
-        .toString();
-  }
-
-  @override
-  int get hashCode =>
-      Object.hash(noteId, summary, model, sourceBytes, createdAt, updatedAt);
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      (other is AiNoteSummary &&
-          other.noteId == this.noteId &&
-          other.summary == this.summary &&
-          other.model == this.model &&
-          other.sourceBytes == this.sourceBytes &&
-          other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
-}
-
-class AiNoteSummariesCompanion extends UpdateCompanion<AiNoteSummary> {
-  final Value<String> noteId;
-  final Value<String> summary;
-  final Value<String> model;
-  final Value<int> sourceBytes;
-  final Value<DateTime> createdAt;
-  final Value<DateTime> updatedAt;
-  final Value<int> rowid;
-  const AiNoteSummariesCompanion({
-    this.noteId = const Value.absent(),
-    this.summary = const Value.absent(),
-    this.model = const Value.absent(),
-    this.sourceBytes = const Value.absent(),
-    this.createdAt = const Value.absent(),
-    this.updatedAt = const Value.absent(),
-    this.rowid = const Value.absent(),
-  });
-  AiNoteSummariesCompanion.insert({
-    required String noteId,
-    required String summary,
-    this.model = const Value.absent(),
-    this.sourceBytes = const Value.absent(),
-    required DateTime createdAt,
-    required DateTime updatedAt,
-    this.rowid = const Value.absent(),
-  }) : noteId = Value(noteId),
-       summary = Value(summary),
-       createdAt = Value(createdAt),
-       updatedAt = Value(updatedAt);
-  static Insertable<AiNoteSummary> custom({
-    Expression<String>? noteId,
-    Expression<String>? summary,
-    Expression<String>? model,
-    Expression<int>? sourceBytes,
-    Expression<DateTime>? createdAt,
-    Expression<DateTime>? updatedAt,
-    Expression<int>? rowid,
-  }) {
-    return RawValuesInsertable({
-      if (noteId != null) 'note_id': noteId,
-      if (summary != null) 'summary': summary,
-      if (model != null) 'model': model,
-      if (sourceBytes != null) 'source_bytes': sourceBytes,
-      if (createdAt != null) 'created_at': createdAt,
-      if (updatedAt != null) 'updated_at': updatedAt,
-      if (rowid != null) 'rowid': rowid,
-    });
-  }
-
-  AiNoteSummariesCompanion copyWith({
-    Value<String>? noteId,
-    Value<String>? summary,
-    Value<String>? model,
-    Value<int>? sourceBytes,
-    Value<DateTime>? createdAt,
-    Value<DateTime>? updatedAt,
-    Value<int>? rowid,
-  }) {
-    return AiNoteSummariesCompanion(
-      noteId: noteId ?? this.noteId,
-      summary: summary ?? this.summary,
-      model: model ?? this.model,
-      sourceBytes: sourceBytes ?? this.sourceBytes,
-      createdAt: createdAt ?? this.createdAt,
-      updatedAt: updatedAt ?? this.updatedAt,
-      rowid: rowid ?? this.rowid,
-    );
-  }
-
-  @override
-  Map<String, Expression> toColumns(bool nullToAbsent) {
-    final map = <String, Expression>{};
-    if (noteId.present) {
-      map['note_id'] = Variable<String>(noteId.value);
-    }
-    if (summary.present) {
-      map['summary'] = Variable<String>(summary.value);
-    }
-    if (model.present) {
-      map['model'] = Variable<String>(model.value);
-    }
-    if (sourceBytes.present) {
-      map['source_bytes'] = Variable<int>(sourceBytes.value);
-    }
-    if (createdAt.present) {
-      map['created_at'] = Variable<DateTime>(createdAt.value);
-    }
-    if (updatedAt.present) {
-      map['updated_at'] = Variable<DateTime>(updatedAt.value);
-    }
-    if (rowid.present) {
-      map['rowid'] = Variable<int>(rowid.value);
-    }
-    return map;
-  }
-
-  @override
-  String toString() {
-    return (StringBuffer('AiNoteSummariesCompanion(')
-          ..write('noteId: $noteId, ')
-          ..write('summary: $summary, ')
-          ..write('model: $model, ')
-          ..write('sourceBytes: $sourceBytes, ')
-          ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt, ')
-          ..write('rowid: $rowid')
-          ..write(')'))
-        .toString();
-  }
-}
-
 class $FeedReserveTable extends FeedReserve
     with TableInfo<$FeedReserveTable, FeedReserveData> {
   @override
@@ -3570,7 +3130,7 @@ class FeedReserveData extends DataClass implements Insertable<FeedReserveData> {
   /// 完整正文（Markdown）
   final String body;
 
-  /// 标签，JSON 数组字符串（与 `cards` 曾经的 tags 一样，只整体读写）
+  /// 标签，JSON 数组字符串（只整体读写）
   final String tags;
 
   /// 取出顺序。0 是最先展示的那张。
@@ -4504,9 +4064,6 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   );
   late final $AiMessagesTable aiMessages = $AiMessagesTable(this);
   late final $AppKvTable appKv = $AppKvTable(this);
-  late final $AiNoteSummariesTable aiNoteSummaries = $AiNoteSummariesTable(
-    this,
-  );
   late final $FeedReserveTable feedReserve = $FeedReserveTable(this);
   late final $NoteChunksTable noteChunks = $NoteChunksTable(this);
   @override
@@ -4520,7 +4077,6 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     aiConversations,
     aiMessages,
     appKv,
-    aiNoteSummaries,
     feedReserve,
     noteChunks,
   ];
@@ -4539,13 +4095,6 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('ai_messages', kind: UpdateKind.delete)],
-    ),
-    WritePropagation(
-      on: TableUpdateQuery.onTableName(
-        'notes',
-        limitUpdateKind: UpdateKind.delete,
-      ),
-      result: [TableUpdate('ai_note_summaries', kind: UpdateKind.delete)],
     ),
     WritePropagation(
       on: TableUpdateQuery.onTableName(
@@ -4926,26 +4475,6 @@ final class $$NotesTableReferences
     );
   }
 
-  static MultiTypedResultKey<$AiNoteSummariesTable, List<AiNoteSummary>>
-  _aiNoteSummariesRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
-    db.aiNoteSummaries,
-    aliasName: 'notes__id__ai_note_summaries__note_id',
-  );
-
-  $$AiNoteSummariesTableProcessedTableManager get aiNoteSummariesRefs {
-    final manager = $$AiNoteSummariesTableTableManager(
-      $_db,
-      $_db.aiNoteSummaries,
-    ).filter((f) => f.noteId.id.sqlEquals($_itemColumn<String>('id')!));
-
-    final cache = $_typedResult.readTableOrNull(
-      _aiNoteSummariesRefsTable($_db),
-    );
-    return ProcessedTableManager(
-      manager.$state.copyWith(prefetchedData: cache),
-    );
-  }
-
   static MultiTypedResultKey<$NoteChunksTable, List<NoteChunkRow>>
   _noteChunksRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
     db.noteChunks,
@@ -5054,31 +4583,6 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
           ),
     );
     return composer;
-  }
-
-  Expression<bool> aiNoteSummariesRefs(
-    Expression<bool> Function($$AiNoteSummariesTableFilterComposer f) f,
-  ) {
-    final $$AiNoteSummariesTableFilterComposer composer = $composerBuilder(
-      composer: this,
-      getCurrentColumn: (t) => t.id,
-      referencedTable: $db.aiNoteSummaries,
-      getReferencedColumn: (t) => t.noteId,
-      builder:
-          (
-            joinBuilder, {
-            $addJoinBuilderToRootComposer,
-            $removeJoinBuilderFromRootComposer,
-          }) => $$AiNoteSummariesTableFilterComposer(
-            $db: $db,
-            $table: $db.aiNoteSummaries,
-            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
-            joinBuilder: joinBuilder,
-            $removeJoinBuilderFromRootComposer:
-                $removeJoinBuilderFromRootComposer,
-          ),
-    );
-    return f(composer);
   }
 
   Expression<bool> noteChunksRefs(
@@ -5268,31 +4772,6 @@ class $$NotesTableAnnotationComposer
     return composer;
   }
 
-  Expression<T> aiNoteSummariesRefs<T extends Object>(
-    Expression<T> Function($$AiNoteSummariesTableAnnotationComposer a) f,
-  ) {
-    final $$AiNoteSummariesTableAnnotationComposer composer = $composerBuilder(
-      composer: this,
-      getCurrentColumn: (t) => t.id,
-      referencedTable: $db.aiNoteSummaries,
-      getReferencedColumn: (t) => t.noteId,
-      builder:
-          (
-            joinBuilder, {
-            $addJoinBuilderToRootComposer,
-            $removeJoinBuilderFromRootComposer,
-          }) => $$AiNoteSummariesTableAnnotationComposer(
-            $db: $db,
-            $table: $db.aiNoteSummaries,
-            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
-            joinBuilder: joinBuilder,
-            $removeJoinBuilderFromRootComposer:
-                $removeJoinBuilderFromRootComposer,
-          ),
-    );
-    return f(composer);
-  }
-
   Expression<T> noteChunksRefs<T extends Object>(
     Expression<T> Function($$NoteChunksTableAnnotationComposer a) f,
   ) {
@@ -5332,11 +4811,7 @@ class $$NotesTableTableManager
           $$NotesTableUpdateCompanionBuilder,
           (Note, $$NotesTableReferences),
           Note,
-          PrefetchHooks Function({
-            bool notebookId,
-            bool aiNoteSummariesRefs,
-            bool noteChunksRefs,
-          })
+          PrefetchHooks Function({bool notebookId, bool noteChunksRefs})
         > {
   $$NotesTableTableManager(_$AppDatabase db, $NotesTable table)
     : super(
@@ -5422,17 +4897,10 @@ class $$NotesTableTableManager
               )
               .toList(),
           prefetchHooksCallback:
-              ({
-                notebookId = false,
-                aiNoteSummariesRefs = false,
-                noteChunksRefs = false,
-              }) {
+              ({notebookId = false, noteChunksRefs = false}) {
                 return PrefetchHooks(
                   db: db,
-                  explicitlyWatchedTables: [
-                    if (aiNoteSummariesRefs) db.aiNoteSummaries,
-                    if (noteChunksRefs) db.noteChunks,
-                  ],
+                  explicitlyWatchedTables: [if (noteChunksRefs) db.noteChunks],
                   addJoins:
                       <
                         T extends TableManagerState<
@@ -5467,27 +4935,6 @@ class $$NotesTableTableManager
                       },
                   getPrefetchedDataCallback: (items) async {
                     return [
-                      if (aiNoteSummariesRefs)
-                        await $_getPrefetchedData<
-                          Note,
-                          $NotesTable,
-                          AiNoteSummary
-                        >(
-                          currentTable: table,
-                          referencedTable: $$NotesTableReferences
-                              ._aiNoteSummariesRefsTable(db),
-                          managerFromTypedResult: (p0) =>
-                              $$NotesTableReferences(
-                                db,
-                                table,
-                                p0,
-                              ).aiNoteSummariesRefs,
-                          referencedItemsForCurrentItem:
-                              (item, referencedItems) => referencedItems.where(
-                                (e) => e.noteId == item.id,
-                              ),
-                          typedResults: items,
-                        ),
                       if (noteChunksRefs)
                         await $_getPrefetchedData<
                           Note,
@@ -5529,11 +4976,7 @@ typedef $$NotesTableProcessedTableManager =
       $$NotesTableUpdateCompanionBuilder,
       (Note, $$NotesTableReferences),
       Note,
-      PrefetchHooks Function({
-        bool notebookId,
-        bool aiNoteSummariesRefs,
-        bool noteChunksRefs,
-      })
+      PrefetchHooks Function({bool notebookId, bool noteChunksRefs})
     >;
 typedef $$AiCallsTableCreateCompanionBuilder =
     AiCallsCompanion Function({
@@ -6686,353 +6129,6 @@ typedef $$AppKvTableProcessedTableManager =
       AppKvData,
       PrefetchHooks Function()
     >;
-typedef $$AiNoteSummariesTableCreateCompanionBuilder =
-    AiNoteSummariesCompanion Function({
-      required String noteId,
-      required String summary,
-      Value<String> model,
-      Value<int> sourceBytes,
-      required DateTime createdAt,
-      required DateTime updatedAt,
-      Value<int> rowid,
-    });
-typedef $$AiNoteSummariesTableUpdateCompanionBuilder =
-    AiNoteSummariesCompanion Function({
-      Value<String> noteId,
-      Value<String> summary,
-      Value<String> model,
-      Value<int> sourceBytes,
-      Value<DateTime> createdAt,
-      Value<DateTime> updatedAt,
-      Value<int> rowid,
-    });
-
-final class $$AiNoteSummariesTableReferences
-    extends
-        BaseReferences<_$AppDatabase, $AiNoteSummariesTable, AiNoteSummary> {
-  $$AiNoteSummariesTableReferences(
-    super.$_db,
-    super.$_table,
-    super.$_typedResult,
-  );
-
-  static $NotesTable _noteIdTable(_$AppDatabase db) =>
-      db.notes.createAlias('ai_note_summaries__note_id__notes__id');
-
-  $$NotesTableProcessedTableManager get noteId {
-    final $_column = $_itemColumn<String>('note_id')!;
-
-    final manager = $$NotesTableTableManager(
-      $_db,
-      $_db.notes,
-    ).filter((f) => f.id.sqlEquals($_column));
-    final item = $_typedResult.readTableOrNull(_noteIdTable($_db));
-    if (item == null) return manager;
-    return ProcessedTableManager(
-      manager.$state.copyWith(prefetchedData: [item]),
-    );
-  }
-}
-
-class $$AiNoteSummariesTableFilterComposer
-    extends Composer<_$AppDatabase, $AiNoteSummariesTable> {
-  $$AiNoteSummariesTableFilterComposer({
-    required super.$db,
-    required super.$table,
-    super.joinBuilder,
-    super.$addJoinBuilderToRootComposer,
-    super.$removeJoinBuilderFromRootComposer,
-  });
-  ColumnFilters<String> get summary => $composableBuilder(
-    column: $table.summary,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<String> get model => $composableBuilder(
-    column: $table.model,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<int> get sourceBytes => $composableBuilder(
-    column: $table.sourceBytes,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<DateTime> get createdAt => $composableBuilder(
-    column: $table.createdAt,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
-    column: $table.updatedAt,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  $$NotesTableFilterComposer get noteId {
-    final $$NotesTableFilterComposer composer = $composerBuilder(
-      composer: this,
-      getCurrentColumn: (t) => t.noteId,
-      referencedTable: $db.notes,
-      getReferencedColumn: (t) => t.id,
-      builder:
-          (
-            joinBuilder, {
-            $addJoinBuilderToRootComposer,
-            $removeJoinBuilderFromRootComposer,
-          }) => $$NotesTableFilterComposer(
-            $db: $db,
-            $table: $db.notes,
-            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
-            joinBuilder: joinBuilder,
-            $removeJoinBuilderFromRootComposer:
-                $removeJoinBuilderFromRootComposer,
-          ),
-    );
-    return composer;
-  }
-}
-
-class $$AiNoteSummariesTableOrderingComposer
-    extends Composer<_$AppDatabase, $AiNoteSummariesTable> {
-  $$AiNoteSummariesTableOrderingComposer({
-    required super.$db,
-    required super.$table,
-    super.joinBuilder,
-    super.$addJoinBuilderToRootComposer,
-    super.$removeJoinBuilderFromRootComposer,
-  });
-  ColumnOrderings<String> get summary => $composableBuilder(
-    column: $table.summary,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<String> get model => $composableBuilder(
-    column: $table.model,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<int> get sourceBytes => $composableBuilder(
-    column: $table.sourceBytes,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
-    column: $table.createdAt,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
-    column: $table.updatedAt,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  $$NotesTableOrderingComposer get noteId {
-    final $$NotesTableOrderingComposer composer = $composerBuilder(
-      composer: this,
-      getCurrentColumn: (t) => t.noteId,
-      referencedTable: $db.notes,
-      getReferencedColumn: (t) => t.id,
-      builder:
-          (
-            joinBuilder, {
-            $addJoinBuilderToRootComposer,
-            $removeJoinBuilderFromRootComposer,
-          }) => $$NotesTableOrderingComposer(
-            $db: $db,
-            $table: $db.notes,
-            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
-            joinBuilder: joinBuilder,
-            $removeJoinBuilderFromRootComposer:
-                $removeJoinBuilderFromRootComposer,
-          ),
-    );
-    return composer;
-  }
-}
-
-class $$AiNoteSummariesTableAnnotationComposer
-    extends Composer<_$AppDatabase, $AiNoteSummariesTable> {
-  $$AiNoteSummariesTableAnnotationComposer({
-    required super.$db,
-    required super.$table,
-    super.joinBuilder,
-    super.$addJoinBuilderToRootComposer,
-    super.$removeJoinBuilderFromRootComposer,
-  });
-  GeneratedColumn<String> get summary =>
-      $composableBuilder(column: $table.summary, builder: (column) => column);
-
-  GeneratedColumn<String> get model =>
-      $composableBuilder(column: $table.model, builder: (column) => column);
-
-  GeneratedColumn<int> get sourceBytes => $composableBuilder(
-    column: $table.sourceBytes,
-    builder: (column) => column,
-  );
-
-  GeneratedColumn<DateTime> get createdAt =>
-      $composableBuilder(column: $table.createdAt, builder: (column) => column);
-
-  GeneratedColumn<DateTime> get updatedAt =>
-      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
-
-  $$NotesTableAnnotationComposer get noteId {
-    final $$NotesTableAnnotationComposer composer = $composerBuilder(
-      composer: this,
-      getCurrentColumn: (t) => t.noteId,
-      referencedTable: $db.notes,
-      getReferencedColumn: (t) => t.id,
-      builder:
-          (
-            joinBuilder, {
-            $addJoinBuilderToRootComposer,
-            $removeJoinBuilderFromRootComposer,
-          }) => $$NotesTableAnnotationComposer(
-            $db: $db,
-            $table: $db.notes,
-            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
-            joinBuilder: joinBuilder,
-            $removeJoinBuilderFromRootComposer:
-                $removeJoinBuilderFromRootComposer,
-          ),
-    );
-    return composer;
-  }
-}
-
-class $$AiNoteSummariesTableTableManager
-    extends
-        RootTableManager<
-          _$AppDatabase,
-          $AiNoteSummariesTable,
-          AiNoteSummary,
-          $$AiNoteSummariesTableFilterComposer,
-          $$AiNoteSummariesTableOrderingComposer,
-          $$AiNoteSummariesTableAnnotationComposer,
-          $$AiNoteSummariesTableCreateCompanionBuilder,
-          $$AiNoteSummariesTableUpdateCompanionBuilder,
-          (AiNoteSummary, $$AiNoteSummariesTableReferences),
-          AiNoteSummary,
-          PrefetchHooks Function({bool noteId})
-        > {
-  $$AiNoteSummariesTableTableManager(
-    _$AppDatabase db,
-    $AiNoteSummariesTable table,
-  ) : super(
-        TableManagerState(
-          db: db,
-          table: table,
-          createFilteringComposer: () =>
-              $$AiNoteSummariesTableFilterComposer($db: db, $table: table),
-          createOrderingComposer: () =>
-              $$AiNoteSummariesTableOrderingComposer($db: db, $table: table),
-          createComputedFieldComposer: () =>
-              $$AiNoteSummariesTableAnnotationComposer($db: db, $table: table),
-          updateCompanionCallback:
-              ({
-                Value<String> noteId = const Value.absent(),
-                Value<String> summary = const Value.absent(),
-                Value<String> model = const Value.absent(),
-                Value<int> sourceBytes = const Value.absent(),
-                Value<DateTime> createdAt = const Value.absent(),
-                Value<DateTime> updatedAt = const Value.absent(),
-                Value<int> rowid = const Value.absent(),
-              }) => AiNoteSummariesCompanion(
-                noteId: noteId,
-                summary: summary,
-                model: model,
-                sourceBytes: sourceBytes,
-                createdAt: createdAt,
-                updatedAt: updatedAt,
-                rowid: rowid,
-              ),
-          createCompanionCallback:
-              ({
-                required String noteId,
-                required String summary,
-                Value<String> model = const Value.absent(),
-                Value<int> sourceBytes = const Value.absent(),
-                required DateTime createdAt,
-                required DateTime updatedAt,
-                Value<int> rowid = const Value.absent(),
-              }) => AiNoteSummariesCompanion.insert(
-                noteId: noteId,
-                summary: summary,
-                model: model,
-                sourceBytes: sourceBytes,
-                createdAt: createdAt,
-                updatedAt: updatedAt,
-                rowid: rowid,
-              ),
-          withReferenceMapper: (p0) => p0
-              .map(
-                (e) => (
-                  e.readTable<$AiNoteSummariesTable, AiNoteSummary>(table),
-                  $$AiNoteSummariesTableReferences(db, table, e),
-                ),
-              )
-              .toList(),
-          prefetchHooksCallback: ({noteId = false}) {
-            return PrefetchHooks(
-              db: db,
-              explicitlyWatchedTables: [],
-              addJoins:
-                  <
-                    T extends TableManagerState<
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic,
-                      dynamic
-                    >
-                  >(state) {
-                    if (noteId) {
-                      state =
-                          state.withJoin(
-                                currentTable: table,
-                                currentColumn: table.noteId,
-                                referencedTable:
-                                    $$AiNoteSummariesTableReferences
-                                        ._noteIdTable(db),
-                                referencedColumn:
-                                    $$AiNoteSummariesTableReferences
-                                        ._noteIdTable(db)
-                                        .id,
-                              )
-                              as T;
-                    }
-
-                    return state;
-                  },
-              getPrefetchedDataCallback: (items) async {
-                return [];
-              },
-            );
-          },
-        ),
-      );
-}
-
-typedef $$AiNoteSummariesTableProcessedTableManager =
-    ProcessedTableManager<
-      _$AppDatabase,
-      $AiNoteSummariesTable,
-      AiNoteSummary,
-      $$AiNoteSummariesTableFilterComposer,
-      $$AiNoteSummariesTableOrderingComposer,
-      $$AiNoteSummariesTableAnnotationComposer,
-      $$AiNoteSummariesTableCreateCompanionBuilder,
-      $$AiNoteSummariesTableUpdateCompanionBuilder,
-      (AiNoteSummary, $$AiNoteSummariesTableReferences),
-      AiNoteSummary,
-      PrefetchHooks Function({bool noteId})
-    >;
 typedef $$FeedReserveTableCreateCompanionBuilder =
     FeedReserveCompanion Function({
       required String id,
@@ -7716,8 +6812,6 @@ class $AppDatabaseManager {
       $$AiMessagesTableTableManager(_db, _db.aiMessages);
   $$AppKvTableTableManager get appKv =>
       $$AppKvTableTableManager(_db, _db.appKv);
-  $$AiNoteSummariesTableTableManager get aiNoteSummaries =>
-      $$AiNoteSummariesTableTableManager(_db, _db.aiNoteSummaries);
   $$FeedReserveTableTableManager get feedReserve =>
       $$FeedReserveTableTableManager(_db, _db.feedReserve);
   $$NoteChunksTableTableManager get noteChunks =>

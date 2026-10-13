@@ -1,7 +1,7 @@
 /// **LightNote 的可调参数总表**。
 ///
 /// 凡是"改一个数字就能调成本 / 调体验 / 调行为"的常量，都集中在本文件：
-/// AI 摘要与卡片长度、笔记与切片尺寸、卡片流池子与窗口、搜索权重、
+/// 卡片长度、笔记与切片尺寸、卡片流池子与窗口、搜索权重、
 /// 命令执行上限、会话历史与撤销上限……
 ///
 /// 目的和 `ai_limits` 当初一样，只是范围扩到全部：**避免"prompt 里写 300、
@@ -20,7 +20,7 @@
 ///
 /// ## 用法
 ///
-/// 调用方按域引用，例如 `AiLimits.summaryHardMax`、`FeedLimits.poolTarget`。
+/// 调用方按域引用，例如 `AiLimits.tagMaxCjk`、`FeedLimits.poolTarget`。
 /// 各领域模块里那些历史遗留的 `NoteChunker.cap` / `kFeedPoolTarget` 等名字
 /// 仍可用——它们现在只是指向这里的常量别名，值只在本文件定义一次。
 library;
@@ -30,19 +30,6 @@ library;
 // ============================================================================
 
 abstract final class AiLimits {
-  // ---- 摘要 ----
-
-  /// 摘要目标长度（字）。摘要只作卡片流的"背景面"，不直接展示。
-  static const summaryTargetMin = 80;
-  static const summaryTargetMax = 120;
-
-  /// 摘要硬上限（字）。超过就截断——模型基本不守字数，代码必须兜底。
-  static const summaryHardMax = 120;
-
-  /// 摘要"过期"阈值：源正文字节数变化超过这个比例才重生成（防抖）。
-  /// 不用 `updatedAt`，否则用户改个错别字也会白烧一次调用。
-  static const summaryStaleRatio = 0.20;
-
   // ---- 标签 ----
 
   /// 单个标签的汉字上限
@@ -102,9 +89,6 @@ abstract final class FeedLimits {
   /// 补池的并发路数（≈一次最多生成几张）。
   static const genParallelism = 4;
 
-  /// 摘要的并发生成度。
-  static const summaryParallelism = 4;
-
   /// 每次启动给**下次**预留几张（存进 `feed_reserve`）。
   static const reserveSize = 6;
 
@@ -118,7 +102,10 @@ abstract final class FeedLimits {
   static const recentTitleKeep = 40;
 
   /// 一份素材的字符数（从片里开出的窗口大小）。
-  static const windowChars = 300;
+  ///
+  /// 400：卡片流的全部内容就是这**一段截断的原文**，窗口给足一点，
+  /// 模型才有足够素材把卡片写具体。
+  static const windowChars = 400;
 
   /// 单批素材的字符预算。依赖片的硬上限 700 不会失控。
   static const windowBatchBudget = 4000;
@@ -213,9 +200,6 @@ abstract final class AgentLimits {
 
   /// 历史里**单条**消息的截断上限。
   static const maxHistoryChars = 500;
-
-  /// 单篇摘要输入正文的上限（字符）。摘要是 ≤120 字的概括，2 万字足够。
-  static const summaryInputMaxChars = 20000;
 
   /// 工具确认弹层里「改前 / 改后」的截断上限（字），别把弹层撑成一整篇。
   static const confirmDiffMaxChars = 600;

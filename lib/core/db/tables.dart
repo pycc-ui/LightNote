@@ -212,54 +212,6 @@ class FeedReserve extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-/// 笔记的 **AI 摘要**（持久化，不是临时缓存）。
-///
-/// 它与展示型的 `note_summaries` 语义相反，所以没有合并。`note_summaries`
-/// 是用户点「AI 整理要点」的产物：一次一条、不覆盖历史（便于对比不同模型/时间
-/// 的结果），主键是 UUID，还带 tokens / cost / raw_response 这些审计字段。
-/// （那张表已在 schema v7 删除：读侧 `watchLatestSummary` 从来没有界面调用过，
-/// 属于只写不读的死表，功能入口也一并移除了。）
-///
-/// 这张表则相反：
-///   · 一篇笔记一条（主键就是 noteId），新摘要覆盖旧的
-///   · 只为"喂给 AI 当素材"服务，用户看不到
-///   · 不需要审计字段，但需要失效判断（笔记改了就该重生成）
-///
-/// 混在一张表里会让两边的查询都要加过滤条件，迟早出错。
-///
-/// ## 缓存了什么
-///
-/// 生成卡片流素材时，把**摘要而不是全文**发给 AI，省 token、也快得多。
-/// 一篇笔记摘要生成一次、长期复用。
-///
-/// 表名 `ai_note_summaries`：原先叫 `note_ai_summaries`，v8→v9 迁移里
-/// `ALTER TABLE note_ai_summaries RENAME TO ai_note_summaries`。
-/// 改名只是为了跟同族的 `ai_calls` / `ai_conversations` 对齐命名——
-/// 内容是同一份，一个字都没动。
-class AiNoteSummaries extends Table {
-  TextColumn get noteId =>
-      text().references(Notes, #id, onDelete: KeyAction.cascade)();
-
-  /// 摘要正文。**硬上限 300 字**，写入前已截断（见 AiRepository.summarizeNote）。
-  TextColumn get summary => text()();
-
-  /// 生成时用的模型，便于以后判断是否需要因换模型而重生成。
-  TextColumn get model => text().withDefault(const Constant(''))();
-
-  /// 生成时笔记正文的 **UTF-8 字节数**。
-  ///
-  /// 用它而不是 `updatedAt` 判断过期：`updatedAt` 只要写一次就变，
-  /// 用户改个错别字也会让摘要作废，等于每次编辑都白烧一次 token。
-  /// 字节数够用来判断"内容变了多少"，配合 [AiRepository] 里的
-  /// 20% 阈值就实现了防抖。
-  IntColumn get sourceBytes => integer().withDefault(const Constant(0))();
-
-  DateTimeColumn get createdAt => dateTime()();
-  DateTimeColumn get updatedAt => dateTime()();
-
-  @override
-  Set<Column> get primaryKey => {noteId};
-}
 
 /// 笔记的**切片**：把正文按标题层次切成一片片"原文区间"。
 ///

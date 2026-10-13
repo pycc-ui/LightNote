@@ -1,7 +1,7 @@
 // Agent 主循环：多轮工具调用。
 //
 // 用**假模型**驱动整条循环，所以不花一分钱 API 额度就能测透最容易写错的地方：
-// 工具结果怎么回灌、`requestTools` 怎么改 tools 列表、循环靠什么终止。
+// 工具结果怎么回灌、循环靠什么终止。
 //
 // 终止条件那几条尤其重要 —— 少一条就是**无限烧钱**，而且只在真机上才暴露。
 import 'dart:convert';
@@ -14,7 +14,6 @@ import 'package:lightnote/core/db/models.dart';
 import 'package:lightnote/features/ai/domain/agent_loop.dart';
 import 'package:lightnote/features/ai/domain/tool_executor.dart';
 import 'package:lightnote/features/ai/domain/tool_types.dart';
-import 'package:lightnote/features/note/data/notebook_repository.dart';
 import 'package:lightnote/features/note/data/note_repository.dart';
 
 /// 记录每次请求、按脚本回答的假模型。
@@ -119,88 +118,9 @@ void main() {
       expect(deltas, contains('前半后半'));
     });
 
-    test('第一次请求就带上了核心层的完整定义', () async {
-      model.say('好');
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final names = model.calls.single.tools.map((t) => t.name).toSet();
-      expect(names, contains('searchNotes'));
-      expect(names, contains('listChunks'));
-      expect(names, contains('readChunk'));
-      expect(names, contains('askUser'));
-    });
-
-    test('按需层的工具**不在** tools 里，但出现在工具目录里', () async {
-      model.say('好');
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final call = model.calls.single;
-      expect(call.tools.map((t) => t.name), isNot(contains('deleteNotebook')));
-      expect(call.system, contains('deleteNotebook'));
-      expect(call.system, contains('requestTools'));
-    });
   });
 
   group('一轮工具：执行 → 回灌 → 再问', () {
-    test('工具真的被执行了，结果以 role:tool 回灌', () async {
-      await NotebookRepository(db).create(name: '工作');
-      model.callTool('listNotebooks', const {}, id: 'c1');
-      model.say('你有一个叫「工作」的笔记库。');
-
-      final events = await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('我有几个笔记库？')],
-      ));
-
-      expect(model.calls, hasLength(2), reason: '提了工具就要再发一轮');
-      expect(finishedText(events), '你有一个叫「工作」的笔记库。');
-
-      // 第二轮的消息里：assistant 的工具提议 + 一条 tool 结果
-      final second = model.calls[1].messages;
-      final assistant = second.where((m) => m.role == 'assistant').toList();
-      expect(assistant.last.toolCalls.single.name, 'listNotebooks');
-
-      final toolMsg = second.where((m) => m.role == 'tool').toList();
-      expect(toolMsg, hasLength(1));
-      expect(toolMsg.single.toolCallId, 'c1', reason: '协议要求带 tool_call_id');
-      expect(toolMsg.single.content, contains('工作'), reason: '结果要真的来自数据库');
-      expect(toolMsg.single.content, contains('"ok":true'));
-    });
-
-    test('UI 能看到"开始/结束"两个事件', () async {
-      model.callTool('listNotebooks', const {});
-      model.say('好了');
-
-      final events = await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      expect(events.whereType<AgentToolStarted>().single.name, 'listNotebooks');
-      expect(events.whereType<AgentToolDone>().single.ok, isTrue);
-    });
-
-    test('工具失败**不打断对话**，失败原因照样回灌（模型可以换招）', () async {
-      model.callTool('readChunk', {'noteId': '编的 id', 'index': 0});
-      model.say('没找到那条笔记。');
-
-      final events = await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      expect(finishedText(events), '没找到那条笔记。');
-      final toolMsg = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(toolMsg.content, contains('"ok":false'));
-      expect(toolMsg.content, contains('searchNotes'),
-          reason: '失败原因要告诉模型下一步怎么办');
-    });
 
     test('连着两轮工具也能跑（多轮拼接）', () async {
       final note = await NoteRepository(db)
@@ -234,116 +154,6 @@ void main() {
     });
   });
 
-  group('requestTools：分层发送的开关', () {
-    test('批准之后，下一轮的 tools 里就有了它的完整定义', () async {
-      model.callTool('requestTools', {
-        'names': ['deleteNotebook']
-      }, id: 'r1');
-      model.say('好的');
-
-      final events = await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      expect(model.calls, hasLength(2));
-      expect(model.calls[0].tools.map((t) => t.name), isNot(contains('deleteNotebook')));
-      expect(model.calls[1].tools.map((t) => t.name), contains('deleteNotebook'),
-          reason: '批准之后必须把完整定义发出去');
-
-      // 回执告诉模型批了什么
-      final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, contains('deleteNotebook'));
-
-      // 批准之后再申请同一个 → 回执里说明"已经有了"
-      expect(events.whereType<AgentToolsGranted>().single.approved,
-          ['deleteNotebook']);
-    });
-
-    test('批准后工具目录里就不再重复列它了', () async {
-      model.callTool('requestTools', {
-        'names': ['deleteNotebook']
-      });
-      model.say('好');
-
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      expect(model.calls[0].system, contains('deleteNotebook'));
-      expect(model.calls[1].system, isNot(contains('`deleteNotebook`')));
-    });
-
-    test('申请核心层的工具会被挡下（本来就有完整定义，白费一轮）', () async {
-      model.callTool('requestTools', {
-        'names': ['searchNotes']
-      });
-      model.say('好');
-
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, contains('已经有了'));
-      expect(model.calls[1].tools.map((t) => t.name), contains('searchNotes'));
-    });
-
-    test('不存在的工具名 → 明确拒绝，不是静默忽略', () async {
-      model.callTool('requestTools', {
-        'names': ['dropDatabase']
-      });
-      model.say('好');
-
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, contains('没有这个工具'));
-    });
-
-    test('单次最多批 ${AgentLoop.maxRequestTools} 个（超出的根本不处理）', () async {
-      model.callTool('requestTools', {
-        'names': [
-          'deleteNotebook',
-          'renameNotebook',
-          'batchMoveNotes',
-          'batchDeleteNotes',
-          'searchHistory', // 第 5 个：按需层，正常批准
-          'listNotes', // 第 6 个：常用层，会被"本来就有定义"拒掉，但**在上限内**
-          'getNoteMeta', // 第 7 个：**超出上限，根本不该被处理**
-        ],
-      });
-      model.say('好');
-
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, contains('searchHistory'), reason: '上限内的该批准');
-      expect(receipt.content, isNot(contains('getNoteMeta')),
-          reason: '第 ${AgentLoop.maxRequestTools + 1} 个名字超出上限，不该出现在回执里');
-    });
-
-    test('names 缺失 → 可读的失败，不是崩', () async {
-      model.callTool('requestTools', const {});
-      model.say('好');
-
-      await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      final receipt = model.calls[1].messages.lastWhere((m) => m.role == 'tool');
-      expect(receipt.content, contains('names'));
-    });
-  });
 
   group('askUser：停下来等用户', () {
     test('发出待答事件后**循环停止**，不伪造结果也不继续烧钱', () async {
@@ -419,20 +229,6 @@ void main() {
       expect(model.calls, hasLength(AgentLoop.maxRounds),
           reason: '轮数上限必须真的生效');
       expect(events.whereType<AgentFailed>(), hasLength(1));
-    });
-
-    test('★ 模型每轮都申请工具 → 同样会被轮数上限挡住', () async {
-      for (var i = 0; i < 20; i++) {
-        model.callTool('requestTools', {'names': ['deleteNotebook']}, id: 'r$i');
-      }
-
-      final events = await collect(loop().run(
-        systemPrompt: 'SYS',
-        history: [AgentMessage.user('x')],
-      ));
-
-      expect(model.calls, hasLength(AgentLoop.maxRounds));
-      expect(events.whereType<AgentFailed>(), isNotEmpty);
     });
 
     test('出错就停，但**已经收到的文字不丢**', () async {

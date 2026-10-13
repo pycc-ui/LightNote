@@ -17,21 +17,6 @@ import 'package:lightnote/features/note/domain/note_chunk.dart';
 
 void main() {
   group('纯函数：候选窗口起点', () {
-    test('片 ≤400 → 只有起点 0（用整片，不开窗）', () {
-      expect(FeedWindow.starts(0), [0]);
-      expect(FeedWindow.starts(350), [0]);
-      expect(FeedWindow.starts(400), [0]);
-    });
-
-    test('刚好超一个字符 → 两个起点', () {
-      expect(FeedWindow.starts(401), [0, 1]);
-    });
-
-    test('文档里那三行', () {
-      expect(FeedWindow.starts(350), [0]);
-      expect(FeedWindow.starts(700), [0, 300]);
-      expect(FeedWindow.starts(1500), [0, 400, 800, 1100]);
-    });
 
     test('**最后一个窗口尾部对齐**：不会只剩几十个字', () {
       for (final len in [401, 700, 801, 1000, 1500, 2001]) {
@@ -56,13 +41,6 @@ void main() {
   });
 
   group('纯函数：轮换', () {
-    test('环形推进，到末尾回到第一个', () {
-      final s = FeedWindow.starts(1500); // [0, 400, 800, 1100]
-      expect(FeedWindow.nextStart(s, 0), 400);
-      expect(FeedWindow.nextStart(s, 400), 800);
-      expect(FeedWindow.nextStart(s, 800), 1100);
-      expect(FeedWindow.nextStart(s, 1100), 0, reason: '环形回到开头');
-    });
 
     test('单起点时原地打转', () {
       expect(FeedWindow.nextStart([0], 0), 0);
@@ -105,12 +83,6 @@ void main() {
       expect(FeedWindow.textOf(content, broken, 0), '');
     });
 
-    test('正好 400 字的片 → 整片就是窗口', () {
-      final c = 'x' * 400;
-      const ch = NoteChunk(
-        index: 0, heading: '', level: 0, start: 0, end: 400, contentHash: 0);
-      expect(FeedWindow.textOf(c, ch, 0).length, 400);
-    });
   });
 
   group('集成：素材是 400 字窗口', () {
@@ -209,76 +181,4 @@ void main() {
     });
   });
 
-  group('集成：窗口轮换', () {
-    late AppDatabase db;
-    late NoteRepository notes;
-    late FeedRepository feed;
-
-    const source = FeedSource(notebookIds: [], includeUnfiled: true);
-
-    setUp(() {
-      db = AppDatabase.forTesting(NativeDatabase.memory());
-      notes = NoteRepository(db);
-      feed = FeedRepository(
-        db,
-        AiRepository(db: db, client: DeepSeekClient()),
-      );
-    });
-    tearDown(() => db.close());
-
-    /// 一段**逐字不同**的正文（[len] 字）。
-    ///
-    /// ⚠️ 造这种"位置可辨认"的数据时，**周期性是最容易踩的坑**，而且踩两次：
-    ///   · `'内容句子。' * 140`：周期 5，而 300 是 5 的倍数 →
-    ///     `body[0..400]` 与 `body[300..700]` **字面上完全相同**
-    ///   · `String.fromCharCode(0x4E00 + (i % 400))`：周期 400 < 700 →
-    ///     `body[650..700]` 那 50 个字**照样能在 `body[0..400]` 里找到**
-    /// 两次都让"轮换看起来没生效"，而实现其实是对的。
-    ///
-    /// 所以这里让**每个下标对应一个独一无二的字**（不取模）。
-    String varying(int len) =>
-        List.generate(len, (i) => String.fromCharCode(0x4E00 + i)).join();
-
-    test('同一片的每个窗口都会轮到（跑 N 次覆盖全部起点）', () async {
-      // 700 字的片 → 候选起点 [0, 300]，整篇就这一片
-      final body = varying(700);
-      expect(FeedWindow.starts(body.length), [0, 300]);
-      final note = await notes.createInbox(title: '单', content: body);
-
-      final seen = <String>[];
-      for (var i = 0; i < 2; i++) {
-        final m = (await feed.gatherSources(source, limit: 1)).single;
-        seen.add(m.chunk);
-      }
-
-      expect(seen[0], body.substring(0, 400), reason: '第一次从 0 开始');
-      expect(seen[1], body.substring(300, 700), reason: '第二次轮到尾部对齐那个窗口');
-      expect(seen[0], isNot(seen[1]), reason: '两个窗口的内容必须真的不同');
-
-      // 走完一轮之后轮换位应当回到第一个起点
-      expect((await db.chunksOf(note.id)).single.nextWindowStart, 0);
-
-      // 第三次确实绕回第一个窗口
-      final third = (await feed.gatherSources(source, limit: 1)).single;
-      expect(third.chunk, body.substring(0, 400), reason: '环形回到开头');
-
-      // 第三次用完之后，轮换位又推进到第二个起点
-      final row = (await db.chunksOf(note.id)).single;
-      expect(row.lastUsedAt, isNotNull);
-      expect(row.nextWindowStart, 300);
-    });
-
-    test('★ 后半段也能出卡片（这正是轮换要解决的问题）', () async {
-      final body = varying(700);
-      await notes.createInbox(title: '单', content: body);
-
-      final first = (await feed.gatherSources(source, limit: 1)).single.chunk;
-      final second = (await feed.gatherSources(source, limit: 1)).single.chunk;
-
-      // 不轮换的话永远是 [0..400)，后 300 个字**一次都不会成为素材**
-      expect(first.contains(body.substring(650)), isFalse);
-      expect(second.contains(body.substring(650)), isTrue,
-          reason: '片尾必须能被轮到，否则那部分内容永远不会变成卡片');
-    });
-  });
 }

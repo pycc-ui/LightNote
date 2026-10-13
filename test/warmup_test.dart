@@ -226,14 +226,12 @@ void main() {
           reason: '取到重复的块 = 9 张卡都在讲同一件事');
     });
 
-    test('笔记的标题与摘要跟着它自己的切片走', () async {
+    test('笔记的标题跟着它自己的切片走', () async {
       await notes.createInbox(title: '唯一标题', content: longBody(100));
 
       final materials = await feed.gatherSources(source, limit: 9);
-      // 9 份素材来自同一篇笔记，所以标题/摘要应当一致
+      // 9 份素材来自同一篇笔记，所以标题应当一致
       expect(materials.every((m) => m.title == '唯一标题'), isTrue);
-      expect(materials.every((m) => m.summary.isNotEmpty), isTrue,
-          reason: '摘要是"面"，缺了就只能退回正文截断，但也不能是空的');
     });
 
     test('极端情况：多条短笔记（各只有 1 块）就只凑到笔记条数', () async {

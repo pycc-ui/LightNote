@@ -122,7 +122,7 @@ class _StorageSettingsPageState extends State<StorageSettingsPage> {
             ListTile(
               leading: const Icon(Icons.cleaning_services_outlined),
               title: const Text('清空 AI 历史'),
-              subtitle: const Text('删除摘要记录与调用审计，笔记本身不受影响'),
+              subtitle: const Text('删除调用审计，笔记本身不受影响'),
               onTap: _busy ? null : _clearAiHistory,
             ),
             if (!isPrivate)

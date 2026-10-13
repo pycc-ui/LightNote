@@ -12,8 +12,8 @@
 /// 设计见 docs/命令语言设计.md 第 4、8、9 节。
 library;
 
-import '../../../core/db/app_database.dart';
-import '../../../core/util/ai_limits.dart';
+import '../../../../core/db/app_database.dart';
+import '../../../../core/util/ai_limits.dart';
 import '../../../note/data/note_chunk_repository.dart';
 import '../../../note/data/note_repository.dart';
 import '../../../note/data/notebook_repository.dart';
@@ -314,7 +314,7 @@ class NoteCommandHost implements CommandHost {
       final at = lines[i].indexOf(pattern);
       if (at < 0) continue;
       hits.add(
-        '${notebookName}/${_titleOf(n)}:${i + 1}: '
+        '$notebookName/${_titleOf(n)}:${i + 1}: '
         '${_snippet(lines[i], at, pattern.length)}',
       );
     }

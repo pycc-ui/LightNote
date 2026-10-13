@@ -20,7 +20,6 @@ part 'app_database.g.dart';
     AiConversations,
     AiMessages,
     AppKv,
-    AiNoteSummaries,
     FeedReserve,
     NoteChunks,
   ],
@@ -153,24 +152,12 @@ class AppDatabase extends _$AppDatabase {
             );
           }
 
-          // ---- 3 -> 4：每篇笔记的 AI 摘要 ----
+          // ---- 3 -> 4：原本在这里建「每篇笔记的 AI 摘要」表 ----
           if (from < 4) {
-            // 纯新增表，不动现有数据：老库升级不会丢任何东西。
-            //
-            // ⚠️ 这里**不要**紧跟 CREATE INDEX。
-            // `m.createTable()` 的 DDL 是**延迟到迁移回调结束后**才执行的，
-            // 所以在同一个回调里建索引会报
-            // `no such table: main.ai_note_summaries`。
-            // 索引统一放到下面 `onUpgrade` 的末尾。
-            //
-            // 同一批建的 `note_ai_tags`（每篇笔记的 AI 标签）**已在 v8 删除**：
-            // 它只写不读——卡片上那个标签来自卡片自己的 tags
-            // （`FeedDraft.tag` / `displayTag`），与这张表无关。
-            //
-            // 表名在 v9 从 `note_ai_summaries` 改成了 `ai_note_summaries`。
-            // 这里直接用新表定义即可：v9 那条 RENAME 会以"表不存在"失败并被
-            // 吃掉，最终状态与老库升级完全一致。
-            await m.createTable(aiNoteSummaries);
+            // `ai_note_summaries`（旧名 `note_ai_summaries`）**已整体删除**：
+            // 卡片流的素材现在只有一小段原文，不再需要摘要。Dart 表定义没了，
+            // 所以这里不再建它；存量老库由 v12 迁移 DROP 掉。
+            // 同一批建过的 `note_ai_tags` 已在 v8 删除。
           }
 
           // ---- 4 -> 5：轻笔记跨启动预留 ----
@@ -309,16 +296,20 @@ class AppDatabase extends _$AppDatabase {
             );
           }
 
+          // ---- 11 -> 12：删除「每篇笔记的 AI 摘要」表 ----
+          if (from < 12) {
+            // 卡片流的素材现在只有一小段原文，不再需要摘要。
+            // 老库里的这张表（含 v9 改名前的 `note_ai_summaries`）一并清掉。
+            await customStatement(
+              'DROP TABLE IF EXISTS ai_note_summaries',
+            );
+          }
+
           // 升级路径的索引统一在这里补。
           //
           // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
           // 建的表这时才真正存在。全部是 `CREATE INDEX IF NOT EXISTS`，
           // 重复执行安全。
-          //
-          // 这也顺带修了一个真实缺陷：`_createIndexes()` 原先只在
-          // onCreate（全新库）里调用，于是从老版本升级上来的库永远拿不到
-          // 后来新增的索引（idx_ai_summaries_updated……），
-          // 大库上会明显变慢，而且很难发现。
           await _createIndexes();
 
           // v1 内部（未发布）那批调整的历史记录，保留作参考：
@@ -359,11 +350,6 @@ class AppDatabase extends _$AppDatabase {
     );
     await customStatement(
       'CREATE INDEX IF NOT EXISTS idx_ai_messages_conv ON ai_messages(conversation_id, created_at)',
-    );
-    // AI 摘要：按更新时间排序（"哪些笔记的摘要最久没刷新"这类查询要用）
-    await customStatement(
-      'CREATE INDEX IF NOT EXISTS idx_ai_summaries_updated '
-      'ON ai_note_summaries(updated_at DESC)',
     );
   }
 

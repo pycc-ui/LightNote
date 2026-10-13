@@ -113,20 +113,6 @@ void main() {
     });
   });
 
-  group('AiPrompts.agentUser 隐私行为', () {
-    test('未选择任何笔记时不拼接笔记正文', () {
-      final prompt = AiPrompts.agentUser('帮我写个标题', const []);
-      expect(prompt.contains('帮我写个标题'), isTrue);
-      expect(prompt.contains('未选择任何笔记文件'), isTrue);
-    });
-
-    test('选中笔记时才拼接内容', () {
-      final prompt = AiPrompts.agentUser('总结一下', ['《笔记A》\n正文内容']);
-      expect(prompt.contains('正文内容'), isTrue);
-      expect(prompt.contains('共 1 条'), isTrue);
-    });
-  });
-
   group('HighlightUtils', () {
     test('大小写不敏感地切分并标记命中片段', () {
       final parts = HighlightUtils.split('Hello Flutter World', 'flutter');

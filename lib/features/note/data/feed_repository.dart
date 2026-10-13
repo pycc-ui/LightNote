@@ -7,11 +7,9 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/ai_limits.dart';
-import '../../../core/util/app_params.dart';
 import '../../ai/domain/ai_repository.dart';
 import '../domain/feed_window.dart';
 import '../domain/note_chunk.dart';
-import 'note_ai_asset_repository.dart';
 import 'note_chunk_repository.dart';
 
 /// 一屏显示几张卡片（骨架屏与首屏用）。
@@ -47,12 +45,6 @@ const kFeedPoolTarget = FeedLimits.poolTarget;
 /// 取 4（3 路补池 + 1 路余量给预留/收尾）：手机上并发请求是 I/O 等待、不占 CPU，
 /// 4 路很轻；再多的收益递减，而且输入 token 会按路数重复（每路都重发一份系统提示词）。
 const kGenParallelism = FeedLimits.genParallelism;
-
-/// 摘要的并发生成度。
-///
-/// 摘要生成是**网络等待**、不是 CPU，几路并发就能把 N 篇的串行等待压到约
-/// `⌈N / 并发度⌉` 倍。取 4：够快，又不容易触发服务端限流。
-const _summaryParallelism = FeedLimits.summaryParallelism;
 
 /// 每次启动给**下次**预留几张（存进 `feed_reserve` 表）。
 ///
@@ -159,16 +151,10 @@ class FeedSource {
 /// 内容，所以不再需要。那张表（连同 `idx_feed_due` / `idx_feed_starred` 两条索引）
 /// 已在 v8 删除。
 class FeedRepository {
-  FeedRepository(this._db, this._ai, {NoteAiAssetRepository? assets})
-      : _assets = assets ?? NoteAiAssetRepository(_db),
-        _chunks = NoteChunkRepository(_db);
+  FeedRepository(this._db, this._ai) : _chunks = NoteChunkRepository(_db);
 
   final AppDatabase _db;
   final AiRepository _ai;
-
-  /// 笔记的 AI 摘要。**持久化资产**，不是临时缓存——
-  /// 每篇笔记生成一次后长期复用，也是卡片流的素材来源。
-  final NoteAiAssetRepository _assets;
 
   /// 笔记切片：素材取自片内的 400 字窗口。
   ///
@@ -315,13 +301,6 @@ class FeedRepository {
   ///
   /// 用过的块也不记：一篇 10 块，连抽两次命中同一块只有 10%；
   /// 而且同一块每次生成的卡片本来就不同。**用一点随机性换零状态管理。**
-  ///
-  /// 摘要生成失败会退回正文截断（见 [_ensureSummary]），保证不会因为一次摘要失败
-  /// 就生成不出卡片。
-  ///
-  /// 摘要一律**卡片优先**：缺摘要的笔记先用正文截断兜底（[`_fallbackSummary`]），
-  /// 真正的摘要丢后台 [FeedRepository._backfillSummaries] 补——不为摘要卡住出卡。
-  /// （摘要只作背景，实测对卡片质量影响很小；下次再抽到它时用的就是真摘要。）
   Future<List<FeedMaterial>> gatherSources(
     FeedSource source, {
     int limit = 8,
@@ -352,9 +331,6 @@ class FeedRepository {
     // 记下这次用了哪些（**只记真正发给 AI 的**）
     _rememberUsed(chosen.map((n) => n.id));
 
-    // 一次查完已有的新鲜摘要，避免逐条查库
-    final cached = await _assets.freshSummaries(chosen.map((n) => n.id));
-
     // ---- 先给每篇笔记取好片，丢掉取不出片的 ----
     //
     // 片统一从仓储来（**懒回填 + 自愈**都在它那里）：老库升上来的笔记
@@ -368,22 +344,6 @@ class FeedRepository {
       noteOf[n.id] = n;
     }
     if (chunksOf.isEmpty) return const [];
-
-    // 只给真正会用到的笔记取摘要：命中的直接用缓存；缺的**先用正文截断兜底**，
-    // 真正的摘要在下面丢后台补（卡片优先，不为摘要等一秒）。
-    final summaries = <String, String>{
-      for (final id in chunksOf.keys)
-        if (cached[id] != null) id: cached[id]!,
-    };
-    final missing = [
-      for (final id in chunksOf.keys)
-        if (cached[id] == null) id,
-    ];
-    // 卡片优先：缺摘要先用正文截断兜底，真正的摘要丢后台补。
-    for (final id in missing) {
-      summaries[id] = _fallbackSummary(noteOf[id]!);
-    }
-    _backfillSummaries([for (final id in missing) noteOf[id]!]);
 
     // ---- 轮转取素材，凑够 [limit] 份 ----
     //
@@ -460,7 +420,6 @@ class FeedRepository {
 
         out.add(FeedMaterial(
           title: noteOf[id]!.title,
-          summary: summaries[id] ?? '',
           chunk: text,
           chunkKey: chunk.keyOf(id),
         ));
@@ -479,54 +438,6 @@ class FeedRepository {
       _recentChunks.removeRange(kRecentChunkKeep, _recentChunks.length);
     }
   }
-
-  /// 确保某篇笔记有新鲜摘要，返回可用作素材的文本。
-  ///
-  /// 生成失败或产出为空时**退回正文截断**——这是刻意的降级：
-  /// 摘要只是省钱的优化，不该成为"生成不出卡片"的单点故障。
-  Future<String> _ensureSummary(Note note) async {
-    try {
-      final summary = await _ai.summarizeNote(
-        title: note.title,
-        content: note.content,
-      );
-      await _assets.putSummary(note.id, summary);
-
-      if (summary.isNotEmpty) return summary;
-    } catch (_) {
-      // 落到下面退回正文
-    }
-    return _fallbackSummary(note);
-  }
-
-  /// 摘要的降级文本：正文截断到摘要上限，形状与摘要一致。
-  String _fallbackSummary(Note note) =>
-      safeTruncate(note.content.trim(), AiLimits.summaryHardMax);
-
-  /// 后台补摘要（fire-and-forget）：把兜底用过的笔记真正总结一遍并落库。
-  ///
-  /// 并发上限 [_summaryParallelism]；失败吞掉（[_ensureSummary] 内部已兜底），
-  /// 不影响任何界面。用 [_summaryBackfillInflight] 去重，避免补池与填预留
-  /// 先后抽到同一篇时重复调一次摘要。
-  void _backfillSummaries(List<Note> notes) {
-    final todo = [
-      for (final n in notes)
-        if (_summaryBackfillInflight.add(n.id)) n,
-    ];
-    if (todo.isEmpty) return;
-    _runBounded(todo, _summaryParallelism, (n) async {
-      try {
-        await _ensureSummary(n);
-      } finally {
-        _summaryBackfillInflight.remove(n.id);
-      }
-    }).catchError((Object e) {
-      debugPrint('[Feed] 后台补摘要失败（忽略）：$e');
-    });
-  }
-
-  /// 正在后台补摘要的笔记 id（去重用，进程内）。
-  final Set<String> _summaryBackfillInflight = {};
 
   // ==========================================================================
   // 生成与取用

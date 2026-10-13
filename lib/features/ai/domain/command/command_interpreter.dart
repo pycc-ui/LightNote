@@ -12,7 +12,7 @@
 /// 设计见 docs/命令语言设计.md 第 5、8 节。
 library;
 
-import '../../../core/util/app_params.dart';
+import '../../../../core/util/app_params.dart';
 import 'command_types.dart';
 
 /// 命令宿主：9 个命令的真正实现。

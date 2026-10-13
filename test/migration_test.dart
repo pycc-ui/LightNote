@@ -134,7 +134,7 @@ const _v1ManualTagsDdl = [
 ///
 /// **必须建出来**：drift 的 `Migrator.createAll()` 只创建"尚不存在"的表，
 /// 已有的会跳过。而迁移末尾会调用 `_createIndexes()`，那条语句要给
-/// `ai_messages` / `ai_note_summaries` 建索引——表不存在就会整个迁移失败。
+/// `ai_messages` 建索引——表不存在就会整个迁移失败。
 ///
 /// 这块原先漏了，表现为"全新库（无 v1 文件）走 onCreate"和
 /// "迁移不动正常数据"两条测试失败。
@@ -404,9 +404,9 @@ void main() {
         reason: 'v8 应当删掉 note_ai_tags');
 
     // 同一批里仍在用的表不能被误删
-    expect(names.contains('ai_note_summaries'), isTrue,
-        reason: '这是卡片流的素材（摘要），必须留着');
     expect(names.contains('feed_reserve'), isTrue);
+    // `ai_note_summaries`（v4 建、v9 改名）已在 v12 删除
+    expect(names.contains('ai_note_summaries'), isFalse);
 
     // 删表不该牵连数据
     expect(await db.allActiveNotes(), hasLength(1));
@@ -416,10 +416,11 @@ void main() {
     // v9 做三件事，这里逐条验证：
     //   1. DROP note_tags / tags —— 用户手动标签整条链路（写入只有编辑页那个
     //      弹窗，读取只有它自己 + Markdown 导出里一行 `> 标签：`）
-    //   2. note_ai_summaries → ai_note_summaries（跟 ai_calls 对齐命名）
+    //   2. note_ai_summaries → ai_note_summaries（跟 ai_calls 对齐命名），
+    //      并在 v12 整表删除（卡片流不再用摘要）
     //   3. settings → app_kv（它 10 个 key 里有 6 个不是"设置"）
     //
-    // 2 和 3 是**改名**，漏掉 RENAME 就会直接丢数据，所以既要断言新名在，
+    // 3 是**改名**，漏掉 RENAME 就会直接丢数据，所以既要断言新名在，
     // 也要断言老名不在，还要断言**里面的数据还在**。
     final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final raw = sqlite.sqlite3.open(dbPath);
@@ -467,10 +468,10 @@ void main() {
         reason: 'v9 应当删掉 note_tags');
     expect(names.contains('tags'), isFalse, reason: 'v9 应当删掉 tags');
 
-    // 2)/3) 改名：新名在、老名不在
-    expect(names.contains('ai_note_summaries'), isTrue,
-        reason: 'v9 应当把 note_ai_summaries 改名为 ai_note_summaries');
+    // 2) note_ai_summaries 改名后又在 v12 整表删除：最终不该在
+    expect(names.contains('ai_note_summaries'), isFalse);
     expect(names.contains('note_ai_summaries'), isFalse);
+    // 3) settings → app_kv 改名：新名在、老名不在
     expect(names.contains('app_kv'), isTrue,
         reason: 'v9 应当把 settings 改名为 app_kv');
     expect(names.contains('settings'), isFalse);
@@ -502,7 +503,7 @@ void main() {
     // ⚠️ 这一句是**故意的硬编码**：加迁移时它必须跟着改。
     // 上面那句是"等于常量"（永远成立、抓不到忘改版本号）；
     // 这句才有用 —— 它逼你在改 `kCurrentSchemaVersion` 时确认这里。
-    expect(kCurrentSchemaVersion, 11);
+    expect(kCurrentSchemaVersion, 12);
   });
 
   test('v1 老库升到 v10 后，note_chunks 表被建出来且可用', () async {
@@ -571,9 +572,8 @@ void main() {
     expect(names.contains('note_summaries'), isFalse,
         reason: 'v7 应当删掉 note_summaries');
 
-    // 同一批 v4 建的表不能被误删（它还在用：卡片流素材），
-    // 只是 v9 之后名字变成了 ai_note_summaries
-    expect(names.contains('ai_note_summaries'), isTrue);
+    // v4 建的 ai_note_summaries 已在 v12 删除（卡片流不再用摘要）
+    expect(names.contains('ai_note_summaries'), isFalse);
     // `note_ai_tags` 和它同批建出来，但只写不读，已被 v8 删掉
     // （见下面"v1 老库升到 v8"那条）
     expect(names.contains('note_ai_tags'), isFalse,
@@ -607,7 +607,7 @@ void main() {
     expect(await db.allActiveNotes(), hasLength(1));
   });
 
-  test('v1 老库升到 v4 后，AI 摘要表已建出来且可用', () async {
+  test('v1 老库升到最新后，AI 摘要表已被删掉', () async {
     final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     seedV1([
       {'id': 'n1', 'folder_id': null, 'is_inbox': 1, 'ts': t, 'title': 'A'},
@@ -615,20 +615,18 @@ void main() {
 
     final db = openCurrent();
     addTearDown(db.close);
+    await db.allActiveNotes(); // 触发迁移
 
-    // v4 是"纯新增表"的迁移：必须能写入，说明表真的建出来了
-    // （表名在 v9 从 note_ai_summaries 改成了 ai_note_summaries）
-    await db.customStatement(
-      'INSERT INTO ai_note_summaries '
-      '(note_id, summary, model, source_bytes, created_at, updated_at) '
-      'VALUES (?, ?, ?, ?, ?, ?)',
-      ['n1', '摘要', 'flash', 12, t, t],
-    );
+    final names = (await db
+            .customSelect("SELECT name FROM sqlite_master WHERE type='table'")
+            .get())
+        .map((r) => r.read<String>('name'))
+        .toSet();
 
-    final s = await db.customSelect(
-      'SELECT COUNT(*) AS c FROM ai_note_summaries',
-    ).get();
-    expect(s.first.read<int>('c'), 1);
+    // v4 建的这张表（v9 改名为 ai_note_summaries）已在 v12 删除
+    expect(names.contains('ai_note_summaries'), isFalse,
+        reason: 'v12 应当删掉 ai_note_summaries');
+    expect(names.contains('note_ai_summaries'), isFalse);
   });
 
   test('全新库（无 v1 文件）走 onCreate，表都建出来了', () async {
@@ -644,7 +642,8 @@ void main() {
     expect(names.contains('notebooks'), isTrue);
     expect(names.contains('notes'), isTrue);
     expect(names.contains('feed_reserve'), isTrue);
-    expect(names.contains('ai_note_summaries'), isTrue);
+    expect(names.contains('ai_note_summaries'), isFalse,
+        reason: 'v12 已删除 AI 摘要表');
     expect(names.contains('app_kv'), isTrue);
     expect(names.contains('settings'), isFalse,
         reason: 'v9 之后 key-value 表叫 app_kv');

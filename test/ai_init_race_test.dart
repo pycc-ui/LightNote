@@ -66,6 +66,14 @@ class _StubClient extends DeepSeekClient {
   }
 }
 
+/// 一份可解析的假卡片响应。
+const _oneCard = '{"cards":[{"title":"标题","body":"正文","tag":"标签"}]}';
+
+/// 用一份最简素材去触发一次真实请求。
+Future<List<FeedDraft>> _generate(AiRepository ai) => ai.generateFeedNotes(
+      const [FeedMaterial(title: '素材标题', chunk: '素材片段')],
+    );
+
 void main() {
   // SecureStore 走平台通道，需要 binding 先就绪；否则它会退回会话内存储
   // （功能上没问题，但会打一堆警告，且测的不是真实路径）。
@@ -84,48 +92,29 @@ void main() {
   });
 
   group('ensureReady：发请求前自己把 Key 准备好', () {
-    test('**不显式调 init**，直接 summarizeNote 也能成功（核心回归）', () async {
+    test('**不显式调 init**，直接发请求也能成功（核心回归）', () async {
       // 模拟"用户已配好 Key、App 重启"：Key 在，但这个 AiRepository 实例
       // 还没被 init 过——正是启动竞态下的状态。
       await SecureStore.writeApiKey('sk-test-key');
 
-      final client = _StubClient(reply: '{"summary":"摘要内容"}');
+      final client = _StubClient(reply: _oneCard);
       final ai = AiRepository(db: db, client: client);
 
       // **故意不调 ai.init()**
-      final summary = await ai.summarizeNote(title: 'T', content: 'C');
+      final cards = await _generate(ai);
 
-      expect(summary, '摘要内容');
+      expect(cards, hasLength(1));
       expect(client.keyStateOnCall, [true],
           reason: '发请求时必须已经有 Key——这正是修复点');
     });
 
-    test('不调 init 时 generateFeedNotes 也能成功', () async {
-      await SecureStore.writeApiKey('sk-test-key');
-      final client = _StubClient(
-        reply: '{"cards":[{"title":"标题","body":"正文","tags":["标签"]}]}',
-      );
-      final ai = AiRepository(db: db, client: client);
-
-      final cards = await ai.generateFeedNotes([
-        const FeedMaterial(
-          title: '素材标题',
-          summary: '素材摘要',
-          chunk: '素材切片',
-        ),
-      ]);
-
-      expect(cards, hasLength(1));
-      expect(client.keyStateOnCall.first, isTrue);
-    });
-
     test('真的没有 Key 时仍然明确失败（不能被"自动初始化"掩盖）', () async {
       // 钥匙串空、也没有开发用 Key 文件
-      final client = _StubClient(reply: '{"summary":"不该到这里"}');
+      final client = _StubClient(reply: _oneCard);
       final ai = AiRepository(db: db, client: client);
 
       await expectLater(
-        ai.summarizeNote(title: 'T', content: 'C'),
+        _generate(ai),
         throwsA(isA<DeepSeekException>()),
       );
       expect(client.keyStateOnCall, [false],
@@ -136,7 +125,7 @@ void main() {
   group('init 本身', () {
     test('重复调用只读一次钥匙串（幂等）', () async {
       await SecureStore.writeApiKey('sk-test-key');
-      final client = _StubClient(reply: '{"summary":"x"}');
+      final client = _StubClient(reply: _oneCard);
       final ai = AiRepository(db: db, client: client);
 
       await ai.init();
@@ -150,29 +139,25 @@ void main() {
 
     test('并发调用 ensureReady 不会重复初始化', () async {
       await SecureStore.writeApiKey('sk-test-key');
-      final client = _StubClient(reply: '{"summary":"并发"}');
+      final client = _StubClient(reply: _oneCard);
       final ai = AiRepository(db: db, client: client);
 
       // 三个并发请求，共用同一个初始化 future
-      final results = await Future.wait([
-        ai.summarizeNote(title: 'A', content: 'a'),
-        ai.summarizeNote(title: 'B', content: 'b'),
-        ai.summarizeNote(title: 'C', content: 'c'),
-      ]);
+      final results = await Future.wait([_generate(ai), _generate(ai), _generate(ai)]);
 
-      expect(results, ['并发', '并发', '并发']);
+      expect(results.every((r) => r.length == 1), isTrue);
       expect(client.keyStateOnCall.every((had) => had), isTrue,
           reason: '三个并发请求都必须在有 Key 之后才发出');
     });
 
     test('saveApiKey 之后立刻能用，不需要等 init', () async {
-      final client = _StubClient(reply: '{"summary":"刚配好的"}');
+      final client = _StubClient(reply: _oneCard);
       final ai = AiRepository(db: db, client: client);
 
       await ai.saveApiKey('sk-just-set');
-      final summary = await ai.summarizeNote(title: 'T', content: 'C');
+      final cards = await _generate(ai);
 
-      expect(summary, '刚配好的');
+      expect(cards, hasLength(1));
       expect(client.keyStateOnCall, [true]);
     });
   });

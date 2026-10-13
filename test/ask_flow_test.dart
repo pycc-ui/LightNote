@@ -98,7 +98,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: '帮我改会议记录',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -125,7 +124,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: '帮我改会议记录',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -143,7 +141,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: '帮我改会议记录',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -177,7 +174,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: 'x',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -234,7 +230,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: 'x',
-        contextNoteIds: const [],
         thinkingEffort: 'low',
         thinkingEnabled: false,
       );
@@ -272,7 +267,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: 'x',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -309,7 +303,6 @@ void main() {
       await chat.send(
         conversationId: convId,
         userInput: 'x',
-        contextNoteIds: const [],
         
         thinkingEffort: 'low',
         thinkingEnabled: false,
@@ -358,7 +351,6 @@ void main() {
           await chat.send(
             conversationId: c,
             userInput: 'x',
-            contextNoteIds: const [],
             
             thinkingEffort: 'low',
             thinkingEnabled: false,

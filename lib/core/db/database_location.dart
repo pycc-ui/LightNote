@@ -43,7 +43,10 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///      并改名两张表：`note_ai_summaries` → `ai_note_summaries`（跟同族的
 ///      ai_calls / ai_conversations 对齐）、`settings` → `app_kv`
 ///      （它 10 个 key 里有 6 个不是"设置"）
-const kCurrentSchemaVersion = 11;
+///   10 新增 note_chunks（笔记切片）
+///   11 ai_conversations 新增 workspace_scope（工作区三态 JSON）
+///   12 删除 ai_note_summaries（卡片流素材不再用摘要，改用一小段原文）
+const kCurrentSchemaVersion = 12;
 
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';

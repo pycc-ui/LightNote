@@ -10,8 +10,8 @@ import '../data/deepseek_config.dart';
 ///   · [flash]（默认）—— 日常问答，便宜快；
 ///   · [pro] —— 复杂整理/推理，贵但强。
 ///
-/// ⚠️ 卡片流与摘要**固定用 flash**，不读这里的选择（见 `generateFeedNotes` /
-/// `summarizeNote` 的默认参数），避免误选 pro 把高频成本抬三倍。
+/// ⚠️ 卡片流**固定用 flash**，不读这里的选择（见 `generateFeedNotes` 的默认参数），
+/// 避免误选 pro 把高频成本抬三倍。
 class AiModel {
   AiModel._();
 

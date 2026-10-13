@@ -150,17 +150,14 @@ class AiError extends AiEvent {
 class FeedMaterial {
   const FeedMaterial({
     required this.title,
-    required this.summary,
     required this.chunk,
     this.chunkKey = '',
   });
 
   final String title;
 
-  /// 整体背景（摘要）。提示词里会明确"只作为背景，不要重复它的话"。
-  final String summary;
-
-  /// 具体原文切片（片内的 400 字窗口）。提示词里会明确"卡片必须基于它"。
+  /// 从笔记里截取的一小段原文（片内的 400 字窗口）。提示词里会说明它是截取的
+  /// 片段、并禁止卡片提到这一点。
   final String chunk;
 
   /// 这份素材来自哪一片，`noteId:idx` 形式。

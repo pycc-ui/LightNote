@@ -170,7 +170,6 @@ void main() {
       Future<void> sendOnce() => chat.send(
             conversationId: conv.id,
             userInput: '接着说',
-            contextNoteIds: const [],
             thinkingEffort: 'low',
             thinkingEnabled: false,
           );
@@ -202,7 +201,6 @@ void main() {
       await chat.send(
         conversationId: conv.id,
         userInput: '再说一句',
-        contextNoteIds: const [],
         thinkingEffort: 'low',
         thinkingEnabled: false,
       );
@@ -236,7 +234,6 @@ void main() {
       await chat.send(
         conversationId: conv.id,
         userInput: '接着说',
-        contextNoteIds: const [],
         thinkingEffort: 'low',
         thinkingEnabled: false,
       );
