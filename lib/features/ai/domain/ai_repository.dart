@@ -91,10 +91,11 @@ class AiRepository {
   // 生成轻笔记卡片（卡片流）
   // ---------------------------------------------------------------------------
 
-  /// 从素材生成轻笔记卡片。
+  /// 从**一份素材**生成**一张**轻笔记卡片。
   ///
-  /// [materials] 每份是一段**截断的原文**（片内窗口），**一份对应一张卡片**——
-  /// 提示词要求卡片基于这段原文展开，这样卡片才具体。
+  /// [material] 是一段**截断的原文**（片内窗口）——提示词要求卡片基于它展开，
+  /// 这样卡片才具体。**一次请求只出一张卡片**；想多出卡就多给几份素材、
+  /// 并发多跑几路（见 `FeedRepository._generateCardsParallel`）。
   /// 详见 [FeedMaterial] 与 `AiPrompts.feedSystem`。
   ///
   /// [avoidTitles] 是已经生成过的标题（池子 + 预留）。库里笔记少时切片会被
@@ -102,16 +103,13 @@ class AiRepository {
   ///
   /// 关思考模式：它会吃光额度，`max_tokens=20` 时正文直接返回空字符串。
   /// 生成创意文本不需要长链推理，关掉更快更省。
-  Future<List<FeedDraft>> generateFeedNotes(
-    List<FeedMaterial> materials, {
+  Future<FeedDraft> generateFeedNote(
+    FeedMaterial material, {
     List<String> avoidTitles = const [],
     String model = DeepSeekConfig.modelFlash,
     bool deepThinking = false,
   }) async {
     await ensureReady();
-    if (materials.isEmpty) {
-      throw const DeepSeekException('没有可用素材', code: 'no_source');
-    }
 
     final stopwatch = Stopwatch()..start();
     var usage = TokenUsage.zero;
@@ -122,24 +120,20 @@ class AiRepository {
         final (raw, u) = await _client.completeJson(
           systemPrompt: AiPrompts.feedSystem,
           userPrompt: AiPrompts.feedUser(
-            materials,
+            material,
             avoidTitles: avoidTitles,
           ),
           model: model,
           thinking: deepThinking,
-          // 额度要跟"一次生成几张 × 每张多长"匹配。
-          //
-          // 卡片流是**并发多路、每路单卡**（见 `FeedRepository._generateCardsParallel`），
-          // 所以单次请求通常只要 1 张。卡片正文已从 400–800 砍到 200–400，
-          // 输出上限跟着从 16384 收到 `AiLimits.feedMaxOutputTokens`（2048）：
-          // 正常远用不到，纯粹是**防"黑天鹅"**——模型偶尔跑飞一次就烧几千 token。
-          // 额度不够会被截断，截断后 JSON 解析失败 = 整批白烧，所以仍留足余量。
+          // 一次请求只出一张卡（正文 200–400 字），2048 是**防"黑天鹅"**：
+          // 正常远用不到，纯粹挡模型偶尔跑飞（一次就是几千 token）。
+          // 额度不够会被截断，截断后 JSON 解析失败 = 白烧，所以仍留足余量。
           maxTokens: AiLimits.feedMaxOutputTokens,
         );
         usage = u;
 
-        final drafts = AiPrompts.parseFeedCards(raw);
-        if (drafts == null) {
+        final draft = AiPrompts.parseFeedCard(raw);
+        if (draft == null) {
           lastError = 'json_parse_failed';
           continue;
         }
@@ -155,7 +149,7 @@ class AiRepository {
           latencyMs: stopwatch.elapsedMilliseconds,
           success: true,
         );
-        return drafts;
+        return draft;
       } on DeepSeekException catch (e) {
         lastError = e.code;
         if (!e.isRetryable && e.code != 'json_empty') {

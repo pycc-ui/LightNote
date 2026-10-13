@@ -19,13 +19,13 @@ import 'prompts.dart';
 /// AI 会话仓储：把《界面设计》里「AI 助手页」那一屏（模型 / 思考强度 / 指令）
 /// 接到真实 DeepSeek 调用上，并持久化会话历史。
 ///
-/// ⚠️ 「工作区」已取消：AI 现在能看到用户的**全部**笔记（命令语言下就是整个
-/// 笔记库根目录）。原先选工作区的位置改成**选模型**（flash / pro）。
+/// ⚠️ 「工作区」已取消：AI 现在能看到用户的**全部**笔记（一条 SQL 就能查遍整个库）。
+/// 原先选工作区的位置改成**选模型**（flash / pro）。
 ///
 /// 隐私设计：
 /// 每次请求只发送**用户这句话本身**（+ 最近几轮对话）；App **不主动附带任何笔记正文**，
-/// 也不做全库上传。需要笔记内容时，由 AI 自己在 `run` 脚本里用 `sed` / `grep` 按需读取，
-/// 读到的行只在该轮的工具结果里回灌。
+/// 也不做全库上传。需要笔记内容时，由 AI 自己在 SQL 里用 search_notes / read_around
+/// 按需读取，读到的片段只在该轮的工具结果里回灌。
 class AiChatRepository {
   AiChatRepository({required AppDatabase db, required AiRepository ai})
       : _db = db,
@@ -35,20 +35,6 @@ class AiChatRepository {
   final AiRepository _ai;
   final _uuid = const Uuid();
 
-  /// **写操作的确认入口**，由 UI 设置（它需要 `BuildContext` 才能弹层）。
-  ///
-  /// 为 null 时写操作**一律拒绝**（执行器 fail closed）——
-  /// 反过来"默认放行"意味着漏接一次就等于"AI 能随便改用户的数据"。
-  ToolConfirmFn? onConfirm;
-
-  /// 最近一次跑循环用的执行器：撤销靠它（撤销栈在执行器里）。
-  ToolExecutor? _lastExecutor;
-
-  /// 有没有可撤销的写操作（UI 拿它决定要不要显示「撤销」）。
-  ({String noteId, String title})? get undoable => _lastExecutor?.undoable;
-
-  /// 撤销最近一次 AI 写操作。
-  Future<String?> undoLast() async => _lastExecutor?.undoLast();
 
   /// 自动带的历史**轮数**（一轮 = 一问一答）。
   ///
@@ -144,8 +130,8 @@ class AiChatRepository {
 
   /// 发送一条指令。
   ///
-  /// 只发用户这句话本身 —— 笔记原文一律由 AI 用 `run` 命令自己按需读取
-  /// （`sed` / `grep`），App **不主动附带任何笔记正文**。
+  /// 只发用户这句话本身 —— 笔记内容一律由 AI 用 SQL 自己按需读取
+  /// （search_notes / read_around），App **不主动附带任何笔记正文**。
   /// 返回助手消息的 id，UI 可以监听该条消息的流式更新。
   Future<String> send({
     required String conversationId,
@@ -332,12 +318,9 @@ class AiChatRepository {
     Future<void> writeText(String text) =>
         _db.updateAiMessage(assistantId, _joined(base, text));
 
-    // 记下来：撤销要靠它（撤销栈在执行器里）。
-    // 确认回调也从这里传进去 —— 没接上时执行器会**拒绝**全部写操作。
-    //
-    // 不再有工作区：AI 的 `ls` / `grep` / `sed` 直接作用于**整个笔记库根目录**。
-    final executor = ToolExecutor(_db, onConfirm: onConfirm);
-    _lastExecutor = executor;
+    // AI 的操作面是**整个库**：一条 SQL 就能读遍或改遍所有笔记。
+    // 没有工作区、也没有确认层 —— 约束由 UDF 与 SqlGuard 把关（见 tool_executor.dart）。
+    final executor = ToolExecutor(_db);
 
     final loop = AgentLoop(
       round: ({

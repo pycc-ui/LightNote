@@ -601,14 +601,6 @@ class _AiPageState extends State<AiPage> {
     setState(() => _sending = true);
     _inputController.clear();
 
-    // 把「写操作要用户点头」这条通道接上。
-    //
-    // 必须在每次发送前设置：它闭包住了本页的 `context`，
-    // 而 AI 页是可以被重建的。没接上的话执行器会拒绝**全部**写操作
-    //（fail closed，见 `ToolExecutor`）。
-    context.read<AiChatRepository>().onConfirm =
-        (req) => showToolConfirm(context, req);
-
     try {
       final convId = await _ensureConversation();
 
@@ -626,24 +618,6 @@ class _AiPageState extends State<AiPage> {
             thinkingEffort: _effort,
             thinkingEnabled: _effort != 'low',
           );
-
-      // AI 可能改过东西 → 给一个**可撤销**的提示条。
-      //
-      // ⚠️ 用 `mounted` 挡住：弹确认层之后这个页面可能已经被销毁了，
-      // 那时拿 context 去显示提示条会抛。
-      if (mounted && chat.undoable != null) {
-        final u = chat.undoable!;
-        LogBar.action(
-          context,
-          '已修改《${u.title.trim().isEmpty ? '无标题' : u.title}》',
-          actionLabel: '撤销',
-          onAction: () async {
-            final id = await chat.undoLast();
-            if (!mounted) return;
-            LogBar.success(context, id == null ? '没有可撤销的修改' : '已撤销');
-          },
-        );
-      }
 
       // AI 刚问了什么 → 立刻弹出来，别让用户自己去找
       if (mounted) await _answerPendingIfAny(convId);

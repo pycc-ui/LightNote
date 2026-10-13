@@ -6,6 +6,8 @@ import 'package:drift/native.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 
+import 'ai_functions.dart';
+import 'ai_udfs.dart';
 import 'database_location.dart';
 import 'models.dart';
 import 'tables.dart';
@@ -22,6 +24,7 @@ part 'app_database.g.dart';
     AppKv,
     FeedReserve,
     NoteChunks,
+    AiFunctions,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -305,6 +308,15 @@ class AppDatabase extends _$AppDatabase {
             );
           }
 
+          // ---- 12 -> 13：ai_capabilities 换成 ai_functions ----
+          if (from < 13) {
+            // 老表是 v1 的遗留，从建表起就没有任何读写方，**必然是空的**，
+            // 所以不 ALTER RENAME 迁数据，直接删掉重建：
+            // 顺带把列换成设计里的那五列（去掉了 one_line / sort_order）。
+            await customStatement('DROP TABLE IF EXISTS ai_capabilities');
+            await m.createTable(aiFunctions);
+          }
+
           // 升级路径的索引统一在这里补。
           //
           // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
@@ -321,8 +333,65 @@ class AppDatabase extends _$AppDatabase {
         beforeOpen: (details) async {
           // 外键约束在 SQLite 中默认关闭，必须显式打开，否则 CASCADE/SET NULL 不生效。
           await customStatement('PRAGMA foreign_keys = ON');
+
+          // AI 操作层的两件启动活（见 core/db/ai_udfs.dart 与 ai_functions.dart）：
+          //   · 触发器 —— 正文一变就清切片
+          //   · 函数清单 —— 25 条种子数据，按版本号对齐
+          //
+          // 放在 beforeOpen 而不是 onCreate/onUpgrade：这两件事都是**每次打开
+          // 对齐一次**的幂等动作，「新库建了、老库漏了」这种分叉在这里不会发生。
+          // 也不能放进下面那个 setup 回调：那是开库时执行的，那时表还没建出来。
+          await installAiTriggers(this);
+          await _ensureAiFunctions();
         },
       );
+
+  /// app_kv 里记「函数清单已经对齐到第几版」的 key。
+  ///
+  /// 不是设置项，是**派生数据的水位线**：清单内容在 Dart（core/db/ai_functions.dart），
+  /// 库里只放副本，这个 key 用来判断副本过期没有。
+  static const _aiFunctionsVersionKey = 'ai_functions_version';
+
+  /// AI 的函数清单（`ai_functions` 表）——**种子数据，每次打开对齐一次**。
+  ///
+  /// 为什么不做成迁移里的一次性 INSERT：清单是「给 AI 看的说明书」，
+  /// 会随函数增删、措辞调整而变，而迁移只跑一次（跑完就再也不回头）。
+  /// 对齐的成本是一次 SELECT + 最多 25 次 UPSERT，而且有版本号挡着
+  ///（app_kv 里的 ai_functions_version），绝大多数启动连写都不会写。
+  ///
+  /// 放在数据库层而不是 AI 层：它是**库的一部分**（表由迁移建、内容由这里灌），
+  /// 和「示例笔记」那种产品数据不是一回事 —— 放这儿，任何打开库的入口
+  ///（App、测试、工具脚本）都自动拿到同一份清单。
+  Future<void> _ensureAiFunctions() async {
+    final row = await (select(appKv)
+          ..where((t) => t.key.equals(_aiFunctionsVersionKey)))
+        .getSingleOrNull();
+    if (row?.value == '$kAiFunctionsVersion') return;
+
+    await transaction(() async {
+      for (final f in kAiFunctions) {
+        await into(aiFunctions).insertOnConflictUpdate(
+          AiFunctionsCompanion.insert(
+            name: f.name,
+            category: f.category,
+            signature: f.signature,
+            description: f.description,
+            example: Value(f.example),
+          ),
+        );
+      }
+      // 清单里已经删掉的函数要跟着清：留着它，AI 会照着表写出
+      // 一个不存在的函数，然后拿到 no such function。
+      await (delete(aiFunctions)
+            ..where((t) =>
+                t.name.isNotIn([for (final f in kAiFunctions) f.name])))
+          .go();
+      await into(appKv).insertOnConflictUpdate(AppKvCompanion.insert(
+        key: _aiFunctionsVersionKey,
+        value: '$kAiFunctionsVersion',
+      ));
+    });
+  }
 
   Future<void> _createIndexes() async {
     // 列表页默认排序
@@ -631,10 +700,10 @@ class AppDatabase extends _$AppDatabase {
     return e;
   }
 
-  /// 只要 **id / 标题 / 所属库 / 修改时间** 的笔记列表（AI 的 `listNotes` 用它）。
+  /// 只要 **id / 标题 / 所属库 / 修改时间** 的笔记列表（`askUser` 现查选项时用它）。
   ///
-  /// 用 `selectOnly` 而不是 `select`：工具描述里写着"只要元数据时用它，
-  /// 比 searchNotes 省钱"——**那就得真的省钱**。
+  /// 用 `selectOnly` 而不是 `select`：给 AI 当选项时只要几个短字段，
+  /// 读整行会把每篇笔记的正文都取出来 —— **那就得真的省**。
   /// 读整行会把每篇笔记的正文都取出来，几百篇就是几百 KB，
   /// 只为了拿几个短字段。
   ///
@@ -674,25 +743,7 @@ class AppDatabase extends _$AppDatabase {
     ];
   }
 
-  /// 按**范围**取笔记（完整行）。命令语言的 `ls` / `grep` 等按范围列笔记时用。
-  ///
-  /// 与 [noteBriefs] 的区别只是"要整行还是要两个字段"；范围语义完全一样，
-  /// 都走 [_scopeOf] —— 分成两套过滤条件是"某一边漏了"的经典来源。
-  Future<List<Note>> notesInScope({
-    List<String>? notebookIds,
-    bool includeUnfiled = true,
-    int limit = 200,
-  }) {
-    return (select(notes)
-          ..where((t) =>
-              t.deletedAt.isNull() & _scopeOf(notebookIds, includeUnfiled))
-          ..orderBy([
-            (t) =>
-                OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ])
-          ..limit(limit))
-        .get();
-  }
+
 
   Future<List<Note>> _notesLike({
     required bool titleOnly,
@@ -1212,6 +1263,15 @@ LazyDatabase _openConnection() {
     // 不在这里设 PRAGMA journal_mode=WAL：WAL 是持久化设置，
     // 而切换 journal mode 需要独占锁，放在每次连接都会跑的 setup 回调里
     // 可能与并发连接冲突。默认的 rollback journal 对本 App 的读写量足够。
-    return NativeDatabase.createInBackground(file);
+    // 连接交给背景 isolate（drift 的默认实现），但要把 **UDF 装上去**：
+    // AI 的全部写操作都是「调用一个函数」，函数体是 Dart（见 core/db/ai_udfs.dart），
+    // 所以必须在开库时把它注册到这条连接上，之后 SQLite 按名字查表调用。
+    //
+    // ⚠️ setup 回调在**背景 isolate** 里执行，所以 installAiUdfs 只能是顶层函数，
+    // 不能闭包捕获主 isolate 的对象（Dart 不允许那样跨 isolate 传）。
+    // 若本地 drift 的 createInBackground 没有 setup 参数（编译报错），
+    // 换成 NativeDatabase(file, setup: installAiUdfs) 即可 —— UDF 注册代码不用动，
+    // 代价只是所有查询回到主 isolate 跑。
+    return NativeDatabase.createInBackground(file, setup: installAiUdfs);
   });
 }

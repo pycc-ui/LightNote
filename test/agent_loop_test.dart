@@ -123,10 +123,10 @@ void main() {
   group('一轮工具：执行 → 回灌 → 再问', () {
 
     test('连着两轮工具也能跑（多轮拼接）', () async {
-      final note = await NoteRepository(db)
+      await NoteRepository(db)
           .createInbox(title: '间隔重复心得', content: '间隔重复是记忆的好朋友。');
-      model.callTool('searchNotes', {'query': '间隔重复'}, id: 'c1');
-      model.callTool('readChunk', {'noteId': note.id, 'index': 0}, id: 'c2');
+      model.callTool('sql', {'query': "SELECT search_notes('间隔重复')"}, id: 'c1');
+      model.callTool('sql', {'query': 'SELECT recent_notes(3)'}, id: 'c2');
       model.say('你写过：间隔重复是记忆的好朋友。');
 
       final events = await collect(loop().run(
@@ -142,7 +142,7 @@ void main() {
     });
 
     test('工具轮里的垫话留在回答里，但和结论隔开', () async {
-      model.callTool('listNotebooks', const {}, text: '我先查一下。');
+      model.callTool('sql', {'query': 'SELECT list_notebooks()'}, text: '我先查一下。');
       model.say('查到了。');
 
       final events = await collect(loop().run(

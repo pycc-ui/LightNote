@@ -341,15 +341,14 @@ class FeedRepository {
     //
     // ⚠️ **这里不能让"素材数 = 笔记数"。**
     //
-    // 不能让"素材数 = 笔记数"：那样库里只有 3 条笔记时**只能生成 3 张卡**，
-    // 内存池永远补不满，用户等了一次又一次。
+    // **一张卡片 = 一份素材**，所以想多出卡就得凑够素材数。若"素材数 = 笔记数"，
+    // 库里只有 3 条笔记时**只能生成 3 张卡**，内存池永远补不满，用户等了一次又一次。
     //
     // 切片设计的本来好处就是"同一篇笔记能出很多块"，正好用来解耦：
-    // 笔记少就**从同一篇笔记取不同的片**，每片说的是不同的事，
-    // 出来的卡片自然不重复——比"让模型对着同一段换着说法写"质量更高。
+    // 笔记少就**从同一篇笔记取不同的片**，每片说的是不同的事，出来的卡片自然不重复。
     //
     // 只有当**所有笔记的片数加起来都不够**时（比如 3 条短笔记各 1 片），
-    // 才会少于 [limit]。那时由提示词让模型"从不同角度补足张数"。
+    // 素材才会少于 [limit]，这一批就少出几张（不再让模型"对着同一段硬凑张数"）。
     //
     // ---- 排序：**最近没用过的片排前面**（依据是落库的 last_used_at）----
     //
@@ -504,7 +503,7 @@ class FeedRepository {
 
     // 并发生成（每路单卡、各分配不同素材）。已有标题交给模型避开——
     // 笔记少时切片会反复取到，只靠换块治不了重复。
-    final drafts = await _generateCardsParallel(materials, need);
+    final drafts = await _generateCardsParallel(materials);
     _pool.addAll(drafts);
     _rememberTitles(_pool.map((d) => d.title));
     // 池子不该无限长：只保留最新的若干张
@@ -513,33 +512,33 @@ class FeedRepository {
     }
   }
 
-  /// 并发生成：拆成若干路，**每路一个请求、一份素材、只出 1 张卡**。
+  /// 并发生成：**每路一个请求、一份素材、只出 1 张卡**。
   ///
   /// 实测依据：一个请求里要 N 张是 O(N) 的（N=5 约 12s），而拆成 N 路并行单卡
   /// 只要 ~4s。每路分**不同素材**，实测标题不会互相撞车（各写各的那一块）。
   ///
-  /// 只出这么多张：想多出卡就得多给素材（`gatherSources` 的 `limit`），
-  /// 而不是让模型对着一份素材写多张——那样它只会"换个说法重复"。
-  /// 各路结果仍由 [dropSimilarDrafts] 兜底去重。
+  /// **没有"一次生成多张"这条路**：想多出卡就多给素材（`gatherSources` 的
+  /// `limit`），而不是让模型对着一份素材写多张——那样它只会"换个说法重复"。
+  /// 最多同时 [kGenParallelism] 路；各路结果仍由 [dropSimilarDrafts] 兜底去重。
   Future<List<FeedDraft>> _generateCardsParallel(
     List<FeedMaterial> materials,
-    int count,
   ) async {
-    if (materials.isEmpty || count <= 0) return const [];
+    if (materials.isEmpty) return const [];
 
-    // 路数 = min(要几张, 有几份素材, 并发上限)：一路一份素材。
-    final slots = [count, materials.length, kGenParallelism]
-        .reduce((a, b) => a < b ? a : b);
-    final use = materials.take(slots).toList(growable: false);
+    final use = materials.take(kGenParallelism).toList(growable: false);
 
     final out = <FeedDraft>[];
-    await _runBounded(List.generate(slots, (i) => i), slots, (i) async {
-      final drafts = await _ai.generateFeedNotes(
-        [use[i]],
-        avoidTitles: existingTitles(),
-      );
-      out.addAll(drafts);
-    });
+    await _runBounded(
+      List.generate(use.length, (i) => i),
+      use.length,
+      (i) async {
+        final draft = await _ai.generateFeedNote(
+          use[i],
+          avoidTitles: existingTitles(),
+        );
+        out.add(draft);
+      },
+    );
 
     return dropSimilarDrafts(out, against: _recentTitles);
   }
@@ -685,7 +684,7 @@ class FeedRepository {
       );
       if (materials.isEmpty) return false; // 没素材，生成不出
 
-      final drafts = await _generateCardsParallel(materials, kFeedFirstScreenCount);
+      final drafts = await _generateCardsParallel(materials);
       _pool.addAll(drafts);
 
       // 再把池子补起来、并给下次留好预留。不 await：它在后台跑，不影响首屏。
@@ -741,7 +740,7 @@ class FeedRepository {
   Future<void> _fillReserve(FeedSource source) async {
     final materials = await gatherSources(source, limit: kFeedReserveSize);
     if (materials.isEmpty) return;
-    final drafts = await _generateCardsParallel(materials, kFeedReserveSize);
+    final drafts = await _generateCardsParallel(materials);
     if (drafts.isEmpty) return;
 
     final reserved = drafts.take(kFeedReserveSize).toList(growable: false);

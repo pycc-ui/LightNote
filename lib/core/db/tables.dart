@@ -293,3 +293,40 @@ class NoteChunks extends Table {
   @override
   Set<Column> get primaryKey => {noteId, idx};
 }
+/// AI 的**函数清单**：AI 用 SQL 操作笔记库，先得知道有哪些函数可调。
+///
+/// 每行描述一个 SQLite UDF：名字 / 分类 / 签名 / 一句说明 / 一个能照抄的例子。
+/// AI 先 `SELECT * FROM ai_functions` 查一次就知道全部用法 —— 于是
+/// **加一个函数 = INSERT 一行**，system prompt 里只写"去查这张表"，
+/// 不用跟着函数清单一起变长（本版省 token 的关键就在这）。
+///
+/// 名字的来历：它原先是 `ai_capabilities`（v1 那 22 个 function calling 工具
+/// 时代的遗留表，从建表起就没有任何读写方，见《数据库设计》v7→v8 的"死表"一节）。
+/// v12→v13 直接换成这张表：老表必然是空的，删了重建即可，不需要迁数据。
+/// 旧名字也没说清它装什么 —— 这里装的是**函数**，不是"能力"。
+///
+/// 内容由 `ensureAiFunctions()` 在每次打开数据库时按版本号对齐，
+/// 数据定义在 `core/db/ai_functions.dart`（清单与注册代码分开放：
+/// 改文案不用碰注册代码，改函数才碰）。
+class AiFunctions extends Table {
+  /// 函数名。**必须与 `createFunction` 注册的名字一模一样**，否则 AI 照着
+  /// 这张表写出来的 SQL 会报 "no such function"。
+  TextColumn get name => text()();
+
+  /// read / create / modify / delete（与《AI 操作数据库设计》的四类一致）。
+  /// AI 靠它判断"这个函数会不会改数据"；我们自己也用它挑出写函数
+  /// （见 `aiWriteFunctions`，执行器据此决定要不要让界面刷新）。
+  TextColumn get category => text()();
+
+  /// 签名，如 `replace_unique(note_id, old, new)`
+  TextColumn get signature => text()();
+
+  /// 一句话说明：**什么时候用它**、边界在哪
+  TextColumn get description => text()();
+
+  /// 可直接照抄进 SQL 的例子（可空）
+  TextColumn get example => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {name};
+}

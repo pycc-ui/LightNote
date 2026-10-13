@@ -46,7 +46,10 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///   10 新增 note_chunks（笔记切片）
 ///   11 ai_conversations 新增 workspace_scope（工作区三态 JSON）
 ///   12 删除 ai_note_summaries（卡片流素材不再用摘要，改用一小段原文）
-const kCurrentSchemaVersion = 12;
+///   13 `ai_capabilities`（v1 遗留的死表）换成 `ai_functions`：
+///      AI 的操作语言从「自定义命令脚本」改成 **SQL + UDF**，函数清单落库，
+///      加函数 = INSERT 一行。老表没有任何读写方、必然是空的，直接删了重建。
+const kCurrentSchemaVersion = 13;
 
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';

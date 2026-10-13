@@ -19,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart' as sqlite;
 
+import 'package:lightnote/core/db/ai_functions.dart';
 import 'package:lightnote/core/db/app_database.dart';
 import 'package:lightnote/core/db/database_location.dart';
 
@@ -221,6 +222,17 @@ const _v1OtherTablesDdl = [
     "role" TEXT NOT NULL, "content" TEXT NOT NULL DEFAULT '',
     "pending_action" TEXT NULL, "created_at" INTEGER NOT NULL,
     PRIMARY KEY ("id")
+  )
+  ''',
+  // v1 时代的死表（AI 能力清单）。**必须在这里建出来**：v13 要 DROP 它，
+  // 建不出来那一步就是空转，「换掉了」的断言也就没有意义。
+  //（真实的老库里它一直存在 —— 它是 createAll 建的，只是从没被写过一行。）
+  '''
+  CREATE TABLE "ai_capabilities" (
+    "name" TEXT NOT NULL, "category" TEXT NOT NULL, "one_line" TEXT NOT NULL,
+    "signature" TEXT NULL, "description" TEXT NULL, "example_sql" TEXT NULL,
+    "sort_order" INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY ("name")
   )
   ''',
 ];
@@ -503,7 +515,45 @@ void main() {
     // ⚠️ 这一句是**故意的硬编码**：加迁移时它必须跟着改。
     // 上面那句是"等于常量"（永远成立、抓不到忘改版本号）；
     // 这句才有用 —— 它逼你在改 `kCurrentSchemaVersion` 时确认这里。
-    expect(kCurrentSchemaVersion, 12);
+    expect(kCurrentSchemaVersion, 13);
+  });
+
+  test('v13：ai_capabilities 换成 ai_functions，并灌入函数清单', () async {
+    final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    seedV1([
+      {'id': 'n1', 'folder_id': null, 'is_inbox': 1, 'ts': t, 'title': 'A'},
+    ]);
+
+    final db = openCurrent();
+    addTearDown(db.close);
+    await db.allActiveNotes(); // 触发迁移 + beforeOpen
+
+    final tables = await db
+        .customSelect("SELECT name FROM sqlite_master WHERE type='table'")
+        .get();
+    final names = tables.map((r) => r.read<String>('name')).toSet();
+    expect(names.contains('ai_capabilities'), isFalse,
+        reason: 'v13 应当把这张死表删掉');
+    expect(names.contains('ai_functions'), isTrue,
+        reason: 'v13 应当建出 ai_functions');
+
+    // 清单是种子数据：beforeOpen 每次打开都对齐一遍，所以这里应当已经满了
+    final count = await db
+        .customSelect('SELECT COUNT(*) AS n FROM ai_functions')
+        .getSingle();
+    expect(count.read<int>('n'), kAiFunctions.length);
+    expect(kAiFunctions.length, 25,
+        reason: '25 个函数是设计里定死的数；改这张表要同步改文档与测试');
+
+    // 触发器也在 beforeOpen 里建（清切片那条，见 core/db/ai_udfs.dart）
+    final triggers = await db
+        .customSelect("SELECT name FROM sqlite_master WHERE type='trigger'")
+        .get();
+    expect(
+      triggers.map((r) => r.read<String>('name')),
+      contains('ai_notes_content_changed'),
+      reason: '正文一变就要清切片，触发器没建出来的话偏移会静默失效',
+    );
   });
 
   test('v1 老库升到 v10 后，note_chunks 表被建出来且可用', () async {

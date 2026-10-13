@@ -139,22 +139,23 @@ AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished
 
 **工具定义（`tools` 数组元素）**
 
-`tools` 里只有两个：`run`（执行命令脚本）与 `askUser`（挂起提问）。`run` 的定义长这样：
+`tools` 里只有两个：`sql`（执行一条 SQL）与 `askUser`（挂起提问）。`sql` 的定义长这样：
 
 ```json
 {"type": "function",
- "function": {"name": "run", "description": "在用户的笔记库上执行命令脚本……", "parameters": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}}}
+ "function": {"name": "sql", "description": "在用户的笔记数据库上执行一条 SQL……", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
 ```
 
-`description` 是写给模型看的：写「什么时候用它」，不是「它是干什么的」。命令的**语法与清单**写在
-system prompt 里（约 400 token），不塞进工具 schema —— 这样原来 22 个工具的定义开销收敛成两个。
+`description` 是写给模型看的：写「什么时候用它」，不是「它是干什么的」。**有哪些函数**不在 schema 里，
+而在库里的 `ai_functions` 表：AI 自己 `SELECT * FROM ai_functions` 查一次 —— 于是加一个函数
+= INSERT 一行，工具定义与 system prompt 都不用改。完整设计见 [AI操作数据库设计](AI操作数据库设计.md)。
 
 **流式回来的 `tool_calls` 是分片的**（同一 `index` 可能来多块，后面几块只有 `arguments`）：
 
 ```json
-{"index":0,"id":"call_1","type":"function","function":{"name":"run","arguments":""}}
-{"index":0,"function":{"arguments":"{\"scr"}}
-{"index":0,"function":{"arguments":"ipt\":\"stat 会议记录\"}"}}
+{"index":0,"id":"call_1","type":"function","function":{"name":"sql","arguments":""}}
+{"index":0,"function":{"arguments":"{\"que"}}
+{"index":0,"function":{"arguments":"ry\":\"SELECT count_notes(NULL)\"}"}}
 ```
 
 解析侧按 `index` 聚合、把 `arguments` 片段拼起来，最后按 index 排序输出；`id` 缺失时兜底为
@@ -171,7 +172,7 @@ system prompt 里（约 400 token），不塞进工具 schema —— 这样原�
 **循环**（`AgentLoop.run`，`maxRounds = 15`）：提工具 → 执行 → 回灌 → 再发一轮，直到模型不再提工具。
 三条终止条件缺一个都会挂死：没提工具（正常结束）、`askUser`（挂起等用户，对话存进数据库，重启后可续）、
 轮数上限 15（防「每次都提一段必然失败的脚本」导致无限烧钱；15 不是"鼓励跑满"，而是让「读 → 改 → 复查」
-这种多步任务不必被硬切断）。命令语言的初衷就是**一轮脚本批处理**，多数任务 1~2 轮就够。工具的中间往来
+这种多步任务不必被硬切断）。SQL 的初衷就是**一条语句干完一批事**，多数任务 1~3 轮就够。工具的中间往来
 不落库。
 
 ---
@@ -256,34 +257,38 @@ uncached = promptTokens - cached
 | 单条历史截断 500 字 | `maxHistoryChars = 500`，截断处显式标「…（已截断）」，让模型知道后面还有 | 长的历史回答不原样重发 |
 | 更早的历史压成一段摘要 | 窗口之外的轮次压成一段摘要，存进 `app_kv`（键 `ai_history_summary_<会话id>`），只生成一次，之后每轮直接读；删会话时一并清掉 | 不再每轮重复支付更早历史的输入；也不再每轮多付一次「压缩」调用 |
 | 工具中间往来不重发 | assistant 的 `tool_calls` 与 `tool` 结果不落库、跨轮不带 | 不把机器中间产物当上下文反复发送 |
-| 不主动带笔记 | AI 助手只发用户这句话本身；笔记原文由 AI 用 `run` 命令（`sed`/`grep`）按需读取，读到的行也只在**本轮**内回灌 | 没有"整库上传"这条路径 |
+| 不主动带笔记 | AI 助手只发用户这句话本身；笔记内容由 AI 用 SQL 按需读取（`search_notes` / `read_around`），读到的片段也只在**本轮**内回灌 | 没有「整库上传」这条路径 |
 
 `agentSystem` 是**常量**、不含任何每会话变化的东西（工作区已取消），所以 system 前缀永远稳定，
 上下文缓存能一直命中。
 
-#### （2）读笔记按需：命令脚本，按行号读写
+#### （2）读笔记按需：按关键词定位，只取那一段
 
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
-| `ls` 只要名字 | 列笔记库 / 列某库内笔记，只给名字，不给正文 | 让模型先廉价地知道"有什么" |
-| `stat` 给行数 | 行数、字数、大小、修改时间、所属库 | 行数是 `sed` 定位的基础，模型据此决定要不要分次读 |
-| `sed -n 'A,Bp'` 按段读 | 单次最多读 200 行，超限截断并提示缩小范围 | 读长笔记先 `stat` 看行数、`grep` 定位，再 `sed -n` 只读那几行 |
-| `grep` 返回行号 | 命中行返回「路径:行号: 片段」，单次最多 50 条 | 去掉「片」之后，行号是定位长笔记的唯一途径 |
-| 切片**不再给 Agent** | Agent 走行号（`sed` / `grep`）；切片只服务卡片流与搜索 | Agent 拿到的永远是原文按行，不需要片索引；也少一层 `note_chunks` 依赖 |
+| `search_notes` / `list_notes` 只要元信息 | 返回 `{id, title, snippet}`，不给正文 | 让模型先廉价地知道「有什么」「在哪一篇」 |
+| `stat_note` 给规模 | 字数、创建/修改时间、所属库；**不含正文** | 字数决定要不要分次读，是「该不该整篇看」的判断依据 |
+| `find_in_note` 给位置 | 命中次数 + 每个命中的字符偏移 | 改之前的侦察：`replace_unique` 要求锚点唯一，先查清再改 |
+| `read_around` 按字符读 | 命中位置**前后各 N 个字符**（默认 200、上限 500） | 长段落可能是一整行，按行取等于把半篇灌进上下文 |
+| `read_preview` 兜底 | 从第 offset 个字符起读，单次上限 500 字 | 明确要某一段时用；offset 可以直接接 `search_in_note` 的返回值 |
+| 切片**不再给 Agent** | Agent 走 SQL 自己定位；切片只服务卡片流与搜索 | 少一层 `note_chunks` 依赖 |
 
-#### （3）工具：1 个 `run` + 1 个 `askUser`
+> ⚠️ 这一条是**纪律，不是围栏**：`SELECT content FROM notes` 依然能把整篇拿走。
+> 上限只约束「用函数读」这条路（见 [AI操作数据库设计](AI操作数据库设计.md) 第 14 节）。
 
-22 个 function-calling 工具收敛成 1 个「执行脚本」工具 `run`（+ 保留 `askUser` 作挂起载体）。
-详细设计见 [命令语言设计](命令语言设计.md)。
+#### （3）工具：1 个 `sql` + 1 个 `askUser`
 
-| 工具 | 作用 | 风险 |
+22 个 function-calling 工具 → 1 个命令脚本工具 `run` → **1 个 SQL 工具 `sql`**（+ 保留 `askUser` 作挂起载体）。
+详细设计见 [AI操作数据库设计](AI操作数据库设计.md)。
+
+| 工具 | 作用 | 安全 |
 |---|---|---|
-| `run` | 参数是一段 shell 风格脚本（`ls`/`stat`/`sed`/`grep`/`echo`/`rm`/`mkdir`/`mv`），可写多行、用 `set`/`for`/`if` 批处理 | 单条命令在 `NoteCommandHost` 里逐条判定（只读直接执行，写命令逐条弹确认） |
-| `askUser` | 信息不足时问用户，会**挂起**，用户回答后继续 | `interaction`，不碰数据 |
+| `sql` | 参数是一条 SQL，可以查表、调用 `ai_functions` 里的 25 个扩展函数、用子查询 / CTE / JOIN / 窗口函数 | App 只放行**一条** `SELECT` / `WITH`（`SqlGuard`）；写操作只能走 UDF，约束在函数实现里 |
+| `askUser` | 信息不足时问用户，会**挂起**，用户回答后继续 | 不碰数据 |
 
-- 工具定义每轮固定开销从约 3000–5000 token 降到约 250；命令语法写在 system prompt 里（约 400 token）。
+- 工具定义每轮固定开销从约 3000–5000 token 降到约 200；函数清单不占任何固定开销（落库、AI 自己查）。
 - 没有分层、没有 `requestTools`、没有工具目录 —— 只有两个工具，全部完整下发。
-- 工具的执行侧约定（命令粒度风险、确认、撤销、执行上限）在第 4 节。
+- 工具的执行侧约定（放行规则、结果截断、执行上限）见第 4 节。
 
 #### （4）批量、复用、输出侧兜底
 
@@ -299,23 +304,26 @@ uncached = promptTokens - cached
 #### （5）护栏：防「失控烧钱」
 
 > **所有可调参数集中在一处**：`lib/core/util/app_params.dart`（其下 `AiLimits` / `FeedLimits` /
-> `ChunkLimits` / `SearchLimits` / `CommandLimits` / `AgentLimits`）。下面这些值都从那里读，
+> `ChunkLimits` / `SearchLimits` / `SqlLimits` / `AgentLimits`）。下面这些值都从那里读，
 > 本表只是汇总说明，改值请改 `app_params.dart`。
 
 | 护栏 | 值 |
 |---|---|
 | 一次用户输入最多几轮工具往返 | `maxRounds = 15` |
 | 一轮最多问用户几次 | `maxAsksPerTurn = 5`（到上限就明确拒绝并让它收尾） |
-| 单次脚本命令条数 / 循环次数 / 总耗时 | 50 条 / 100 次 / 10 秒 |
-| 单次 `sed -n` 读行数 / `grep` 返回条数 | 200 行 / 50 条 |
+| 单次 SQL 的字符数上限 | `maxStatementChars = 20000` |
+| 回灌给模型的结果：行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000`（截断会明说） |
+| 单次读的字符数 / 查找位置数 | `maxReadChars = 500` / `maxFindPositions = 200` |
+| `search_notes` / `search_in_note` 的条数上限 | 50 / 20 |
 | 生成类调用的重试次数 | 2 次尝试（即最多重试 1 次），不无限重试 |
 
 另外，写笔记侧的上限也间接保护了 AI 成本：标题超 200 字截断（标题会进 prompt）；笔记正文按 UTF-8 字节
 分档 80KB / 90KB / 100KB，到 100KB 拒绝落盘（见 `app_params.dart`、`note_editor_page.dart`）。
 
-> **AI 的命令写入走的是同一套上限**（`NoteCommandHost._checkBytes` / 标题截断）：标题超 200 字截断、
-> 正文到 100 KB 硬上限拒绝（不是截断——截断等于悄悄删字，而 AI 可以拆成多篇）。`echo` 新建/覆盖、
-> `sed` 的 c·d·i·a 都过这一关，而且拦在确认层之前。早先 AI 写路径完全不受约束（编辑页拦住的东西它全能绕过）。
+> **AI 的写入走的是同一套上限**（`core/db/ai_udfs.dart`）：标题超 200 字截断（`safeTruncate`）、
+> 正文到 100 KB 硬上限**拒绝**（不是截断——截断等于悄悄删字，而 AI 可以拆成多篇）、
+> 派生字段（`excerpt` / `word_count`）用同一个 `TextUtils` 算。`create_note` / `replace_unique` /
+> `append_to_note` 这些都过这一关。早先 AI 写路径完全不受约束（编辑页拦住的东西它全能绕过）。
 
 ### 3.3 没落地的省钱手段（别当成已有）
 
@@ -328,71 +336,75 @@ uncached = promptTokens - cached
 
 ---
 
-## 4. AI Agent：工具约定、挂起与确认
+## 4. AI Agent：工具约定、挂起与安全
 
-> 出处：`tool_specs.dart`（清单 / 风险）、`tool_executor.dart`（执行 / 上限 / 确认 / 撤销栈）、
-> `agent_loop.dart`（循环 / 上限 / 事件）、`ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、
-> `ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库）、`history_chunker.dart`（会话切片）。
+> 出处：`tool_specs.dart`（清单）、`tool_executor.dart`（执行 / 结果截断）、`sql_guard.dart`（放行判定）、
+> `core/db/ai_udfs.dart`（25 个函数与业务约束）、`agent_loop.dart`（循环 / 上限 / 事件）、
+> `ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、`ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库）、
+> `history_chunker.dart`（会话切片）。
 > 协议报文（`tools` / `tool_calls` / `role: tool`）见 1.4，事件类型见 1.3，省 token 的角度见 3.2（3）。
+> 数据库操作那一层（25 个函数、函数清单、安全判定）另有专文：[AI操作数据库设计](AI操作数据库设计.md)。
 
-### 4.1 工具清单、风险分级与调用约定
+### 4.1 工具清单与调用约定
 
-工具只有 2 个：`run`（执行命令脚本）与 `askUser`（挂起提问）。完整设计见
-[命令语言设计](命令语言设计.md)。这里写执行侧的约定：
+工具只有 2 个：`sql`（执行一条 SQL）与 `askUser`（挂起提问）。数据库那一层的完整设计见
+[AI操作数据库设计](AI操作数据库设计.md)。这里写执行侧的约定：
 
-- **命令的风险在命令粒度上判**：`ToolRisk` 五档保留，但由 `NoteCommandHost` 对**每条命令**判定 ——
-  `ls`/`stat`/`sed -n`/`grep` 是只读（直接执行），`echo`/`sed` 的 c·d·i·a/`mkdir` 是创建/修改，
-  `rm` 是删除（二次确认、写明不可恢复），`mv` 是修改。
-- **写命令逐条弹确认**：脚本里混了写命令时，前面的只读命令先跑，遇到写命令就暂停弹框；用户允许才执行，
-  拒绝则**跳过这一条、继续下一条**（不中断整个脚本）。
-- **没有确认通道 → 写命令一律拒绝**（fail closed，与原来同一条规则，只是下沉到了命令粒度）。
-- **参数即脚本**：`run` 的参数只有一个 `script` 字符串；不需要把参数做成 JSON Schema 的字段。
-- **结果形状统一**（`ToolResult.encode()`）：成功 `{"ok":true,"data":"<执行记录文本>"}`、失败
-  `{"ok":false,"error":"…"}`。语法错误整段拒绝；单条命令失败只影响那一条。
-- **不再有工作区**：命令直接作用于**整个笔记库根目录**（`AiChatRepository` 建执行器时不再传范围）。
+- **放行判定在 App**：一条 SQL 必须**是单条**、必须**以 `SELECT` / `WITH` 开头**、正文里不许出现
+  `UPDATE` / `INSERT` / `DELETE` / `REPLACE INTO` 与 DDL / `PRAGMA`（`SqlGuard`）。判定前先剥掉字符串字面量，
+  所以「参数里带 `delete` 这个词」不会误伤。
+- **写操作只能走函数**：新建 / 修改 / 删除都得调用 `ai_functions` 里登记的函数，约束（锚点唯一、标题截断、
+  正文硬上限、删库不删笔记）在函数实现里，模型绕不过去。
+- **被拒绝也是「结果」**：拒绝理由写给模型看（"不允许直接写表，请调用 ai_functions 里的函数"），它据此换写法，
+  而不是把整轮请求打断。
+- **参数只有一条 SQL**：不需要把参数做成 JSON Schema 的字段（函数的签名与例子在库里，AI 自己查）。
+- **结果形状统一**（`ToolResult.encode()`）：成功 `{"ok":true,"data":{rows:[…],row_count,note?}}`、失败
+  `{"ok":false,"error":"…"}`。结果集按行数与字符数**截断并说明**（不说明的话模型会拿半截数据下结论）。
+- **不再有工作区**：一条 SQL 就能查遍整个库（`AiChatRepository` 建执行器时不再传范围）。
   这也意味着 `system prompt` 是常量、前缀永远稳定，上下文缓存一直能命中。
-- **参数一律宽松接受**：`parseArgs` 在 `arguments` 是坏 JSON 时返回空 map，让"缺 `script`"这类具体抱怨
+- **参数一律宽松接受**：`parseArgs` 在 `arguments` 是坏 JSON 时返回空 map，让「缺 `query`」这类具体抱怨
   把模型纠正过来，而不是抛异常打断整轮。
+- **UDF 的写绕过 drift**：执行器在 SQL 里发现写函数名后手动 `notifyUpdates`，界面才会刷新
+  （漏掉的表现是「AI 说改好了，列表没变」）。
 
-### 4.2 改正文：`sed` 行号 + 读改连续
+### 4.2 改正文：唯一锚点 + 先侦察后下手
 
-命令语言下改正文靠 `sed` 按**行号**，不再是 `expectedText` 锚点：
+改正文靠**短锚点**（不是行号、不是整篇重写）：
 
+```sql
+SELECT find_in_note('n1', '主要风险是时间紧');            -- 先确认它只出现 1 次
+SELECT read_around('n1', '主要风险是时间紧', 200);        -- 看清上下文
+SELECT replace_unique('n1', '主要风险是时间紧', '风险已识别');  -- 唯一才改，改完返回 {"ok":true}
 ```
-stat 工作笔记/会议记录            ← 先看有多少行
-sed -n '10,14p' 工作笔记/会议记录  ← 读出目标行、确认行号
-sed '12c 新的第 12 行' 工作笔记/会议记录   ← 按行号替换（弹确认）
-sed '12a 补充一句' 工作笔记/会议记录        ← 在某行后插入（弹确认）
-```
 
-- **行号怎么保证不漂移**：`system prompt` 要求"要改笔记必须**在同一个脚本里**先用 `sed -n` 读出目标行、
-  拿到行号后再改"。读改在同一脚本里连续执行，行号就是当时那一份；单用户本地场景下用户不可能在
-  两次命令之间手改笔记。
-- **越界就是失败**：`sed '100c …'` 在一篇 45 行的笔记上会失败并提示"先用 stat 确认行数"，
-  绝不静默改到别处。
-- **撤销栈存整行 `Note`**，不是"id + 正文"：`upsertNote` 要求带齐所有"非空且无默认值"的列（`createdAt`
-  就是），只存 id + 正文会在写回时被 Drift 抛 `InvalidDataException`。栈深 `maxUndo = 5`
-  （撤销是"手滑了救一下"，不是版本历史）；撤销走 `_writeNote`，所以会重切切片（否则搜索会指向错位置）。
-- **写命令都进撤销栈**：`echo` / `sed` 的 c·d·i·a 都 `rememberUndo`（`mv` 的重命名也记；纯移动不记）。
+- **锚点必须唯一**：出现 0 次或多次都**拒绝**，并把次数写在错误里（"出现 2 次，把锚点写长一点"）。
+  不唯一就动手改，等于让模型赌一把——赌错了用户看不见（正文照样"保存成功"）。
+- **改之前的侦察有专门的函数**：`find_in_note` 给次数与偏移，`read_around` 给上下文。
+  prompt 里明确要求"先定位再改"，并且失败时**照着错误信息**换锚点，不要重复发同一条。
+- **没有撤销栈**（这一版砍掉了）：改错只能靠用户自己发现。所以宁可让模型失败一次拿到一句可读的抱怨，
+  也不要静默改错。
+- **正文与派生字段同一条 UPDATE**：`excerpt` / `word_count` 用 `TextUtils` 算好一起写；
+  切片由触发器清掉（见 [AI操作数据库设计](AI操作数据库设计.md) 第 5 节）。
+- **超 100KB 拒绝**：不是截断（截断等于悄悄删字），错误里让模型拆成多篇。
 
 ### 4.3 执行上限（App 强制，不靠模型自觉）
 
-上限从"每轮几片"改成了**单次脚本**级别（见 [命令语言设计](命令语言设计.md) §8.6）。
+数值都在 `SqlLimits`（`app_params.dart`），分两类：**函数层的默认值与硬上限**、**回灌给模型的行李限额**。
 
 | 上限 | 值 | 出处 |
 |---|---|---|
-| 一次 `run()` 的工具往返轮数 | `maxRounds = 15` | `agent_loop.dart` |
-| 单次脚本命令条数 | `CommandLimits.maxCommands = 50` | `command_interpreter.dart` |
-| 单次 `sed -n` 读行数 | `NoteCommandHost.maxSedReadLines = 200` | `note_command_host.dart` |
-| 单次 `grep` 返回条数 | `NoteCommandHost.maxGrepHits = 50` | `note_command_host.dart` |
-| 单次 `for` 循环次数 | `CommandLimits.maxIterations = 100` | `command_interpreter.dart` |
-| 单次脚本总耗时 | `CommandLimits.budget = 10 秒` | `command_interpreter.dart` |
+| 一次用户输入的工具往返轮数 | `maxRounds = 15` | `agent_loop.dart` |
+| 单条 SQL 的字符数 | `maxStatementChars = 20000` | `sql_guard.dart` |
+| 回灌给模型的行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000` | `tool_executor.dart` |
+| 一次读的字符数 | `maxReadChars = 500`（默认 200） | `ai_udfs.dart` |
+| `search_notes` / `search_in_note` 条数 | 50 / 20 | `ai_udfs.dart` |
+| `find_in_note` 返回的位置数 | 200（`count` 仍是真实次数） | `ai_udfs.dart` |
+| 笔记正文硬上限 | 100 KB，**拒绝**不截断 | `ai_udfs.dart` |
 | `askUser` 每轮次数 | `maxAsksPerTurn = 5`（跨恢复累计） | `agent_loop.dart` |
 | 模型自带 `askUser.options` | 取前 10 条；`limit` 默认 10、`clamp(1,10)` | `agent_loop.dart` |
-| 撤销栈深度 | `maxUndo = 5` | `tool_executor.dart` |
 
-超限一律**截断并提示"结果已截断，请缩小范围"**。语法错误（如 `if` 没有配对的 `end`）整段拒绝并给出
-出错行号；引用未定义变量则中止整段脚本。
+结果集超限一律**截断并在结果里说明**（`note` 字段）。SQL 报错（`no such function` / `no such column`）原样回灌 ——
+那些话模型读得懂，比我们翻译一遍更有用；被 `SqlGuard` 拒绝时给的是**教它改写法**的理由。
 
 ### 4.4 挂起机制：`askUser`
 
@@ -442,9 +454,8 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 记录（`PendingAsk.asks`，解析时 `clamp(1,99)`），恢复时用 `asksSoFar` 带回来。到上限不是简单丢弃，
 而是回一条明确的失败："这一轮已经问过 5 次了，不要再问。请用现有信息给出最好的答案……"。
 
-> 只有 `askUser` 的次数被带回来了：`maxRounds` 在每次 `run()` 里重新从 0 数，挂起恢复后轮数预算会重置；
-> `_drive` 每次都新建 `ToolExecutor`，所以撤销栈也不跨 `run()`（既包括挂起恢复，也包括下一句
-> 用户输入）。
+> 只有 `askUser` 的次数被带回来了：`maxRounds` 在每次 `run()` 里重新从 0 数，挂起恢复后轮数预算会重置。
+> `_drive` 每次都新建 `ToolExecutor`，所以它与上一句用户输入之间不共享任何状态（这一版本来也没有撤销栈）。
 
 **选项为什么由 App 现查**（`AskResolver`）：模型只给筛选条件
 `source: {kind: 'search' | 'notebooks' | 'recentNotes', query?, notebookId?}`，清单由 App 现查现填：
@@ -477,28 +488,22 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 3. **存提问那一刻的 `messages`，不是这一轮开始前的 `history`**：工具往来不落库，用错 `history` 就缺了本轮的
    工具调用，用户回答完没法接着跑。
 
-### 4.5 确认流程：风险拦截在 App
+### 4.5 没有确认层：约束在函数与 SQL 通道里
 
-**写命令只有一个确认入口**（`NoteCommandHost._confirm`），三件事按顺序做、缺一不可：
+这一版**砍掉了写操作的确认弹层与撤销栈**。理由与代价都写清：
 
-1. **没有确认通道 → 一律拒绝**（`onConfirm == null`，fail closed）。反过来"默认放行"意味着任何一条漏接的
-   回调都变成"AI 能随便改用户的数据"，而且不报错。
-2. 弹框问用户；被拒 → 返回失败结果（"用户拒绝了这次操作……不要重试同一个操作；换个做法，或者问用户想怎么做"）。
-   "用户拒绝"是合法回答而不是错误，但必须让模型知道——否则它会以为改完了，静默失败比报错糟得多。
-   **拒绝只跳过这一条命令，脚本继续跑**。
-3. 同意 → 执行。
-
-- **与模型行为解耦**：风险由 `NoteCommandHost` 对**每条命令**判定，模型绕不过去 —— `rm` 一定弹二次确认，
-   与它是否"记得问用户"无关。
-- **确认层要给人看的东西**：`before` / `after`（改前 vs 改后；`sed` 传整篇前后对照）、`strong`
-  （删除时按钮改成红色「删除」而不是「允许」，摘要里写明"删了就找不回来"）。摘要压扁到 40 字，
-  太长会撑爆弹层。
-- **删除的代价**：`rm` 确认后直接删；没有回收站、没有恢复入口。内部仍是软删除（`deletedAt` 置位、
-  行还在）——那是防 bug、留后路，不是给用户的回收站。软删不触发外键级联，所以切片要显式清掉
-  （留着会让搜索把"命中"算到已删的笔记头上）。
-- **一次提议只执行一次**：UI 的确认层用 `_once` 标志挡住重复点击，并且 `barrierDismissible: false`
-  （点外面不算同意，必须明确选）。
-
+- **为什么砍**：确认层是第二版（命令语言）为「逐条命令」设计的，它有两个毛病 —— 每条写命令都要点一次
+  （一次十步的整理任务要点十次），而真正危险的批量操作并不因为它就变得安全，用户看到的只是又一个要点的框。
+  第三版把约束前移到「**写操作只能调用函数**」：安全性来自数据模型，不是点击次数。
+- **拦住什么**：`SqlGuard` 只放行单条 `SELECT` / `WITH`，直接 `UPDATE` / `INSERT` / `DELETE` 表一律拒绝；
+  25 个函数里**没有任何批量删除**（一次只删一篇 / 一个库，且是逻辑删除）。模型若要「清空整个库」，
+  得连发几十次调用，而那会被轮数上限（15）挡住。
+- **拦不住什么**：模型在轮数内删掉一篇笔记 / 一个笔记库是**立即生效**的 —— 这是明确接受的取舍
+  （见 [AI操作数据库设计](AI操作数据库设计.md) 第 14 节）。prompt 因此写死一条：只在用户明确要求时才做。
+- **删除的代价**：内部是软删除（`deletedAt` 置位、行还在、切片显式清掉），但界面上**没有回收站入口**，
+  对用户来说等于不可恢复。
+- **`askUser` 还在**：它是「停下来问清楚」的载体，与危险操作无关。用户拦住 AI 的时机从「执行前点同意」
+  变成了「动手前先问」。
 ### 4.6 会话历史：切片、窗口、摘要
 
 这一节只补机制；"最近 5 轮 / 单条 500 字 / 更早的压成一段摘要且只生成一次"这三条省 token 的手段与理由
@@ -520,8 +525,9 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
   窗口只从"倒数第 N 条 `user`"起切（`historyWindowOf` 与 `olderHistoryOf` 共用同一个 `_windowStart`，
   两边严格互补，一条不多一条不少）。
 
-  > ⚠️ 命令语言改造后，工具只剩 `run` / `askUser`，**会话历史的 `listHistory` / `readHistory` /
-  > `searchHistory` 三个工具已移除**。`HistoryChunker` 类与其测试暂留，但当前无调用方；
+  > ⚠️ 换成 SQL 之后工具只剩 `sql` / `askUser`，**会话历史的 `listHistory` / `readHistory` /
+  > `searchHistory` 三个工具早已移除**（AI 要翻旧对话可以自己 `SELECT` `ai_messages`，
+  > 但窗口之外的更早轮次只以摘要形式存在）。`HistoryChunker` 类与其测试暂留，但当前无调用方；
   > 对话窗口仍按上面规则工作。
 
   > `HistoryChunker` 对超过 700 字的一轮会按段落 / 句子继续拆，所以"片边界 = 轮边界"只对 ≤700 字的
@@ -538,17 +544,16 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 `deepseek_tool_calling_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` /
 `history_summary_test` / `history_chunker_test`；是否全绿以 `flutter test` 为准）：
 
-- [x] `run` 的脚本能读能写：`ls`/`stat`/`sed -n`/`grep` 批量执行、一次性回灌
-- [x] 写命令逐条弹确认；用户拒绝则**跳过这一条、继续下一条**
-- [x] 语法错误整段拒绝并给出出错行号；未定义变量中止整段
+- [x] `sql` 能读能写：25 个函数可被 AI 调用，也能嵌在 SQL 里（`test/ai_sql_test.dart`）
+- [x] 只放行单条 `SELECT` / `WITH`：写表 / DDL / `PRAGMA` / 多语句一律拒绝
+- [x] 锚点不唯一时拒绝，且**一个字都不动**；错误信息告诉模型把锚点写长一点
+- [x] 正文与派生字段一起写（`excerpt` / `word_count` 与 `TextUtils` 同口径）、切片由触发器清掉
 - [x] 历史自动 5 轮、单条 ≤500 字；更早历史压缩摘要只生成一次（用调用次数验证）
-- [x] 风险拦截在 App，与模型行为解耦（没有确认通道时写命令一律拒绝）
-- [x] `sed` 行号越界返回错误，且一个字都不改（连确认层都不弹）
 - [x] `askUser` ≤5（跨恢复累计）、轮数上限 15
 
-> 旧的验收项（`listChunks` / `readChunk` 预算、`expectedText` 锚点、`requestTools`、批量工具）随
-> 命令语言改造已作废；对应的旧测试文件（`tool_specs_test` / `tool_executor_test` / `tool_delete_test` /
-> `tool_write_test` / `agent_workspace_test` 等）已不在仓库里，验收改由上面列出的测试承担。
+> 旧的验收项（`listChunks` / `readChunk` 预算、`requestTools`、批量工具、写命令逐条确认、撤销栈）
+> 已随方案更替作废；对应的旧测试文件（`tool_specs_test` / `tool_executor_test` / `tool_delete_test` /
+> `tool_write_test` / `agent_workspace_test` 等）不在仓库里，验收改由上面列出的测试 + `test/ai_sql_test.dart` 承担。
 
 > **真机端到端（`agent_live_test.dart` / `agent_search_live_test.dart`）：未做。**
 > 那 3 份真机测试已删除（不会真的去跑，留着只是维护负担）。代价是"协议报文形状 / 模型会不会主动调工具 /
@@ -559,12 +564,12 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 | 观察项 | 怎么观察 | 出问题说明什么 |
 |---|---|---|
-| 工具调用的 token 占比 | `ai_calls` 的 `prompt_tokens`（不含缓存命中量，见 5.4） | 命令语言没省下来，或缓存没命中 |
+| 工具调用的 token 占比 | `ai_calls` 的 `prompt_tokens`（不含缓存命中量，见 5.4） | SQL 没省下来，或缓存没命中 |
 | `askUser` 触发频率 | 数一轮对话里的次数 | 太高 → `askUser` 工具描述里的"能推断的就别问"没生效 |
 | 挂起未恢复的会话 | `ai_messages.pendingAction` 长期非空的条数 | 恢复逻辑有 bug |
-| 确认层拒绝率 | 用户点「取消」的比例 | 太高 → AI 定位不准（`sed` 行号读错） |
-| 脚本语法错误率 | `run` 返回"脚本语法错误"的次数 | 太高 → system prompt 里的语法说明需要加强 |
-| 单条命令失败率 | 脚本执行记录里 `ok:false` 的比例 | 太高 → 错误信息没有教会模型怎么改 |
+| SQL 被拒率 | 工具结果里 `error` 含「不允许直接写表」的比例 | 太高 → prompt 里「写操作走函数」说得不够，或函数清单没被查 |
+| 锚点失败率 | `replace_unique` / `insert_*` 返回 `ok:false` 的比例 | 太高 → 模型不爱先 `find_in_note` 侦察，prompt 第 6 条要加强 |
+| 单条 SQL 失败率 | 执行结果里 `ok:false` 的比例 | 太高 → 错误信息没有教会模型怎么改 |
 | 崩溃 / 未捕获异步错误 | 现有 `_StartupGate` + 日志 | 工具执行器里的 async 边界（每个 `await` 之后都要查 `mounted`） |
 
 ---

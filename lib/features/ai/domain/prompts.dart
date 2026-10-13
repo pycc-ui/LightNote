@@ -17,71 +17,42 @@ class AiPrompts {
   // AI 页（轻笔记助手）
   // ---------------------------------------------------------------------------
 
-  /// AI 页的系统提示词（命令语言版）。
+  /// AI 页的系统提示词（SQL 版）。
   ///
-  /// 工具只剩一个 `run(script)`：所有操作都写成脚本里的 shell 风格命令，
-  /// 语法用 `set` / `:`（for/if）/ `end` 明确区别于 bash。命令语法写在这里，
-  /// 让模型零学习成本（`ls`/`sed`/`grep` 是海量训练数据）。
+  /// 工具只剩一个 `sql`：所有操作都写成 SQL —— AI 的母语，训练数据海量，
+  /// 学习成本为零（上一版让它学一套自定义命令语法，那是它没见过的东西，
+  /// 换更大的模型也没用）。**哪些函数可用不写在这里**，而是让它去查
+  /// `ai_functions` 表：于是加一个函数 = INSERT 一行，这段 prompt 一个字都不用改。
   ///
   /// 注意：这里刻意**不把时间戳、会话 id、笔记 id 拼进 prompt**，
   /// 以保证 system 前缀稳定、最大化上下文缓存命中率（命中后输入成本约 1/50）。
   ///
-  /// 命令与语法细则见 docs/命令语言设计.md。
+  /// 细则见 docs/AI操作数据库设计.md。
   static const agentSystem = '''
-你是「LightNote」App 内置的笔记助手。
+你是「LightNote」的笔记数据库助手。你通过 sql 工具执行**一条 SQL**，读写用户的笔记库。
 
-你可以在用户的笔记库上执行命令。屏幕上的「笔记库」是文件夹、「笔记」是文件，
-路径写作 `笔记库/笔记`。根目录固定有一个「我的轻笔记」，存放未归档的笔记。
+ai_functions(name, category, signature, description, example)
+—— 这张表列出全部可用的扩展函数（读 / 建 / 改 / 删）。
 
-## 执行方式
-- 通过 `run` 工具提交**一段命令脚本**，一次可以写多行。
-- 能一次做完的事不要拆成多轮。
-- 只读命令（ls/stat/sed -n/grep）批量执行、一次性返回；
-  写命令（echo / sed 的 c/d/i/a / rm / mkdir / mv）**逐条弹确认框**，
-  用户允许才执行，拒绝则跳过这一条、继续下一条。
-- 读长笔记：先 stat 看行数，再 grep 定位，最后 sed -n 读那几行。
-- 要改笔记：必须先用 `sed -n` 读出目标行、确认行号，**在同一脚本里**再改。
+规则：
+1. 先 SELECT * FROM ai_functions 看一遍有哪些函数。**写操作只能调用这些函数**；
+   直接 UPDATE / INSERT / DELETE 表会被拒绝。
+2. 一次只发一条语句，分号只能出现在末尾。SQL 可以嵌套（子查询 / CTE / JOIN /
+   窗口函数），扩展函数也能嵌在查询里：
+     SELECT id, title, read_preview(id, 0, 200) AS preview
+     FROM notes WHERE notebook_id = 'nb1' AND deleted_at IS NULL;
+3. 查笔记一律加 deleted_at IS NULL。
+4. 「我的轻笔记」= is_inbox = 1 且 notebook_id IS NULL。
+5. 不要整篇读正文：先 find_in_note / search_in_note 定位，再用 read_around /
+   read_preview 只取那一段。
+6. 改正文用 replace_unique / insert_after 这类函数，锚点必须**唯一出现**。
+   它失败时会说明原因（出现 0 次还是多次），照着原因把锚点写长一点再试，
+   不要重复发同一条。
+7. 读不到就说读不到，绝不编造。
+8. 信息不足（不确定是哪一篇、要起什么名字）先用 askUser 问清楚，不要猜着改。
+9. 用简体中文回答；要结构化就用 Markdown 列表，不要输出 JSON。
 
-## 脚本语法
-  set 名字 = 值            定义变量
-  \$名字                   引用变量（引用不存在的变量会报错）
-  for x in 列表            循环；列表可以是命令结果，也可以是 "a" "b" "c"
-    ...
-  end
-  if 命令                  条件；命令成功（退出码 0）才执行
-    ...
-  end
-  # 这一行是注释
-
-## 命令
-  ls [库]                  列笔记库 / 列某库内的笔记（只给名字）
-  stat <笔记>              行数、字数、大小、时间、所属库
-  sed -n 'A,Bp' <笔记>     读第 A-B 行
-  sed 'A,Bc 新内容' <笔记>  替换第 A-B 行
-  sed 'A,Bd' <笔记>        删除第 A-B 行
-  sed 'Ai 新内容' <笔记>    在第 A 行前插入一行
-  sed 'Aa 新内容' <笔记>    在第 A 行后追加一行
-  grep "词" [路径]         搜索，返回行号 + 片段
-  echo "内容" > <笔记>     新建 / 覆盖整篇
-  echo "内容" >> <笔记>    追加到末尾
-  rm <笔记>                删除（不可恢复）
-  mkdir <库>               新建笔记库
-  mv <笔记或库> <目标>     移动 / 重命名
-
-## 不支持（写了就报错）
-管道、命令替换、反引号、通配符、正则、算术、字符串函数、函数定义、
-嵌套循环 / 嵌套条件、else / elif、while、break / continue / return、
-`&&` / `||`、环境变量、多行字符串、行尾注释。
-
-## 硬性要求
-1. 使用简体中文，语气简洁务实，不说客套话。
-2. 回答以笔记内容为依据。要引用用户笔记时**先用 grep / sed -n 读出来**，
-   别凭常识替他"回忆"；读不到就说读不到，绝不编造。
-3. 修改类命令一定会弹确认：直接发脚本即可，**不要**只输出一份"变更建议"就停下；
-   也**不要**说"我已经改好了"——除非命令返回了成功结果。
-   用户拒绝时命令会返回失败，照着结果如实告诉用户，不要重试同一个操作。
-4. 删除不可恢复，措辞要明确。
-5. 需要结构化输出时用 Markdown 列表，不要输出 JSON。
+修改与删除**没有确认层**，调用即生效：只在用户明确要求时才做，做完如实说明。
 ''';
 
   // ---------------------------------------------------------------------------
@@ -108,42 +79,35 @@ class AiPrompts {
   /// 告诉模型"这是截取的片段、可能不完整"，同时**禁止卡片提到这一点**——
   /// 否则标题/正文会冒出「这段文字说…」这种指向素材本身的话。
   static const feedSystem = '''
-生成灵感卡片。每份素材是一篇笔记的一小段原文，为每份生成一张卡片。
-输出 JSON：{"cards":[{"title":"","body":"","tag":""}]}
-顺序对应素材，不合并不遗漏。
+生成灵感卡片。素材是一篇笔记的一小段原文。
+输出 JSON：{"title":"","body":"","tag":""}
 title：≤30 字，有钩子（观点/悬念/数字）。例：「抄书是最没用的努力」。
 body：200-400 字 Markdown，围绕原文一个具体点展开，不编造。不要写「这段文字」「原文提到」这类话。
 tag：1 个词，≤5 汉字（英文 12 字母），不带 #。
 只输出 JSON。
 ''';
 
-  /// 把素材拼成用户消息：**一段截断的原文 + 任务**。
+  /// 把一份素材拼成用户消息：**一段截断的原文 + 任务**。
   ///
-  /// 素材只有一样东西——从笔记里截取的一小段原文（片内的窗口，可能不完整）。
-  /// 提示词里会说明它是截取的原文、并要求卡片**不要提及**这一点。
-  ///
-  /// 一份素材生成一张卡片：调用方是"一路一份素材、每路只出 1 张"的并发单卡
-  /// （见 `FeedRepository._generateCardsParallel`）。所以这里没有"要几张"的参数。
+  /// **一次请求只生成一张卡片**：一份素材 = 一段截断的原文（片内的窗口，
+  /// 可能不完整），调用方「一路一份素材、每路只出 1 张」并发跑（见
+  /// `FeedRepository._generateCardsParallel`）。所以这里收**单个** [FeedMaterial]，
+  /// 没有"要几张"的参数——想多出卡就多给素材，而不是让模型对着一份素材写多张。
   ///
   /// [avoidTitles] 是**已经生成过的卡片标题**（池子里还没看的、上次预留的）。
   /// 库里笔记少的时候，切片会被反复取到，光靠换块治不了重复；
   /// 把已有标题列出来让模型**主动避开**。
   static String feedUser(
-    List<FeedMaterial> materials, {
+    FeedMaterial material, {
     List<String> avoidTitles = const [],
   }) {
     final sb = StringBuffer();
-
-    for (var i = 0; i < materials.length; i++) {
-      final m = materials[i];
-      sb.writeln('【素材 ${i + 1}】');
-      sb.writeln('标题：${m.title.isEmpty ? '（无标题）' : m.title}');
-      sb.writeln('原文片段（卡片必须基于它）：');
-      sb.writeln(_clip(m.chunk, limit: 400));
-      sb.writeln();
-    }
-
-    sb.writeln('请为上面每一份素材各生成一张卡片，共 ${materials.length} 张，顺序一一对应。');
+    sb.writeln('【素材】');
+    sb.writeln('标题：${material.title.isEmpty ? '（无标题）' : material.title}');
+    sb.writeln('原文片段（卡片必须基于它）：');
+    sb.writeln(_clip(material.chunk, limit: 400));
+    sb.writeln();
+    sb.writeln('请为这段素材生成 1 张卡片。');
 
     if (avoidTitles.isNotEmpty) {
       sb.writeln();
@@ -159,30 +123,35 @@ tag：1 个词，≤5 汉字（英文 12 字母），不带 #。
     return sb.toString();
   }
 
-  /// 解析轻笔记生成结果。
-  static List<FeedDraft>? parseFeedCards(String raw) {
+  /// 解析**一张**轻笔记生成结果。
+  ///
+  /// 正常形状是 `{"title":…,"body":…,"tag":…}`。为兼容模型偶发地包一层
+  /// （`{"cards":{…}}` 或 `{"cards":[{…}]}`），这里也接受这两种退化形状，
+  /// 取里面的那张——比直接判失败、白烧一次调用划算。
+  static FeedDraft? parseFeedCard(String raw) {
     final json = extractJson(raw);
     if (json == null) return null;
 
-    final list = json['cards'];
-    if (list is! List) return null;
+    final Object? raw2 = (json['title'] is String || json['body'] is String)
+        ? json
+        : json['cards'];
+    final Map? card = switch (raw2) {
+      Map m => m,
+      List l when l.isNotEmpty && l.first is Map => l.first as Map,
+      _ => null,
+    };
+    if (card == null) return null;
 
-    final drafts = <FeedDraft>[];
-    for (final item in list) {
-      if (item is! Map) continue;
-      final d = FeedDraft.fromJson(Map<String, dynamic>.from(item));
-      if (!d.isValid) continue;
-      // 标题与正文也要兜底：提示词要求"标题 ≤30 字、正文 200–400 字"，
-      // 但模型偶尔会跑飞（有返回几千字的情况），而卡片正文会被收进笔记、
-      // 也会进 prompt，`feed_reserve` 不该被一张卡片塞满。
-      // 与标签同一套思路：模型的自我约束不算约束，代码里兜底才算。
-      drafts.add(FeedDraft(
-        title: safeTruncate(d.title.trim(), AiLimits.feedCardTitleMax),
-        body: safeTruncate(d.body.trim(), AiLimits.feedCardBodyMax),
-        tag: sanitizeTag(d.tag),
-      ));
-    }
-    return drafts.isEmpty ? null : drafts;
+    final d = FeedDraft.fromJson(Map<String, dynamic>.from(card));
+    if (!d.isValid) return null;
+    // 标题与正文兜底：提示词要求"标题 ≤30 字、正文 200–400 字"，
+    // 但模型偶尔会跑飞，而卡片正文会被收进笔记、也会进 prompt。
+    // 与标签同一套思路：模型的自我约束不算约束，代码里兜底才算。
+    return FeedDraft(
+      title: safeTruncate(d.title.trim(), AiLimits.feedCardTitleMax),
+      body: safeTruncate(d.body.trim(), AiLimits.feedCardBodyMax),
+      tag: sanitizeTag(d.tag),
+    );
   }
 
 

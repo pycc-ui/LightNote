@@ -20,7 +20,7 @@ class DeepSeekConfig {
   ///
   /// **只在 AI 助手页按会话可选**（原先选工作区的位置现在选模型）：
   /// 复杂度高的整理/推理任务用 pro，日常问答用 flash。
-  /// 卡片流**固定用 flash**（`generateFeedNotes` 的默认参数就是 [modelFlash]）——
+  /// 卡片流**固定用 flash**（`generateFeedNote` 的默认参数就是 [modelFlash]）——
   /// 那是高频、可并发的成本大头，让用户误选 pro 会把费用抬高三倍。
   static const modelPro = 'deepseek-v4-pro';
 

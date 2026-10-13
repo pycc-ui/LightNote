@@ -2,7 +2,7 @@
 ///
 /// 凡是"改一个数字就能调成本 / 调体验 / 调行为"的常量，都集中在本文件：
 /// 卡片长度、笔记与切片尺寸、卡片流池子与窗口、搜索权重、
-/// 命令执行上限、会话历史与撤销上限……
+/// AI 的 SQL 通道上限、会话历史上限……
 ///
 /// 目的和 `ai_limits` 当初一样，只是范围扩到全部：**避免"prompt 里写 300、
 /// 代码里截 500""两处上限各写各的"这种不一致**。
@@ -161,24 +161,57 @@ abstract final class SearchLimits {
 }
 
 // ============================================================================
-// 命令脚本（`run` 工具）执行上限
+// AI 的 SQL 通道（`sql` 工具 + 25 个 UDF）的上限
 // ============================================================================
+//
+// 这批数字有两个读法，别混：
+//   · **函数层的默认值与硬上限**（read_preview 一次最多 500 字、limit 最多 50）：
+//     写在函数体里，AI 传超了就被夹到上限；
+//   · **回灌给模型的行李限额**（maxResultRows / maxResultChars）：
+//     执行器用它截断结果集 —— 一次 SELECT 出十万行会把上下文和钱包一起烧掉。
+//
+// 它们都只是「成本与体验」的旋钮，不是安全边界：真正的边界是 SqlGuard
+//（只放行单条 SELECT/WITH）与 UDF 里的业务校验。
+abstract final class SqlLimits {
+  // ---- 读 ----
 
-abstract final class CommandLimits {
-  /// 单次脚本命令条数（含循环展开后的每一条）。
-  static const maxCommands = 50;
+  /// read_preview / read_around 单次返回的字符数上限。
+  static const maxReadChars = 500;
 
-  /// 单次 `for` 循环次数。
-  static const maxIterations = 100;
+  /// 不传 chars 时的默认值。
+  static const defaultReadChars = 200;
 
-  /// 单次脚本总耗时。
-  static const budget = Duration(seconds: 10);
+  /// find_in_note 最多回几个位置（count 仍是真实次数）。
+  static const maxFindPositions = 200;
 
-  /// 单次 `sed -n` 最多读几行。
-  static const maxSedReadLines = 200;
+  /// search_notes 的默认 / 上限条数。默认值直接沿用 SearchLimits，
+  /// 免得「搜索页默认 20 条、AI 默认别的数」变成两个真相。
+  static const defaultSearchLimit = SearchLimits.defaultLimit;
+  static const maxSearchLimit = 50;
 
-  /// 单次 `grep` 最多返回多少条。
-  static const maxGrepHits = 50;
+  /// search_in_note 的默认 / 上限条数。
+  static const defaultSnippetLimit = 10;
+  static const maxSnippetLimit = 20;
+
+  /// recent_notes 的默认条数（上限与 search_notes 共用）。
+  static const defaultRecentLimit = 10;
+
+  /// 片段半径：命中位置前后各多少字（与搜索页同一个数字）。
+  static const snippetRadius = SearchLimits.snippetRadius;
+
+  // ---- 回灌给模型的结果 ----
+
+  /// 一次查询最多回灌几行。
+  static const maxResultRows = 200;
+
+  /// 一次查询回灌的字符上限（超了就截断并告诉模型截了多少）。
+  static const maxResultChars = 8000;
+
+  // ---- 安全校验 ----
+
+  /// 单条 SQL 的字符上限。防的是「模型把整篇笔记塞进 SQL 字符串」这种意外，
+  /// 不是防攻击（那由 SqlGuard 的关键字与语句数规则负责）。
+  static const maxStatementChars = 20000;
 }
 
 // ============================================================================
@@ -192,17 +225,12 @@ abstract final class AgentLimits {
   /// 一轮用户输入里 `askUser` 最多问几次（跨恢复累计）。
   static const maxAsksPerTurn = 5;
 
-  /// 撤销栈深度（"手滑了救一下"，不是版本历史）。
-  static const maxUndo = 5;
 
   /// 自动带的历史**轮数**（一轮 = 一问一答）。
   static const maxHistoryRounds = 5;
 
   /// 历史里**单条**消息的截断上限。
   static const maxHistoryChars = 500;
-
-  /// 工具确认弹层里「改前 / 改后」的截断上限（字），别把弹层撑成一整篇。
-  static const confirmDiffMaxChars = 600;
 }
 
 // ============================================================================
