@@ -199,6 +199,21 @@ abstract final class SqlLimits {
   /// 片段半径：命中位置前后各多少字（与搜索页同一个数字）。
   static const snippetRadius = SearchLimits.snippetRadius;
 
+  // ---- 写 ----
+
+  /// 批量函数一次最多几条。超了**拒绝**（不是截断）：截断会让模型以为
+  /// 整批都做了，实际悄悄漏掉几条 —— 这种"看起来成功"的错最难发现。
+  static const maxBatchSize = 10;
+
+  // ---- 动态标记（mark_functions）----
+
+  /// 最多常驻几个函数的详情。**只增不减**，所以这是"永远装得下"的硬顶：
+  /// 满了之后新的标记不再加载（mark_functions 会在返回值里点名说出来）。
+  ///
+  /// 定 15 的依据：详情每条约 70 token，15 条约 1000 token，且加在 system prompt
+  /// **末尾** —— 命中缓存后只按约 1/50 计价，比每轮查目录便宜得多。
+  static const maxPinnedFunctions = 15;
+
   // ---- 回灌给模型的结果 ----
 
   /// 一次查询最多回灌几行。

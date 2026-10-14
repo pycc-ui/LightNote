@@ -112,6 +112,59 @@ void main() {
     });
   });
 
+  group('已加载函数详情（动态标记的展示面）', () {
+    test('标记过的函数会渲染出签名 / 说明 / 例子', () {
+      final out = AiPrompts.pinnedDetails(['search_notes']);
+
+      expect(out, contains('## 已加载函数详情'));
+      expect(out, contains('search_notes(keyword, limit)'));
+      expect(out, contains('全库搜标题'));
+      expect(out, contains('例：SELECT search_notes('));
+    });
+
+    test('多个函数各占一节，顺序与传入一致', () {
+      final out = AiPrompts.pinnedDetails(['read_preview', 'search_notes']);
+
+      expect(out.indexOf('read_preview(note_id'), lessThan(out.indexOf('search_notes(')));
+    });
+
+    test('空 / 名字全都失效 → 空串（不留一个空标题）', () {
+      expect(AiPrompts.pinnedDetails(const []), '');
+      expect(AiPrompts.pinnedDetails(const ['不存在的函数']), '');
+      expect(AiPrompts.agentSystemFor(pinned: const ['不存在的函数']),
+          AiPrompts.agentSystem,
+          reason: '失效名字不该在 prompt 里留下任何痕迹');
+    });
+
+    test('★ 拼接顺序：固定段 → 摘要 → 详情段（前缀稳定才命中缓存）', () {
+      final out = AiPrompts.agentSystemFor(
+        summary: '用户想整理会议记录。',
+        pinned: const ['search_notes'],
+      );
+
+      expect(out.startsWith(AiPrompts.agentSystem), isTrue, reason: '固定段必须在最前');
+      final atSummary = out.indexOf('用户想整理会议记录。');
+      final atDetails = out.indexOf('## 已加载函数详情');
+      expect(atSummary, greaterThan(0));
+      expect(atDetails, greaterThan(atSummary),
+          reason: '详情段在最后：它只增不改，前面的部分才一直命中缓存');
+    });
+
+    test('详情段只增不改：追加一个函数，原来的那一段逐字不动', () {
+      final before = AiPrompts.agentSystemFor(pinned: const ['search_notes']);
+      final after = AiPrompts.agentSystemFor(
+          pinned: const ['search_notes', 'read_preview']);
+
+      expect(after.startsWith(before), isTrue,
+          reason: '新标记只追加在末尾，之前的内容必须一个字都不变');
+    });
+
+    test('prompt 里必须写明「不要每次会话都重查目录」', () {
+      expect(AiPrompts.agentSystem, contains('mark_functions'));
+      expect(AiPrompts.agentSystem, contains('不要每次会话都重查目录'));
+    });
+  });
+
   group('HighlightUtils', () {
     test('大小写不敏感地切分并标记命中片段', () {
       final parts = HighlightUtils.split('Hello Flutter World', 'flutter');

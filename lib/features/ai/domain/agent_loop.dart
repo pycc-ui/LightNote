@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/app_params.dart';
@@ -144,9 +146,15 @@ class AgentLoop {
   static const maxAsksPerTurn = AgentLimits.maxAsksPerTurn;
 
   /// 跑一轮。 [history] 必须**已经包含**本轮的用户输入。
+  ///
+  /// [rebuildPrompt]：**每轮请求前重新拼一次 system prompt**。
+  /// 动态函数标记（`mark_functions`）就靠它生效 —— 标记是这一轮的工具调用，
+  /// 只有下一轮重新拼过，刚加载的函数详情才会出现在 prompt 末尾；
+  /// 不传就用固定的 [systemPrompt]（测试与不需要动态详情的路径）。
   Stream<AgentEvent> run({
     required String systemPrompt,
     required List<AgentMessage> history,
+    Future<String> Function()? rebuildPrompt,
     List<AiMessage> dbHistory = const [],
     int asksSoFar = 0,
   }) async* {
@@ -159,6 +167,7 @@ class AgentLoop {
 
     for (var roundNo = 0; roundNo < maxRounds; roundNo++) {
       executor.beginTurn();
+      final prompt = await _promptFor(systemPrompt, rebuildPrompt);
 
       // ---- 一次请求 ----
       var text = '';
@@ -166,7 +175,7 @@ class AgentLoop {
       var errored = false;
 
       await for (final e in round(
-        systemPrompt: systemPrompt,
+        systemPrompt: prompt,
         messages: messages,
         tools: tools,
       )) {
@@ -200,7 +209,10 @@ class AgentLoop {
       }
 
       // ---- 提了工具：先把这一轮记进历史，再逐个执行 ----
+      // ---- 压缩无用信息 ----
+      _slimLastToolResults(messages); 
       messages.add(AgentMessage.assistant(text, toolCalls: calls));
+      _slimToolCalls(messages); 
       // 工具轮里模型偶尔会先垫一句（"我先查一下"）。写进回答让用户看到进度，
       // 但**不算进最终回答的正文**——它和结论之间要隔开。
       if (text.trim().isNotEmpty) answer.write('${text.trim()}\n\n');
@@ -260,6 +272,125 @@ class AgentLoop {
       '${answer.isEmpty ? '' : '下面是已经拿到的部分内容。'}',
       usage: usage,
     );
+  }
+  /// 这一轮真正发给模型的 system prompt。
+  ///
+  /// 重拼失败（比如读 app_kv 出错）**不打断对话**：退回固定段继续跑 ——
+  /// AI 顶多少看到几条函数详情（那几条它照样能调，只是没有内联的用法说明），
+  /// 而把整轮对话炸掉是另一回事，代价完全不对等。
+  static Future<String> _promptFor(
+    String base,
+    Future<String> Function()? rebuild,
+  ) async {
+    if (rebuild == null) return base;
+    try {
+      return await rebuild();
+    } catch (_) {
+      return base;
+    }
+  }
+
+  /// 精简末尾所有连续的 tool 消息（一轮可能有多个 tool_calls）。
+  ///
+  /// 在 add 新的 assistant(tool_calls) **之前**调用——此时末尾是上一轮的 tool 结果。
+  /// 从后往前扫，遇到非 tool 就停。
+  ///
+  /// 效果：tool 结果从
+  ///   {"ok":true,"data":[{"id":"n1","title":"…三千字…"}]}
+  /// 压成
+  ///   {"ok":true,"data":"⟪系统压缩：省略 2900 字⟫"}
+  /// 保留 JSON 结构，AI 知道"发生了什么"，只是不记得具体内容。
+  void _slimLastToolResults(List<AgentMessage> messages) {
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final m = messages[i];
+      if (m.role != 'tool' || m.toolCallId == null) break;
+      messages[i] = AgentMessage.tool(
+        toolCallId: m.toolCallId!,
+        content: _compressToolResult(m.content),
+      );
+    }
+  }
+  
+  /// 精简**最后一个** assistant(tool_calls) 的 arguments。
+  ///
+  /// 在 add 新的 assistant(tool_calls) **之后**调用——压缩刚加的那个。
+  ///
+  /// 效果：query 从
+  ///   INSERT INTO notes (...) VALUES ('n1', 'nb1', '三千字正文', ...)
+  /// 压成
+  ///   左 35 字⟪系统压缩：省略 N 字⟫右 35 字
+  /// 保留 SQL 结构，AI 知道在做什么，只是不记得具体参数。
+  void _slimToolCalls(List<AgentMessage> messages) {
+    final i = messages.lastIndexWhere(
+      (m) => m.role == 'assistant' && m.toolCalls.isNotEmpty,
+    );
+    if (i < 0) return;
+  
+    final m = messages[i];
+    messages[i] = AgentMessage(
+      role: m.role,
+      content: m.content,
+      toolCalls: [
+        for (final c in m.toolCalls)
+          ToolCall(
+            id: c.id,
+            name: c.name,
+            arguments: _compressSqlArgs(c.arguments),
+          ),
+      ],
+    );
+  }
+  
+  /// arguments 是 JSON 字符串 `{"query": "SELECT ..."}`。
+  /// 解析出 query，压缩中间部分，再拼回 JSON。
+  ///
+  /// 解析失败（不是 JSON、缺 query 字段）就不动——不做多余处理。
+  String _compressSqlArgs(String args) {
+    try {
+      final map = jsonDecode(args) as Map<String, dynamic>;
+      final query = map['query'];
+      if (query is String) {
+        map['query'] = _compressMiddle(query);
+      }
+      return jsonEncode(map);
+    } catch (_) {
+      return args;
+    }
+  }
+  /// 压缩 tool result 的 content：
+  /// 解析 JSON，只压缩 `data` 字段，其他字段（ok / description 等）原样保留。
+  ///
+  /// 例：
+  ///   {"ok":true,"description":"查询了笔记库","data":[{...三千字...}]}
+  ///   →
+  ///   {"ok":true,"description":"查询了笔记库","data":"...省略 2900 字..."}
+  ///
+  /// 不是 JSON（UDF 直接返回文本）就整体用 _compressMiddle。
+  String _compressToolResult(String content) {
+    try {
+      final map = jsonDecode(content) as Map<String, dynamic>;
+      if (map.containsKey('data')) {
+        map['data'] = _compressMiddle(jsonEncode(map['data']));
+      }
+      return jsonEncode(map);
+    } catch (_) {
+      return _compressMiddle(content);
+    }
+  } 
+  /// 保留开头和结尾各 [keep] 字符，中间压成标记。
+  ///
+  /// 为什么不做正则匹配"单引号字符串"：SQL / JSON / 纯文本结构各异，
+  /// 真正有信息量的是**开头**（操作类型、表名、关键字段）
+  /// 和**结尾**（WHERE 条件、主要参数）——中间的大段内容压掉即可。
+  ///
+  /// 省得少就不压（`omitted < 80`）：为省几十个字符插一个标记，
+  /// 反而让模型分神、还可能误以为内容被砍掉。
+  static String _compressMiddle(String text, {int keep = 35}) {
+    final omitted = text.length - keep * 2;
+    if (omitted < 80) return text;
+    return '${text.substring(0, keep)}'
+        '⟪系统压缩：省略 $omitted 字⟫'
+        '${text.substring(text.length - keep)}';
   }
 
   /// 解析 `askUser` 的参数。缺关键字段返回 null（调用方给模型一句可读的抱怨）。

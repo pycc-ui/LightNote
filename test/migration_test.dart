@@ -543,7 +543,8 @@ void main() {
         .getSingle();
     expect(count.read<int>('n'), kAiFunctions.length);
     expect(kAiFunctions.length, 25,
-        reason: '25 个函数是设计里定死的数；改这张表要同步改文档与测试');
+        reason: '25 个函数是 v4 设计里定死的数（11 读 + 3 建 + 8 改 + 2 删 + 1 系统）；'
+            '改这张表要同步改文档与测试');
 
     // 触发器也在 beforeOpen 里建（清切片那条，见 core/db/ai_udfs.dart）
     final triggers = await db

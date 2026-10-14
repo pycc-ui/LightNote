@@ -45,12 +45,12 @@ class SqlCheck {
 /// ## 为什么必须先剥掉字符串字面量
 ///
 /// 用户正文里本来就可能有这些词（比如「把 delete 那段删掉」）。不剥的话，
-/// 一句正常的 replace_unique 会被自己的参数误伤 —— 那是「安全规则」
+/// 一句正常的 update_notes_batch 会被自己的参数误伤 —— 那是「安全规则」
 /// 变成「功能坏了」的经典写法。
 class SqlGuard {
   SqlGuard._();
 
-  /// 一律禁止的写法。**按词匹配**，所以 `updated_at` / `delete_unique`
+  /// 一律禁止的写法。**按词匹配**，所以 `updated_at` / `delete_notes_batch`
   /// 这类带下划线的列名与函数名不会被误伤（下划线是词字符）。
   static const _forbidden = <String>[
     'DROP',
@@ -90,7 +90,7 @@ class SqlGuard {
     if (!_selectOrWith.hasMatch(code.trimLeft())) {
       return SqlCheck.reject(
           '只允许 SELECT / WITH 查询。写操作请调用 ai_functions 里的函数'
-          '（先 SELECT * FROM ai_functions 看清单）。');
+          '（SELECT name, signature FROM ai_functions 查清单）。');
     }
 
     final upper = code.toUpperCase();
@@ -109,7 +109,7 @@ class SqlGuard {
     const writes = {'UPDATE', 'INSERT', 'DELETE', 'REPLACE INTO'};
     if (writes.contains(kw)) {
       return '不允许直接写表（$kw）。写操作要走 ai_functions 里的函数：'
-          '先 SELECT * FROM ai_functions 看有哪些，再调用它们。';
+          'SELECT name, signature FROM ai_functions 查有哪些，再调用它们。';
     }
     return '不允许执行 $kw（危险语句）。';
   }

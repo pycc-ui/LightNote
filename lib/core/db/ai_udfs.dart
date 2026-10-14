@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../util/ai_limits.dart';
 import '../util/text_utils.dart';
+import 'ai_functions.dart';
 
 // ============================================================================
 // AI 操作数据库的实现层
@@ -13,7 +14,7 @@ import '../util/text_utils.dart';
 //
 // AI 的操作语言是 **SQL**，业务约束装在 **SQLite 自定义函数（UDF）** 里：
 //
-//   AI 写：SELECT replace_unique('n1', '主要风险是时间紧', '风险已识别');
+//   AI 写：SELECT update_notes_batch('[{"id":"n1","old":"主要风险是时间紧","new":"风险已识别"}]');
 //   SQLite：按名字查到我们注册的 Dart 函数 → 调它 → 拿到 JSON 字符串当结果
 //
 // 于是约束（锚点必须唯一、正文硬上限、派生字段口径、删库不删笔记……）
@@ -77,20 +78,20 @@ const _functions = <String, ScalarFunction>{
   'search_in_note': _searchInNote,
   'count_notes': _countNotes,
   'recent_notes': _recentNotes,
-  'create_note': _createNote,
   'create_notebook': _createNotebook,
   'duplicate_note': _duplicateNote,
-  'replace_unique': _replaceUnique,
-  'delete_unique': _deleteUnique,
+  'create_notes_batch': _createNotesBatch,
   'insert_after': _insertAfter,
   'insert_before': _insertBefore,
-  'append_to_note': _appendToNote,
   'prepend_to_note': _prependToNote,
   'rename_note': _renameNote,
-  'move_note': _moveNote,
   'rename_notebook': _renameNotebook,
-  'delete_note': _deleteNote,
+  'update_notes_batch': _updateNotesBatch,
+  'append_notes_batch': _appendNotesBatch,
+  'move_notes_batch': _moveNotesBatch,
   'delete_notebook': _deleteNotebook,
+  'delete_notes_batch': _deleteNotesBatch,
+  'mark_functions': _markFunctions,
 };
 
 // ============================================================================
@@ -174,6 +175,77 @@ String _json(Object? value) => jsonEncode(value);
 
 String _err(String message) =>
     jsonEncode({'ok': false, 'error': message});
+
+/// 成功结果的统一形状：`{ok, description, data}`。
+///
+/// `description` 是**给模型看的一句话操作摘要**（如「删除笔记 n1「会议记录」」）。
+/// 历史压缩只会压 `data`、保留 `ok` 与 `description`，
+/// 于是模型下一轮仍知道"刚才做了什么"（见 agent_loop.dart 的 _compressToolResult）。
+String _ok(Object? data, {required String description}) =>
+    _json({'ok': true, 'description': description, 'data': data});
+
+/// 描述里的短引用：压到 [max] 字，超了加省略号。
+String _short(String s, {int max = 30}) =>
+    s.length <= max ? s : '${s.substring(0, max)}…';
+
+/// 批量函数内部用它把某一项的失败冒泡出去 → 整批回滚。
+class _BatchError implements Exception {
+  _BatchError(this.message);
+  final String message;
+}
+
+/// 解析批量函数的 JSON 数组参数。
+///
+/// 返回 `(items, error)`：任一项不合法就把整体当错误（不做部分处理）。
+/// 上限 [SqlLimits.maxBatchSize]，超了**拒绝**。
+({List<Object?> items, String? error}) _parseBatch(String? raw) {
+  if (raw == null || raw.trim().isEmpty) {
+    return (items: const [], error: '批量函数需要一个 JSON 数组字符串。');
+  }
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return (
+      items: const [],
+      error: '参数不是合法 JSON。SQL 里用单引号包数组、JSON 内层用双引号。',
+    );
+  }
+  if (decoded is! List) {
+    return (items: const [], error: '批量参数必须是 JSON 数组。');
+  }
+  if (decoded.isEmpty) {
+    return (items: const [], error: '批量数组不能为空。');
+  }
+  if (decoded.length > SqlLimits.maxBatchSize) {
+    return (
+      items: const [],
+      error: '一次最多 ${SqlLimits.maxBatchSize} 条，收到 ${decoded.length} 条。',
+    );
+  }
+  return (items: decoded, error: null);
+}
+
+/// 取一项里的字符串字段（缺键返回 null）。
+String? _itemStr(Map<String, Object?> item, String key) {
+  final v = item[key];
+  if (v == null) return null;
+  return v is String ? v : v.toString();
+}
+
+/// 把一批写操作包进一个事务：任一项失败（抛 [_BatchError]）全部回滚。
+T _tx<T>(T Function() body) {
+  final db = _udfDb!;
+  db.execute('BEGIN');
+  try {
+    final r = body();
+    db.execute('COMMIT');
+    return r;
+  } catch (_) {
+    db.execute('ROLLBACK');
+    rethrow;
+  }
+}
 
 /// 函数体统一的开场：拿连接（没装好返回 null，调用方回错）。
 Database? _dbOf() => _udfDb;
@@ -269,7 +341,7 @@ String? _checkSize(String content) {
   if (AiLimits.byteLength(content) <= AiLimits.noteHardBytes) return null;
   final kb = AiLimits.noteHardBytes ~/ 1024;
   return '正文超过 ${kb}KB 上限，已拒绝。'
-      '请拆成多篇，或改用 replace_unique 只改需要的段落。';
+      '请拆成多篇，或改用 update_notes_batch 只改需要的段落。';
 }
 
 /// 锚点必须在正文里**唯一出现**，否则拒绝。
@@ -356,9 +428,10 @@ Object? _listNotebooks(SqliteArguments c) {
     'SELECT id, name FROM notebooks WHERE deleted_at IS NULL '
     'ORDER BY sort_order, name',
   );
-  return _json([
+  final data = [
     for (final r in rows) {'id': r['id'], 'name': r['name']},
-  ]);
+  ];
+  return _ok(data, description: '列出所有笔记库（${data.length} 个）');
 }
 
 Object? _listNotes(SqliteArguments c) {
@@ -374,7 +447,8 @@ Object? _listNotes(SqliteArguments c) {
     'WHERE notebook_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC',
     [id],
   );
-  return _json([for (final r in rows) _brief(r)]);
+  final data = [for (final r in rows) _brief(r)];
+  return _ok(data, description: '列出笔记库 $id 的笔记（${data.length} 篇）');
 }
 
 /// 未归档的笔记 =「我的轻笔记」。
@@ -389,7 +463,8 @@ Object? _listUnfiled(SqliteArguments c) {
     'WHERE is_inbox = 1 AND notebook_id IS NULL AND deleted_at IS NULL '
     'ORDER BY updated_at DESC',
   );
-  return _json([for (final r in rows) _brief(r)]);
+  final data = [for (final r in rows) _brief(r)];
+  return _ok(data, description: '列出「我的轻笔记」（${data.length} 篇）');
 }
 
 /// 元信息。**故意不给正文、不给行数**：正文要按需读（read_preview / read_around），
@@ -401,13 +476,14 @@ Object? _statNote(SqliteArguments c) {
   final row = _noteRow(id);
   if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
-  return _json({
+  final data = {
     'title': row['title'],
     'notebook_id': row['notebook_id'],
     'char_count': content.length,
     'created_at': _iso(row['created_at']),
     'updated_at': _iso(row['updated_at']),
-  });
+  };
+  return _ok(data, description: '查看笔记 $id 的元信息（${content.length} 字）');
 }
 
 /// 从第 offset 个字符起读 chars 个字符。
@@ -426,7 +502,8 @@ Object? _readPreview(SqliteArguments c) {
   final chars = _num(c, 2, SqlLimits.defaultReadChars,
       min: 1, max: SqlLimits.maxReadChars);
   final end = offset + chars > content.length ? content.length : offset + chars;
-  return _slice(content, offset, end);
+  final data = _slice(content, offset, end);
+  return _ok(data, description: '读取笔记 $id 的第 $offset-${offset + chars} 字符');
 }
 
 /// 关键词前后各 chars 个字符。**按字符，不按行** ——
@@ -452,11 +529,12 @@ Object? _readAround(SqliteArguments c) {
   final to = (idx + keyword.length + chars).clamp(0, content.length).toInt();
   final head = from > 0 ? '…' : '';
   final tail = to < content.length ? '…' : '';
-  return '$head${_slice(content, from, to)}$tail';
+  final data = '$head${_slice(content, from, to)}$tail';
+  return _ok(data, description: '读取笔记 $id 中「${_short(keyword)}」周围内容');
 }
 
 /// 数关键词出现几次、都在哪。**改之前的侦察工具**：
-/// replace_unique 要求锚点唯一，先用它确认。
+/// update_notes_batch 要求锚点唯一，先用它确认。
 Object? _findInNote(SqliteArguments c) {
   if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
@@ -467,10 +545,13 @@ Object? _findInNote(SqliteArguments c) {
   final row = _noteRow(id);
   if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
-  return _json({
-    'count': _hits(content, keyword).count,
+  final count = _hits(content, keyword).count;
+  final data = {
+    'count': count,
     'positions': _allHits(content, keyword, SqlLimits.maxFindPositions),
-  });
+  };
+  return _ok(data,
+      description: '在笔记 $id 中查找「${_short(keyword)}」（$count 次）');
 }
 
 /// 全库搜标题 + 正文。
@@ -502,7 +583,7 @@ Object? _searchNotes(SqliteArguments c) {
       'snippet': idx >= 0 ? _snippet(content, idx, keyword.length) : _head(content),
     });
   }
-  return _json(out);
+  return _ok(out, description: '搜索「${_short(keyword)}」（返回 ${out.length} 条）');
 }
 
 /// 在一篇笔记里找全部命中。offset 可以直接喂给 read_preview。
@@ -528,7 +609,7 @@ Object? _searchInNote(SqliteArguments c) {
     out.add({'offset': i, 'snippet': _snippet(content, i, keyword.length)});
     from = i + keyword.length;
   }
-  return _json(out);
+  return _ok(out, description: '在笔记 $id 中搜索「${_short(keyword)}」（${out.length} 处）');
 }
 
 /// 数条数。传 NULL 数全部（含未归档），传笔记库 id 只数这个库。
@@ -543,7 +624,11 @@ Object? _countNotes(SqliteArguments c) {
           'AND notebook_id = ?',
           [nb],
         );
-  return rows.first['n'];
+  final n = rows.first['n'];
+  if (nb == null || nb.isEmpty) {
+    return _ok(n, description: '统计全部笔记数（$n 篇）');
+  }
+  return _ok(n, description: '统计笔记库 $nb 的笔记数（$n 篇）');
 }
 
 Object? _recentNotes(SqliteArguments c) {
@@ -556,34 +641,30 @@ Object? _recentNotes(SqliteArguments c) {
     'ORDER BY updated_at DESC LIMIT ?',
     [limit],
   );
-  return _json([for (final r in rows) _brief(r)]);
+  final data = [for (final r in rows) _brief(r)];
+  return _ok(data, description: '列出最近 $limit 篇笔记');
 }
 
 // ============================================================================
 // 创建（3 个）
 // ============================================================================
 
-/// 新建笔记。notebook_id 省略或传 NULL = 进「我的轻笔记」。
-///
-/// 与 NoteRepository._create 写的是同一组列：source 记 'ai'（这张表当初就为此
-/// 留了这个取值），派生字段走 TextUtils，时间戳是 Unix 秒。
-Object? _createNote(SqliteArguments c) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-  final title = safeTruncate((_str(c, 0) ?? '').trim(), AiLimits.titleHardMax);
-  final content = _str(c, 1) ?? '';
-  var notebookId = _str(c, 2);
-  if (notebookId != null && notebookId.isEmpty) notebookId = null;
-  if (notebookId != null && _notebookRow(notebookId) == null) {
-    return _err(
-        '没有 id = $notebookId 的笔记库。先用 list_notebooks 确认；要放进「我的轻笔记」就传 NULL。');
+/// notebook_id 校验：null = 「我的轻笔记」；否则必须存在。
+String? _checkNotebook(String? notebookId) {
+  if (notebookId == null) return null;
+  if (_notebookRow(notebookId) == null) {
+    return '没有 id = $notebookId 的笔记库。先用 list_notebooks 确认；'
+        '要放进「我的轻笔记」就把 notebook_id 传 null。';
   }
-  final sizeErr = _checkSize(content);
-  if (sizeErr != null) return _err(sizeErr);
+  return null;
+}
 
+/// 插一篇笔记，返回新 id。与 NoteRepository._create 写同一组列：
+/// source 记 'ai'（这张表当初就为此留了该取值），派生字段走 TextUtils，时间戳是 Unix 秒。
+String _insertNote(String title, String content, String? notebookId) {
   final id = _uuid.v4();
   final now = _now();
-  db.execute(
+  _udfDb!.execute(
     'INSERT INTO notes (id, notebook_id, title, content, excerpt, source, is_inbox, '
     'pinned, word_count, last_ai_at, created_at, updated_at, deleted_at) '
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)',
@@ -601,7 +682,69 @@ Object? _createNote(SqliteArguments c) {
       now,
     ],
   );
-  return _json({'ok': true, 'note_id': id});
+  return id;
+}
+
+/// 批量新建笔记。参数是 JSON 数组字符串 `[{title, content, notebook_id?}]`（≤10）。
+///
+/// **单次也用它**（数组里放一个元素）：所以没有 create_note 了 —— AI 只学一种写法。
+/// 整批包在一个事务里，任一条失败全部回滚。
+Object? _createNotesBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+  final parsed = _parseBatch(_str(c, 0));
+  if (parsed.error != null) return _err(parsed.error!);
+
+  final items = <({String title, String content, String? notebookId})>[];
+  for (var i = 0; i < parsed.items.length; i++) {
+    final e = parsed.items[i];
+    if (e is! Map) return _err('第 ${i + 1} 条不是对象。');
+    final m = e.cast<String, Object?>();
+    final title = (_itemStr(m, 'title') ?? '').trim();
+    final content = _itemStr(m, 'content') ?? '';
+    var notebookId = _itemStr(m, 'notebook_id');
+    if (notebookId != null && notebookId.isEmpty) notebookId = null;
+    final nbErr = _checkNotebook(notebookId);
+    if (nbErr != null) return _err('第 ${i + 1} 条：$nbErr');
+    final sizeErr = _checkSize(content);
+    if (sizeErr != null) return _err('第 ${i + 1} 条：$sizeErr');
+    items.add((
+      title: safeTruncate(title, AiLimits.titleHardMax),
+      content: content,
+      notebookId: notebookId,
+    ));
+  }
+
+  final List<String> ids;
+  try {
+    ids = _tx(() {
+      final out = <String>[];
+      for (final it in items) {
+        out.add(_insertNote(it.title, it.content, it.notebookId));
+      }
+      return out;
+    });
+  } catch (e) {
+    return _err('批量新建失败：$e');
+  }
+
+  return _ok({'note_ids': ids}, description: _createBatchDesc(items));
+}
+
+String _createBatchDesc(
+    List<({String title, String content, String? notebookId})> items) {
+  if (items.length == 1) {
+    final it = items.first;
+    final target = it.notebookId == null ? '「我的轻笔记」' : '笔记库 ${it.notebookId}';
+    final title = it.title.isEmpty ? '（无标题）' : '「${_short(it.title)}」';
+    return '新建 1 篇笔记$title到$target';
+  }
+  final targets = {for (final it in items) it.notebookId};
+  if (targets.length == 1) {
+    final nb = targets.first;
+    final target = nb == null ? '「我的轻笔记」' : '笔记库 $nb';
+    return '批量新建 ${items.length} 篇笔记到$target';
+  }
+  return '批量新建 ${items.length} 篇笔记';
 }
 
 Object? _createNotebook(SqliteArguments c) {
@@ -616,7 +759,7 @@ Object? _createNotebook(SqliteArguments c) {
     'VALUES (?, ?, 0, ?, ?, NULL)',
     [id, safeTruncate(name, AiLimits.titleHardMax), now, now],
   );
-  return _json({'ok': true, 'notebook_id': id});
+  return _ok({'notebook_id': id}, description: '新建笔记库「${_short(name)}」');
 }
 
 /// 复制一篇笔记。
@@ -651,41 +794,74 @@ Object? _duplicateNote(SqliteArguments c) {
       now,
     ],
   );
-  return _json({'ok': true, 'new_note_id': newId});
+  return _ok({'new_note_id': newId}, description: '复制笔记 $id → $newId');
 }
 
 // ============================================================================
-// 修改（9 个）
+// 修改（8 个）
 // ============================================================================
 
-/// replace_unique / delete_unique 的公共实现。
+/// 批量改正文。参数是 JSON 数组字符串 `[{id, old, new}]`（≤10）；
+/// `new` 为空串 = 删掉 old 那段（等价于旧的 delete_unique）。
 ///
-/// delete_unique 等价于把 old 换成空串 —— 两者共用一条路径，
-/// 所以「锚点必须唯一」这条规则不可能只在其中一个上生效。
-Object? _uniqueReplace(SqliteArguments c, {required bool remove}) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-  final id = _str(c, 0);
-  final old = _str(c, 1);
-  final added = remove ? '' : _str(c, 2);
-  if (id == null || id.isEmpty || old == null || added == null) {
-    return _err(remove
-            ? 'delete_unique 需要 note_id 与 old 两个参数。'
-            : 'replace_unique 需要 note_id、old、new 三个参数。');
+/// `old` 必须在对应笔记的正文里**唯一出现**（0 次或多次都拒绝）。
+/// 校验 + 写入在同一个事务里：同一篇被改两次时，后一条看到的是前一条的结果；
+/// 任一条失败整批回滚。
+Object? _updateNotesBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+  final parsed = _parseBatch(_str(c, 0));
+  if (parsed.error != null) return _err(parsed.error!);
+
+  final items = <({String id, String old, String added})>[];
+  for (var i = 0; i < parsed.items.length; i++) {
+    final e = parsed.items[i];
+    if (e is! Map) return _err('第 ${i + 1} 条不是对象。');
+    final m = e.cast<String, Object?>();
+    final id = _itemStr(m, 'id');
+    final old = _itemStr(m, 'old');
+    final added = _itemStr(m, 'new') ?? '';
+    if (id == null || id.isEmpty || old == null || old.isEmpty) {
+      return _err('第 ${i + 1} 条需要 id 与 old。');
+    }
+    items.add((id: id, old: old, added: added));
   }
-  final note = _noteRow(id);
-  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
-  final content = (note['content'] as String?) ?? '';
-  final bad = _anchorError(content, old);
-  if (bad != null) return _err(bad);
-  final writeErr = _writeContent(id, content.replaceFirst(old, added));
-  if (writeErr != null) return _err(writeErr);
-  return _json({'ok': true});
+
+  final List<String> ids;
+  try {
+    ids = _tx(() {
+      final out = <String>[];
+      for (var i = 0; i < items.length; i++) {
+        final it = items[i];
+        final note = _noteRow(it.id);
+        if (note == null) {
+          throw _BatchError('第 ${i + 1} 条：没有 id = ${it.id} 的笔记（或它已被删除）。');
+        }
+        final content = (note['content'] as String?) ?? '';
+        final bad = _anchorError(content, it.old);
+        if (bad != null) throw _BatchError('第 ${i + 1} 条：$bad');
+        final writeErr = _writeContent(it.id, content.replaceFirst(it.old, it.added));
+        if (writeErr != null) throw _BatchError('第 ${i + 1} 条：$writeErr');
+        out.add(it.id);
+      }
+      return out;
+    });
+  } on _BatchError catch (e) {
+    return _err(e.message);
+  } catch (e) {
+    return _err('批量修改失败：$e');
+  }
+
+  final String desc;
+  if (items.length == 1) {
+    final it = items.first;
+    desc = it.added.isEmpty
+        ? '修改 1 篇笔记：删除「${_short(it.old)}」'
+        : '修改 1 篇笔记：替换「${_short(it.old)}」→「${_short(it.added)}」';
+  } else {
+    desc = '批量修改 ${items.length} 篇笔记';
+  }
+  return _ok({'note_ids': ids}, description: desc);
 }
-
-Object? _replaceUnique(SqliteArguments c) => _uniqueReplace(c, remove: false);
-
-Object? _deleteUnique(SqliteArguments c) => _uniqueReplace(c, remove: true);
 
 /// insert_after / insert_before 的公共实现。
 ///
@@ -717,35 +893,71 @@ Object? _insertAt(SqliteArguments c, {required bool after}) {
   }
   final writeErr = _writeContent(id, next);
   if (writeErr != null) return _err(writeErr);
-  return _json({'ok': true});
+  return _ok({'note_id': id},
+      description: '在笔记 $id 的「${_short(anchor)}」${after ? '后' : '前'}插入内容');
 }
 
 Object? _insertAfter(SqliteArguments c) => _insertAt(c, after: true);
 
 Object? _insertBefore(SqliteArguments c) => _insertAt(c, after: false);
 
-Object? _appendToNote(SqliteArguments c) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-  final id = _str(c, 0);
-  final added = _str(c, 1);
-  if (id == null || id.isEmpty || added == null) {
-    return _err('append_to_note 需要 note_id 与 content。');
+/// 批量追加到正文末尾。参数是 JSON 数组字符串 `[{id, content}]`（≤10）。
+///
+/// 单次也用它（数组放一个元素），所以没有 append_to_note 了。自动补换行。
+/// 整批一个事务，任一条失败全部回滚。
+Object? _appendNotesBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+  final parsed = _parseBatch(_str(c, 0));
+  if (parsed.error != null) return _err(parsed.error!);
+
+  final items = <({String id, String added})>[];
+  for (var i = 0; i < parsed.items.length; i++) {
+    final e = parsed.items[i];
+    if (e is! Map) return _err('第 ${i + 1} 条不是对象。');
+    final m = e.cast<String, Object?>();
+    final id = _itemStr(m, 'id');
+    final added = _itemStr(m, 'content');
+    if (id == null || id.isEmpty || added == null) {
+      return _err('第 ${i + 1} 条需要 id 与 content。');
+    }
+    items.add((id: id, added: added));
   }
-  final note = _noteRow(id);
-  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
-  final content = (note['content'] as String?) ?? '';
-  final String next;
-  if (content.isEmpty) {
-    next = added;
-  } else if (content.endsWith('\n')) {
-    next = '$content$added';
-  } else {
-    next = '$content\n$added';
+
+  final List<String> ids;
+  try {
+    ids = _tx(() {
+      final out = <String>[];
+      for (var i = 0; i < items.length; i++) {
+        final it = items[i];
+        final note = _noteRow(it.id);
+        if (note == null) {
+          throw _BatchError('第 ${i + 1} 条：没有 id = ${it.id} 的笔记（或它已被删除）。');
+        }
+        final content = (note['content'] as String?) ?? '';
+        final String next;
+        if (content.isEmpty) {
+          next = it.added;
+        } else if (content.endsWith('\n')) {
+          next = '$content${it.added}';
+        } else {
+          next = '$content\n${it.added}';
+        }
+        final writeErr = _writeContent(it.id, next);
+        if (writeErr != null) throw _BatchError('第 ${i + 1} 条：$writeErr');
+        out.add(it.id);
+      }
+      return out;
+    });
+  } on _BatchError catch (e) {
+    return _err(e.message);
+  } catch (e) {
+    return _err('批量追加失败：$e');
   }
-  final writeErr = _writeContent(id, next);
-  if (writeErr != null) return _err(writeErr);
-  return _json({'ok': true});
+
+  final desc = items.length == 1
+      ? '追加到 1 篇笔记（${items.first.added.length} 字）'
+      : '批量追加到 ${items.length} 篇笔记';
+  return _ok({'note_ids': ids}, description: desc);
 }
 
 Object? _prependToNote(SqliteArguments c) {
@@ -762,7 +974,7 @@ Object? _prependToNote(SqliteArguments c) {
   final next = content.isEmpty ? added : '$added\n$content';
   final writeErr = _writeContent(id, next);
   if (writeErr != null) return _err(writeErr);
-  return _json({'ok': true});
+  return _ok({'note_id': id}, description: '在笔记 $id 开头插入内容（${added.length} 字）');
 }
 
 Object? _renameNote(SqliteArguments c) {
@@ -780,40 +992,81 @@ Object? _renameNote(SqliteArguments c) {
     'UPDATE notes SET title = ?, updated_at = ? WHERE id = ?',
     [safeTruncate(rawTitle.trim(), AiLimits.titleHardMax), _now(), id],
   );
-  return _json({'ok': true});
+  return _ok({'note_id': id}, description: '重命名笔记 $id → 「${_short(rawTitle.trim())}」');
 }
 
-/// 移动笔记。notebook_id 传 NULL = 移回「我的轻笔记」。
+/// 批量移动笔记。参数是 JSON 数组字符串 `[{id, notebook_id}]`（≤10）；
+/// `notebook_id` 为 null = 移回「我的轻笔记」。
 ///
 /// is_inbox 跟着一起改：它和 notebook_id 是同一个意思的两种表示
 ///（见 AppDatabase.moveNoteToNotebook），只改一个会留下
 /// 「已归档但没有笔记库」的行 —— 那种行在两个入口都看不见。
-Object? _moveNote(SqliteArguments c) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-  final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err('move_note 需要 note_id。');
-  if (_noteRow(id) == null) {
-    return _err('没有 id = $id 的笔记（或它已被删除）。');
+/// 整批一个事务，任一条失败全部回滚。
+Object? _moveNotesBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+  final parsed = _parseBatch(_str(c, 0));
+  if (parsed.error != null) return _err(parsed.error!);
+
+  final items = <({String id, String? notebookId})>[];
+  for (var i = 0; i < parsed.items.length; i++) {
+    final e = parsed.items[i];
+    if (e is! Map) return _err('第 ${i + 1} 条不是对象。');
+    final m = e.cast<String, Object?>();
+    final id = _itemStr(m, 'id');
+    if (id == null || id.isEmpty) return _err('第 ${i + 1} 条需要 id。');
+    var notebookId = _itemStr(m, 'notebook_id');
+    if (notebookId != null && notebookId.isEmpty) notebookId = null;
+    final nbErr = _checkNotebook(notebookId);
+    if (nbErr != null) return _err('第 ${i + 1} 条：$nbErr');
+    items.add((id: id, notebookId: notebookId));
   }
-  var notebookId = _str(c, 1);
-  if (notebookId != null && notebookId.isEmpty) notebookId = null;
-  if (notebookId != null && _notebookRow(notebookId) == null) {
-    return _err(
-        '没有 id = $notebookId 的笔记库。先用 list_notebooks 确认；要移回「我的轻笔记」就传 NULL。');
+
+  final List<String> ids;
+  try {
+    ids = _tx(() {
+      final out = <String>[];
+      for (var i = 0; i < items.length; i++) {
+        final it = items[i];
+        if (_noteRow(it.id) == null) {
+          throw _BatchError('第 ${i + 1} 条：没有 id = ${it.id} 的笔记（或它已被删除）。');
+        }
+        if (it.notebookId == null) {
+          _udfDb!.execute(
+            'UPDATE notes SET notebook_id = NULL, is_inbox = 1, updated_at = ? WHERE id = ?',
+            [_now(), it.id],
+          );
+        } else {
+          _udfDb!.execute(
+            'UPDATE notes SET notebook_id = ?, is_inbox = 0, updated_at = ? WHERE id = ?',
+            [it.notebookId, _now(), it.id],
+          );
+        }
+        out.add(it.id);
+      }
+      return out;
+    });
+  } on _BatchError catch (e) {
+    return _err(e.message);
+  } catch (e) {
+    return _err('批量移动失败：$e');
   }
-  if (notebookId == null) {
-    db.execute(
-      'UPDATE notes SET notebook_id = NULL, is_inbox = 1, updated_at = ? WHERE id = ?',
-      [_now(), id],
-    );
+
+  final String desc;
+  if (items.length == 1) {
+    final it = items.first;
+    final target = it.notebookId == null ? '「我的轻笔记」' : '笔记库 ${it.notebookId}';
+    desc = '移动笔记 ${it.id} 到$target';
   } else {
-    db.execute(
-      'UPDATE notes SET notebook_id = ?, is_inbox = 0, updated_at = ? WHERE id = ?',
-      [notebookId, _now(), id],
-    );
+    final targets = {for (final it in items) it.notebookId};
+    if (targets.length == 1) {
+      final nb = targets.first;
+      final target = nb == null ? '「我的轻笔记」' : '笔记库 $nb';
+      desc = '批量移动 ${items.length} 篇笔记到$target';
+    } else {
+      desc = '批量移动 ${items.length} 篇笔记';
+    }
   }
-  return _json({'ok': true});
+  return _ok({'note_ids': ids}, description: desc);
 }
 
 Object? _renameNotebook(SqliteArguments c) {
@@ -832,36 +1085,67 @@ Object? _renameNotebook(SqliteArguments c) {
     'UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ?',
     [safeTruncate(name, AiLimits.titleHardMax), _now(), id],
   );
-  return _json({'ok': true});
+  return _ok({'notebook_id': id}, description: '重命名笔记库 $id → 「${_short(name)}」');
 }
 
 // ============================================================================
 // 删除（2 个）
 // ============================================================================
 
-/// 删笔记 = **逻辑删除**（deleted_at 置位，行还在）+ 清切片。
+/// 批量删笔记。参数是 JSON 数组字符串 `["id1","id2",...]`（≤10）。
 ///
-/// 与 NoteRepository.softDelete 完全一致，包括「显式清切片」那一步：
-/// 切片表的外键虽然带 CASCADE，但软删除不会触发行级联，
-/// 留着片会让搜索把「命中哪一片」算到已经删掉的笔记头上。
+/// 单次也用它（数组放一个元素），所以没有 delete_note 了。
+/// 删 = **逻辑删除**（deleted_at 置位，行还在）+ 清切片：
+/// 切片表的外键虽带 CASCADE，但软删除不触发行级联，留着片会让搜索
+/// 把「命中哪一片」算到已删笔记头上。整批一个事务，任一条失败全部回滚。
 ///
 /// 设计上这是**不可撤销**的：界面上没有回收站入口，所以 prompt 明确要求
 /// 「只在用户明确要求删的时候才调」，且没有确认层。
-Object? _deleteNote(SqliteArguments c) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-  final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err('delete_note 需要 note_id。');
-  if (_noteRow(id) == null) {
-    return _err('没有 id = $id 的笔记（或它已被删除）。');
+Object? _deleteNotesBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+  final parsed = _parseBatch(_str(c, 0));
+  if (parsed.error != null) return _err(parsed.error!);
+
+  final ids = <String>[];
+  for (var i = 0; i < parsed.items.length; i++) {
+    final e = parsed.items[i];
+    final id = e is String ? e : e?.toString();
+    if (id == null || id.isEmpty) return _err('第 ${i + 1} 条不是有效的笔记 id。');
+    ids.add(id);
   }
+
+  // 标题用于描述：删除后查不到了，先记下。
+  final titles = <String, String>{};
+  for (final id in ids) {
+    final row = _noteRow(id);
+    if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
+    titles[id] = (row['title'] as String?) ?? '';
+  }
+
   final now = _now();
-  db.execute(
-    'UPDATE notes SET deleted_at = ?, updated_at = ? WHERE id = ?',
-    [now, now, id],
-  );
-  db.execute('DELETE FROM note_chunks WHERE note_id = ?', [id]);
-  return _json({'ok': true});
+  try {
+    _tx(() {
+      for (final id in ids) {
+        _udfDb!.execute(
+          'UPDATE notes SET deleted_at = ?, updated_at = ? WHERE id = ?',
+          [now, now, id],
+        );
+        _udfDb!.execute('DELETE FROM note_chunks WHERE note_id = ?', [id]);
+      }
+      return null;
+    });
+  } catch (e) {
+    return _err('批量删除失败：$e');
+  }
+
+  final String desc;
+  if (ids.length == 1) {
+    final t = titles[ids.first]!;
+    desc = '删除笔记 ${ids.first}${t.isEmpty ? '' : '「${_short(t)}」'}';
+  } else {
+    desc = '批量删除 ${ids.length} 篇笔记';
+  }
+  return _ok({'note_ids': ids}, description: desc);
 }
 
 /// 删笔记库：**库里的笔记不删**，退回「我的轻笔记」。
@@ -874,9 +1158,11 @@ Object? _deleteNotebook(SqliteArguments c) {
   if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   if (id == null || id.isEmpty) return _err('delete_notebook 需要 notebook_id。');
-  if (_notebookRow(id) == null) {
+  final nb = _notebookRow(id);
+  if (nb == null) {
     return _err('没有 id = $id 的笔记库（或它已被删除）。先用 list_notebooks 确认。');
   }
+  final name = (nb['name'] as String?) ?? '';
   final now = _now();
   db.execute(
     'UPDATE notes SET notebook_id = NULL, is_inbox = 1, updated_at = ? '
@@ -887,5 +1173,117 @@ Object? _deleteNotebook(SqliteArguments c) {
     'UPDATE notebooks SET deleted_at = ?, updated_at = ? WHERE id = ?',
     [now, now, id],
   );
-  return _json({'ok': true});
+  return _ok({'notebook_id': id},
+      description: '删除笔记库 $id「${_short(name)}」（笔记退回轻笔记）');
+}
+
+// ============================================================================
+// 系统（1 个）
+// ============================================================================
+
+/// `mark_functions(json)`：把这次任务会反复用的函数**标记为常驻**。
+///
+/// AI 在需要某几个函数、但它们的详情不在 system prompt 的「已加载函数详情」里时
+/// 标记一次；App 侧每轮重拼 prompt 时读这个 key，把详情追加到**末尾**
+///（末尾是刻意的：前面整段命中缓存，只有新追加的一小段不命中）。
+///
+/// ## 三条规则，每条都有代价上的理由
+///
+/// 1. **只增不减**（不提供 unmark）：详情段在 prompt 末尾、命中缓存后约 1/50 计价，
+///    留着比去掉便宜；而且"以后万一又用到"时它已经在里面了，还少一个 AI 要做的决策。
+/// 2. **上限 [SqlLimits.maxPinnedFunctions]**：满了以后新的标记**装不下的部分
+///    在返回值里点名说出来**（description + data.dropped）。
+///    ⚠️ 这里与批量函数的"超了拒绝"不同：批量是**数据写入**，截断=静默漏做几篇笔记；
+///    标记只是 prompt 里的便利，没加载的函数照样能调（查一次目录即可），
+///    所以"装得下多少装多少 + 明说没装上谁"比整批拒绝更省一轮往返。
+/// 3. **未知函数名整批拒绝**：多半是拼错了。当场说清楚，好过让它以为标记成功、
+///    下一轮照着一个不存在的函数写 SQL 拿到 `no such function`。
+///
+/// 写的是 `app_kv` 的 [kAiPinnedFunctionsKey]，用 INSERT OR REPLACE ——
+/// `app_kv` 只有 (key, value) 两列，不存在"替换会丢别的列"的问题。
+Object? _markFunctions(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
+
+  final raw = _str(c, 0);
+  if (raw == null || raw.trim().isEmpty) {
+    return _err('mark_functions 需要一个 JSON 数组字符串，'
+        '如 mark_functions(\'["search_notes","read_preview"]\')。函数名查 '
+        'SELECT name FROM ai_functions。');
+  }
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return _err('参数不是合法 JSON。SQL 里用单引号包数组、JSON 内层用双引号。');
+  }
+  if (decoded is! List || decoded.isEmpty) {
+    return _err('mark_functions 的参数必须是**非空**的 JSON 数组，'
+        '如 \'["search_notes","read_preview"]\'。');
+  }
+
+  final names = <String>[];
+  for (final e in decoded) {
+    if (e is! String || e.trim().isEmpty) return _err('数组里只能放函数名（字符串）。');
+    final name = e.trim();
+    if (!names.contains(name)) names.add(name);
+  }
+
+  final unknown = [for (final n in names) if (aiFunctionByName(n) == null) n];
+  if (unknown.isNotEmpty) {
+    return _err('没有这些函数：${unknown.join('、')}。'
+        '函数名要照 ai_functions 表里的 name 原样写'
+        '（SELECT name FROM ai_functions）。');
+  }
+
+  final pinned = _readPinnedFunctions(db);
+  final added = <String>[];
+  final dropped = <String>[];
+  for (final n in names) {
+    if (pinned.contains(n)) continue;
+    if (pinned.length + added.length >= SqlLimits.maxPinnedFunctions) {
+      dropped.add(n);
+    } else {
+      added.add(n);
+    }
+  }
+  if (added.isNotEmpty) {
+    db.execute(
+      'INSERT OR REPLACE INTO app_kv (key, value) VALUES (?, ?)',
+      [kAiPinnedFunctionsKey, jsonEncode([...pinned, ...added])],
+    );
+  }
+
+  final cap = SqlLimits.maxPinnedFunctions;
+  final total = pinned.length + added.length;
+  final String desc;
+  if (added.isEmpty) {
+    // 一个新函数都没进：要么本来就有，要么卡在上限上 —— 两种都要说清是哪种
+    desc = dropped.isEmpty
+        ? '这 ${names.length} 个函数已在「已加载函数详情」里（共 $total/$cap）'
+        : '已达上限 $total/$cap，没有新增；未加载：${dropped.join('、')}'
+            '——它们的详情不在 prompt 里，要用就先查 ai_functions 目录';
+  } else if (dropped.isEmpty) {
+    desc = '标记 ${added.length} 个常用函数（详情已加载，共 $total/$cap）';
+  } else {
+    desc = '标记 ${added.length} 个常用函数（共 $total/$cap）'
+        '；已达上限，未加载：${dropped.join('、')}'
+        '——它们的详情不在 prompt 里，要用就先查 ai_functions 目录';
+  }
+
+  return _ok({
+    'pinned': [...pinned, ...added],
+    'added': added,
+    if (dropped.isNotEmpty) 'dropped': dropped,
+  }, description: desc);
+}
+
+/// 读已标记的函数名（坏数据／已删函数由 [parsePinnedFunctions] 过滤掉）。
+List<String> _readPinnedFunctions(Database db) {
+  final rows = db.select(
+    'SELECT value FROM app_kv WHERE key = ?',
+    [kAiPinnedFunctionsKey],
+  );
+  if (rows.isEmpty) return const [];
+  return parsePinnedFunctions(rows.first['value'] as String?);
 }

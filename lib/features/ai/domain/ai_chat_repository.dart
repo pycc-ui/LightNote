@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../core/db/ai_functions.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/app_params.dart';
@@ -188,7 +189,7 @@ class AiChatRepository {
     await _drive(
       conversationId: conversationId,
       assistantId: assistantId,
-      systemPrompt: withSummary(AiPrompts.agentSystem, summary),
+      summary: summary,
       history: history,
       dbHistory: rows,
       thinkingEnabled: thinkingEnabled,
@@ -270,7 +271,7 @@ class AiChatRepository {
     await _drive(
       conversationId: conversationId,
       assistantId: row.id,
-      systemPrompt: withSummary(AiPrompts.agentSystem, summary),
+      summary: summary,
       history: history,
       dbHistory: rows,
       thinkingEnabled: thinkingEnabled,
@@ -289,10 +290,14 @@ class AiChatRepository {
   ///
   /// [append] 决定新文字是**替换**还是**接在**消息现有内容后面：
   /// 新一轮对话是替换，回答挂起后继续是接在后面。
+  ///
+  /// system prompt 由这里按轮**重拼**（[rebuildPrompt]）：AI 这一轮调
+  /// `mark_functions` 之后，下一轮就能看到刚加载的函数详情。
+  /// [summary] 是"更早历史"的背景摘要（见 [_olderHistorySummary]）。
   Future<void> _drive({
     required String conversationId,
     required String assistantId,
-    required String systemPrompt,
+    required String summary,
     required List<AgentMessage> history,
     required List<AiMessage> dbHistory,
     required bool thinkingEnabled,
@@ -322,6 +327,18 @@ class AiChatRepository {
     // 没有工作区、也没有确认层 —— 约束由 UDF 与 SqlGuard 把关（见 tool_executor.dart）。
     final executor = ToolExecutor(_db);
 
+    /// 每次请求前重拼 prompt：**已加载的函数详情会随 mark_functions 变**。
+    ///
+    /// 全文都从库里现读（不缓存到内存）：标记的唯一写者是 UDF `mark_functions`，
+    /// 它在同一条连接上直接写 `app_kv` —— 内存里再存一份就多一个可能不一致的副本。
+    /// 一次 SELECT 的成本可以忽略（每轮一次）。
+    Future<String> rebuildPrompt() async => AiPrompts.agentSystemFor(
+          summary: summary,
+          pinned: parsePinnedFunctions(
+            await _db.readSetting(kAiPinnedFunctionsKey),
+          ),
+        );
+
     final loop = AgentLoop(
       round: ({
         required String systemPrompt,
@@ -341,7 +358,8 @@ class AiChatRepository {
 
     final buffer = StringBuffer();
     await for (final event in loop.run(
-      systemPrompt: systemPrompt,
+      systemPrompt: await rebuildPrompt(),
+      rebuildPrompt: rebuildPrompt,
       history: history,
       dbHistory: dbHistory,
       asksSoFar: asksSoFar,
@@ -592,10 +610,4 @@ class AiChatRepository {
     return '';
   }
 
-  /// 摘要那一段拼进 system prompt 的**末尾**。
-  ///
-  /// 拼末尾而不是开头：`prompts.dart` 明确写着"绝不要把变化的东西放进
-  /// system prompt 开头" —— 前缀一致才命中上下文缓存（输入成本降到约 1/50）。
-  static String withSummary(String systemPrompt, String summary) =>
-      summary.trim().isEmpty ? systemPrompt : '$systemPrompt\n\n$summary';
 }

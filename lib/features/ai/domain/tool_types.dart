@@ -106,6 +106,7 @@ class ToolResult {
     required this.ok,
     this.data,
     this.error,
+    this.description,
   });
 
   final bool ok;
@@ -116,13 +117,34 @@ class ToolResult {
   /// 失败时的可读原因，**写给模型看的**：它要靠这句话决定下一步。
   final String? error;
 
+  /// 这次操作的**一句话摘要**（UDF 生成，如「删除笔记 n1「会议记录」」）。
+  /// 历史压缩会把 `data` 压掉，`description` 原样保留，
+  /// 是模型下一轮识别"做过什么"的锚点。
+  final String? description;
+
   factory ToolResult.success(Object? data) => ToolResult(ok: true, data: data);
 
   factory ToolResult.failure(String error) =>
       ToolResult(ok: false, error: error);
 
+  /// UDF 的返回值**本身就是最终形状**（`{ok, description, data}` / `{ok:false, error}`）。
+  /// 这里把它摊回字段，好让上层读到 `ok` / `error`，`encode()` 再原样发回去 ——
+  /// 避免"把一段 JSON 再包进 rows 里"那种双层嵌套。
+  factory ToolResult.raw(String json) {
+    final decoded = jsonDecode(json);
+    if (decoded is! Map) return ToolResult(ok: true, data: json);
+    final ok = decoded['ok'] == true;
+    return ToolResult(
+      ok: ok,
+      data: ok ? decoded['data'] : null,
+      error: ok ? null : (decoded['error'] as String? ?? '未知错误'),
+      description: decoded['description'] as String?,
+    );
+  }
+
   String encode() => jsonEncode({
         'ok': ok,
+        if (description != null) 'description': description,
         if (ok) 'data': data,
         if (!ok) 'error': error ?? '未知错误',
       });

@@ -76,12 +76,32 @@ class ToolExecutor {
     try {
       final rows = await _db.customSelect(query).get();
       _notifyIfWrite(query);
+      // UDF 的返回值**本身就是最终形状**：`SELECT func(...)` 只回一行一列，
+      // 那格是一段 `{ok, description, data}` JSON —— 直接采纳，别套进 rows 里
+      //（套了就变成 AI 看到 `[{ "func(...)": "{\"ok\":…}" }]`，多一层解析）。
+      final udf = _udfResultOf(rows);
+      if (udf != null) return ToolResult.raw(udf);
       return ToolResult.success(_pack(rows));
     } catch (e) {
       // 把 SQLite 的报错原样交给模型：`no such function: xxx` /
       // `no such column: yyy` 这类话它读得懂，比我们翻译一遍更有用。
       return ToolResult.failure('SQL 执行失败：$e');
     }
+  }
+
+  /// 结果恰好「一行一列、且那格是含 `ok` 键的 JSON」→ 认作 UDF 的返回，返回原串；
+  /// 否则返回 null（普通查询，交给 [_pack]）。
+  static String? _udfResultOf(List<QueryRow> rows) {
+    if (rows.length != 1) return null;
+    final cells = rows.first.data.values;
+    if (cells.length != 1) return null;
+    final v = cells.first;
+    if (v is! String || !v.trimLeft().startsWith('{')) return null;
+    try {
+      final m = jsonDecode(v);
+      if (m is Map && m.containsKey('ok')) return v;
+    } catch (_) {}
+    return null;
   }
 
   /// 结果集 → 回灌的形状。
@@ -133,21 +153,28 @@ class ToolExecutor {
   /// 判定办法很土但够用：看 SQL 里有没有出现写函数的**名字**。
   /// 假阳性（名字出现在字符串里）只会多刷新一次，无害；
   /// 假阴性不可能出现 —— 没调写函数就没写数据。
+  ///
+  /// 两类分开：改笔记的函数通知三张笔记表；`mark_functions` 只动 `app_kv`
+  /// （它改的是"加载哪几个函数详情"，与笔记无关，通知笔记表是白刷）。
   void _notifyIfWrite(String sql) {
     final lower = sql.toLowerCase();
-    var wrote = false;
-    for (final name in kAiWriteFunctions) {
-      if (lower.contains(name)) {
-        wrote = true;
-        break;
+    bool hit(Set<String> names) {
+      for (final name in names) {
+        if (lower.contains(name)) return true;
       }
+      return false;
     }
-    if (!wrote) return;
-    _db.notifyUpdates({
-      const TableUpdate('notes'),
-      const TableUpdate('notebooks'),
-      const TableUpdate('note_chunks'),
-    });
+
+    final updates = <TableUpdate>{
+      if (hit(kAiWriteFunctions)) ...const [
+        TableUpdate('notes'),
+        TableUpdate('notebooks'),
+        TableUpdate('note_chunks'),
+      ],
+      if (hit(kAiKvFunctions)) const TableUpdate('app_kv'),
+    };
+    if (updates.isEmpty) return;
+    _db.notifyUpdates(updates);
   }
 
   // ==========================================================================

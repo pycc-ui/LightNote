@@ -296,9 +296,11 @@ class NoteChunks extends Table {
 /// AI 的**函数清单**：AI 用 SQL 操作笔记库，先得知道有哪些函数可调。
 ///
 /// 每行描述一个 SQLite UDF：名字 / 分类 / 签名 / 一句说明 / 一个能照抄的例子。
-/// AI 先 `SELECT * FROM ai_functions` 查一次就知道全部用法 —— 于是
-/// **加一个函数 = INSERT 一行**，system prompt 里只写"去查这张表"，
-/// 不用跟着函数清单一起变长（本版省 token 的关键就在这）。
+/// AI 需要的函数不在 system prompt 的「已加载函数详情」里时，查一次这张表拿目录
+///（`SELECT name, signature FROM ai_functions`），再用 `mark_functions` 把
+/// 会反复用的标记为常驻 —— 于是 **加一个函数 = INSERT 一行**，
+/// system prompt 里只写"去查这张表"，不用跟着函数清单一起变长
+///（本版省 token 的关键就在这）。
 ///
 /// 名字的来历：它原先是 `ai_capabilities`（v1 那 22 个 function calling 工具
 /// 时代的遗留表，从建表起就没有任何读写方，见《数据库设计》v7→v8 的"死表"一节）。
@@ -318,7 +320,7 @@ class AiFunctions extends Table {
   /// （见 `aiWriteFunctions`，执行器据此决定要不要让界面刷新）。
   TextColumn get category => text()();
 
-  /// 签名，如 `replace_unique(note_id, old, new)`
+  /// 签名，如 `update_notes_batch(json)`
   TextColumn get signature => text()();
 
   /// 一句话说明：**什么时候用它**、边界在哪

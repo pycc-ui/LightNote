@@ -4221,7 +4221,7 @@ class AiFunction extends DataClass implements Insertable<AiFunction> {
   /// （见 `aiWriteFunctions`，执行器据此决定要不要让界面刷新）。
   final String category;
 
-  /// 签名，如 `replace_unique(note_id, old, new)`
+  /// 签名，如 `update_notes_batch(json)`
   final String signature;
 
   /// 一句话说明：**什么时候用它**、边界在哪

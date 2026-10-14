@@ -14,6 +14,7 @@ import 'package:lightnote/core/db/models.dart';
 import 'package:lightnote/features/ai/data/deepseek_client.dart';
 import 'package:lightnote/features/ai/domain/ai_chat_repository.dart';
 import 'package:lightnote/features/ai/domain/ai_repository.dart';
+import 'package:lightnote/features/ai/domain/prompts.dart';
 import 'package:lightnote/features/ai/domain/tool_types.dart';
 
 /// 假客户端：`streamChat` 返回固定摘要并**计数**（验"只生成一次"），
@@ -131,17 +132,15 @@ void main() {
 
   group('拼进 system prompt', () {
     test('有摘要时拼在**末尾**（前缀一致才命中缓存）', () {
-      const base = '你是 LightNote 的助手…';
-      final out = AiChatRepository.withSummary(base, '用户想要整理会议记录。');
+      final out = AiPrompts.agentSystemFor(summary: '用户想要整理会议记录。');
 
-      expect(out.startsWith(base), isTrue, reason: '前缀必须一字不变');
+      expect(out.startsWith(AiPrompts.agentSystem), isTrue, reason: '前缀必须一字不变');
       expect(out, endsWith('用户想要整理会议记录。'));
     });
 
     test('摘要是空的 → 原样返回（不留多余空行）', () {
-      const base = 'SYS';
-      expect(AiChatRepository.withSummary(base, ''), base);
-      expect(AiChatRepository.withSummary(base, '   '), base);
+      expect(AiPrompts.agentSystemFor(), AiPrompts.agentSystem);
+      expect(AiPrompts.agentSystemFor(summary: '   '), AiPrompts.agentSystem);
     });
   });
 

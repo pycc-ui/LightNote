@@ -213,6 +213,51 @@ void main() {
     });
   });
 
+  group('每轮重拼 system prompt（动态函数标记靠它生效）', () {
+    test('★ 第二轮用的是**重拼后**的 prompt', () async {
+      model.callTool('sql', {'query': 'SELECT 1'}, id: 'c1');
+      model.say('好了。');
+
+      var n = 0;
+      await collect(loop().run(
+        systemPrompt: 'SYS-初始',
+        // 伪装成"读 app_kv 现拼"：每调一次内容就变
+        rebuildPrompt: () async => 'SYS-第${n++}次',
+        history: [AgentMessage.user('x')],
+      ));
+
+      expect(model.calls, hasLength(2));
+      expect(model.calls[0].system, 'SYS-第0次');
+      expect(model.calls[1].system, 'SYS-第1次',
+          reason: '标记是这一轮做的，下一轮必须重拼才看得到刚加载的函数详情');
+    });
+
+    test('不传 rebuildPrompt → 一直用给定的固定段（老路径不变）', () async {
+      model.callTool('sql', {'query': 'SELECT 1'}, id: 'c1');
+      model.say('好了。');
+
+      await collect(loop().run(
+        systemPrompt: 'SYS',
+        history: [AgentMessage.user('x')],
+      ));
+
+      expect(model.calls.map((c) => c.system), everyElement('SYS'));
+    });
+
+    test('重拼抛异常 → 退回固定段，**不打断整轮对话**', () async {
+      model.say('照样回答。');
+
+      final events = await collect(loop().run(
+        systemPrompt: 'SYS',
+        rebuildPrompt: () async => throw StateError('读库失败'),
+        history: [AgentMessage.user('x')],
+      ));
+
+      expect(model.calls.single.system, 'SYS');
+      expect(finishedText(events), '照样回答。');
+    });
+  });
+
   group('终止条件（少一条就是无限烧钱）', () {
     test('★ 模型每轮都提工具 → 到上限就停，且只发了上限次', () async {
       // 一个永远在提工具、永远拿不到结果的模型

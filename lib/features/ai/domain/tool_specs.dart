@@ -23,7 +23,9 @@ final kSqlToolSpec = ToolSpec(
       '调用 ai_functions 里登记的扩展函数，用子查询 / CTE / JOIN / 窗口函数。'
       '扩展函数可以直接嵌在 SELECT 里（例如 SELECT id, read_preview(id, 0, 200) FROM notes）。'
       '新建 / 修改 / 删除**必须**调用扩展函数，直接写表会被拒绝。'
-      '先执行 SELECT * FROM ai_functions 看有哪些函数、怎么调。',
+      '需要的函数不在 System Prompt 末尾的「已加载函数详情」里时，先 '
+      'SELECT name, signature FROM ai_functions 查目录，再用 mark_functions 把'
+      '会反复用的标记为常驻。',
   parameters: {
     'type': 'object',
     'properties': {
