@@ -66,9 +66,6 @@ class PreferencesService {
   // ---- 偏好 ----
 
   /// 主题：system / light / dark
-  Future<String> readThemeMode() async =>
-      (await _db.readSetting(_kThemeMode)) ?? 'system';
-
   Stream<String> watchThemeMode() =>
       _db.watchSetting(_kThemeMode).map((v) => v ?? 'system');
 

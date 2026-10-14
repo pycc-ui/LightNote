@@ -116,26 +116,6 @@ abstract final class LogBar {
         showWhileBusy: showWhileBusy);
   }
 
-  /// 已经提前拿到 [ScaffoldMessengerState] 时用这个。
-  ///
-  /// 用途：有的地方要**先 pop 掉当前页面/弹窗、再显示提示**
-  /// （例如"确认加入卡片"后关掉底部弹窗再报成功）。
-  /// pop 之后原来的 `context` 已经失效，不能再拿它查 messenger，
-  /// 所以要在 pop **之前**取好 messenger，然后调这个方法。
-  ///
-  /// 有它才能把 SnackBar 的 persist 策略全部收在 LogBar 里，
-  /// 不必在业务代码里留一处"自己拼 SnackBar"的特例
-  /// （那种特例正是当初漏掉 persist 的温床）。
-  static void successTo(ScaffoldMessengerState messenger, String message) {
-    messenger.showSnackBar(
-      SnackBar(
-        persist: false,
-        duration: _defaultDuration,
-        content: Text(message),
-      ),
-    );
-  }
-
   /// 带操作按钮 / 需要被看到的提示。
   ///
   /// [persist] 为 true（默认）时不会自动消失，要用户点按钮或手动关掉。

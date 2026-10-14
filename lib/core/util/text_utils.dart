@@ -68,20 +68,6 @@ class TextUtils {
     if (t.isEmpty) return content;
     return '$t\n\n$content';
   }
-
-  /// 中文阅读速度约 300 字/分钟（保守取值，便于估算阅读时长）
-  static Duration estimatedReadingTime(int words) {
-    final minutes = (words / 300).ceil();
-    return Duration(minutes: minutes < 1 ? 1 : minutes);
-  }
-
-  static String formatDuration(Duration d) {
-    if (d.inMinutes < 1) return '不到 1 分钟';
-    if (d.inMinutes < 60) return '${d.inMinutes} 分钟';
-    final h = d.inHours;
-    final m = d.inMinutes % 60;
-    return m == 0 ? '$h 小时' : '$h 小时 $m 分钟';
-  }
 }
 
 /// 搜索结果里高亮关键词时用的文本切片工具。

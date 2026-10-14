@@ -154,31 +154,6 @@ tag：1 个词，≤5 汉字（英文 12 字母），不带 #。
     );
   }
 
-
-  static String askUser(String question, List<String> contexts) {
-    final sb = StringBuffer();
-    for (var i = 0; i < contexts.length; i++) {
-      sb.writeln('[${i + 1}] ${contexts[i]}');
-      sb.writeln();
-    }
-    sb.writeln('问题：$question');
-    return sb.toString();
-  }
-
-  /// 把**更早的对话**压成一段背景摘要（见《AI接入设计》的「会话历史」一节）。
-  ///
-  /// 要求写成"背景材料"而不是"摘要"：模型拿到的这段会被当上下文用，
-  /// 它得知道这是**过去发生的事**，不是用户现在说的话。
-  static String historySummaryQuestion() => '把下面这段更早的对话压成一段简洁的背景摘要，'
-      '供之后的对话参考。要求：\n'
-      '1. 只保留**之后可能会用到**的事实：用户的身份/偏好、已经做过的决定、'
-      '正在处理的事情、明确说过的约束。\n'
-      '2. 丢掉寒暄、重复、以及已经结束的一次性问答。\n'
-      '3. 用第三人称陈述（"用户想要…""之前已经确定…"），不要写成对话。\n'
-      '4. 不要编造对话里没有的信息；不确定的就不要写。\n'
-      '5. 控制在 300 字以内。\n'
-      '直接输出摘要正文，不要任何前缀或标题。';
-
   static String _clip(String content, {int limit = 20000}) {
     if (content.length <= limit) return content;
     return '${content.substring(0, limit)}\n\n'

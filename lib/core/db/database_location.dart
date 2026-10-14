@@ -175,9 +175,6 @@ class DatabaseLocation {
       Platform.environment['HOME'] ??
       '';
 
-  /// 显式指定本次运行的目录（导入后无缝切换时使用）。
-  static void setResolvedDirectory(Directory dir) => _resolved = dir;
-
   /// 私有根目录的候选，按优先级排列。
   ///
   /// 之所以还要有第二、第三候选：`getApplicationSupportDirectory()` 在 Windows 上
@@ -571,15 +568,6 @@ class DatabaseLocation {
     } catch (_) {
       return false;
     }
-  }
-
-  /// 判断某个路径是否位于 App 私有目录内。
-  ///
-  /// 用于在 UI 上区分「私有（不用管）」和「你自己选的目录（要自己备份）」。
-  static Future<bool> isInsidePrivate(String path) async {
-    final priv = await privateRoot();
-    final rel = p.relative(path, from: priv.path);
-    return !rel.startsWith('..') && !p.isAbsolute(rel);
   }
 
   // ==========================================================================

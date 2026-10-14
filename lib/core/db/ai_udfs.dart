@@ -4,7 +4,7 @@ import 'package:drift/drift.dart' show GeneratedDatabase;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 
-import '../util/app_params.dart';
+import '../util/ai_limits.dart';
 import '../util/text_utils.dart';
 
 // ============================================================================
@@ -42,10 +42,10 @@ import '../util/text_utils.dart';
 
 /// 当前注册了 UDF 的连接。
 ///
-/// 顶层变量而不是参数：UDF 回调只能拿到 FunctionContext，拿不到外部作用域。
+/// 顶层变量而不是参数：UDF 回调只能拿到 SqliteArguments，拿不到外部作用域。
 /// 每个 isolate 有自己的一份，而注册与调用**总是在同一个 isolate**（见文件头），
 /// 所以这里不会读到别的 isolate 的句柄。
-sqlite3.Database? _udfDb;
+Database? _udfDb;
 
 const _uuid = Uuid();
 
@@ -53,19 +53,19 @@ const _uuid = Uuid();
 ///
 /// ⚠️ 这个函数会被 drift 送到**背景 isolate** 里执行，所以它必须是顶层函数，
 /// 不能写成闭包：闭包捕获的对象在 Dart 里不允许跨 isolate 传。
-void installAiUdfs(sqlite3.Database db) {
+void installAiUdfs(Database db) {
   _udfDb = db;
   for (final entry in _functions.entries) {
-    // argumentCount 传 -1 = **变参**：签名里的可选参数（chars / limit / notebook_id）
-    // 靠它实现 —— 传 1 个和传 3 个都进同一个函数体，缺的参数在函数体里取默认值。
-    // 不这么做就得给同一个名字注册好几个 arity，而 sqlite3.dart 的回调表按名字存，
-    // 注册第二个会把第一个覆盖掉。
-    db.createFunction(entry.key, argumentCount: -1, function: entry.value);
+    db.createFunction(
+      functionName: entry.key,
+      argumentCount: const AllowedArgumentCount.any(),
+      function: entry.value,
+    );
   }
 }
 
 /// 全部函数：名字 → 实现。名字**必须与 ai_functions.dart 的清单一致**。
-const _functions = <String, void Function(FunctionContext)>{
+const _functions = <String, ScalarFunction>{
   'list_notebooks': _listNotebooks,
   'list_notes': _listNotes,
   'list_unfiled': _listUnfiled,
@@ -144,16 +144,16 @@ const _noDb = 'AI 数据库函数没装到这条连接上（见 core/db/ai_udfs.
 int _now() => DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
 
 /// 第 i 个参数（没传就是 null，由函数体给默认值）。
-Object? _arg(FunctionContext c, int i) => i < c.argumentCount ? c[i] : null;
+Object? _arg(SqliteArguments c, int i) => i < c.length ? c[i] : null;
 
-String? _str(FunctionContext c, int i) {
+String? _str(SqliteArguments c, int i) {
   final v = _arg(c, i);
   if (v == null) return null;
   return v is String ? v : v.toString();
 }
 
 /// 取一个整数参数并夹到 [min, max]。取不到 / 不是数就用 fallback。
-int _num(FunctionContext c, int i, int fallback, {required int min, required int max}) {
+int _num(SqliteArguments c, int i, int fallback, {required int min, required int max}) {
   final v = _arg(c, i);
   final int n;
   if (v is int) {
@@ -170,20 +170,13 @@ int _num(FunctionContext c, int i, int fallback, {required int min, required int
 
 /// 把结果写成一行 JSON。**所有函数的返回值都是文本**，
 /// 这样 AI 看到的形状永远一致：成功是数据，失败是 {ok:false,error}。
-void _json(FunctionContext c, Object? value) => c.result(jsonEncode(value));
+String _json(Object? value) => jsonEncode(value);
 
-void _err(FunctionContext c, String message) =>
-    c.result(jsonEncode({'ok': false, 'error': message}));
+String _err(String message) =>
+    jsonEncode({'ok': false, 'error': message});
 
-/// 函数体统一的开场：拿连接。没装好就回一句可读的错。
-sqlite3.Database? _dbOf(FunctionContext c) {
-  final db = _udfDb;
-  if (db == null) {
-    _err(c, _noDb);
-    return null;
-  }
-  return db;
-}
+/// 函数体统一的开场：拿连接（没装好返回 null，调用方回错）。
+Database? _dbOf() => _udfDb;
 
 Row? _noteRow(String id) {
   final rows = _udfDb!.select(
@@ -351,39 +344,29 @@ String _head(String content) {
   return '$text…';
 }
 
-String _likePattern(String keyword) {
-  // 反斜杠是 LIKE 的转义符，必须自己先转义一遍，否则搜 `50%` 会变成通配。
-  final b = String.fromCharCode(0x5C);
-  final escaped = keyword
-      .replaceAll(b, '$b$b')
-      .replaceAll('%', '$b%')
-      .replaceAll('_', '${b}_');
-  return '%$escaped%';
-}
-
 // ============================================================================
 // 读（11 个）
 // ============================================================================
 
 /// 列全部笔记库。AI 拿 notebook_id 的唯一入口。
-void _listNotebooks(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _listNotebooks(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final rows = db.select(
     'SELECT id, name FROM notebooks WHERE deleted_at IS NULL '
     'ORDER BY sort_order, name',
   );
-  _json(c, [
+  return _json([
     for (final r in rows) {'id': r['id'], 'name': r['name']},
   ]);
 }
 
-void _listNotes(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _listNotes(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   if (id == null || id.isEmpty) {
-    return _err(c,
+    return _err(
         'list_notes 需要 notebook_id。先用 list_notebooks 拿 id；要列未归档的笔记用 list_unfiled。');
   }
   final rows = db.select(
@@ -391,34 +374,34 @@ void _listNotes(FunctionContext c) {
     'WHERE notebook_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC',
     [id],
   );
-  _json(c, [for (final r in rows) _brief(r)]);
+  return _json([for (final r in rows) _brief(r)]);
 }
 
 /// 未归档的笔记 =「我的轻笔记」。
 ///
 /// 条件与 App 的 watchInboxNotes 一致：is_inbox = 1 **且** notebook_id 为空。
 /// 两个条件都要：只看 is_inbox 会把「已归档但笔记库被删」的历史残留也算进来。
-void _listUnfiled(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _listUnfiled(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final rows = db.select(
     'SELECT id, title, updated_at FROM notes '
     'WHERE is_inbox = 1 AND notebook_id IS NULL AND deleted_at IS NULL '
     'ORDER BY updated_at DESC',
   );
-  _json(c, [for (final r in rows) _brief(r)]);
+  return _json([for (final r in rows) _brief(r)]);
 }
 
 /// 元信息。**故意不给正文、不给行数**：正文要按需读（read_preview / read_around），
 /// 一次把几万字灌进上下文，是这个 App 最不想付的账。
-void _statNote(FunctionContext c) {
-  if (_dbOf(c) == null) return;
+Object? _statNote(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'stat_note 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('stat_note 需要 note_id。');
   final row = _noteRow(id);
-  if (row == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
-  _json(c, {
+  return _json({
     'title': row['title'],
     'notebook_id': row['notebook_id'],
     'char_count': content.length,
@@ -432,59 +415,59 @@ void _statNote(FunctionContext c) {
 /// chars 有硬上限（SqlLimits.maxReadChars）。但要知道它只是**函数这一层的**上限：
 /// AI 仍然可以直接 `SELECT content` 把整篇拿走。真正拦住「读全文」的是 prompt
 /// 与「读一次要烧一次上下文」的成本，不是这个 clamp —— 别把它当成安全边界。
-void _readPreview(FunctionContext c) {
-  if (_dbOf(c) == null) return;
+Object? _readPreview(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'read_preview 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('read_preview 需要 note_id。');
   final row = _noteRow(id);
-  if (row == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
   final offset = _num(c, 1, 0, min: 0, max: content.length);
   final chars = _num(c, 2, SqlLimits.defaultReadChars,
       min: 1, max: SqlLimits.maxReadChars);
   final end = offset + chars > content.length ? content.length : offset + chars;
-  c.result(_slice(content, offset, end));
+  return _slice(content, offset, end);
 }
 
 /// 关键词前后各 chars 个字符。**按字符，不按行** ——
 /// 笔记正文是 Markdown，长段落可能是一整行，按行取等于把半篇灌进上下文。
-void _readAround(FunctionContext c) {
-  if (_dbOf(c) == null) return;
+Object? _readAround(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'read_around 需要 note_id 与 keyword。');
+  if (id == null || id.isEmpty) return _err('read_around 需要 note_id 与 keyword。');
   final keyword = _str(c, 1);
   if (keyword == null || keyword.isEmpty) {
-    return _err(c, 'read_around 需要 note_id 与 keyword。');
+    return _err('read_around 需要 note_id 与 keyword。');
   }
   final row = _noteRow(id);
-  if (row == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
   final chars = _num(c, 2, SqlLimits.defaultReadChars,
       min: 1, max: SqlLimits.maxReadChars);
   final idx = content.indexOf(keyword);
   if (idx < 0) {
-    return _err(c, '正文里没有「$keyword」。先用 search_in_note 看看这篇里都有什么。');
+    return _err('正文里没有「$keyword」。先用 search_in_note 看看这篇里都有什么。');
   }
   final from = idx - chars < 0 ? 0 : idx - chars;
   final to = (idx + keyword.length + chars).clamp(0, content.length).toInt();
   final head = from > 0 ? '…' : '';
   final tail = to < content.length ? '…' : '';
-  c.result('$head${_slice(content, from, to)}$tail');
+  return '$head${_slice(content, from, to)}$tail';
 }
 
 /// 数关键词出现几次、都在哪。**改之前的侦察工具**：
 /// replace_unique 要求锚点唯一，先用它确认。
-void _findInNote(FunctionContext c) {
-  if (_dbOf(c) == null) return;
+Object? _findInNote(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
   final keyword = _str(c, 1);
   if (id == null || id.isEmpty || keyword == null || keyword.isEmpty) {
-    return _err(c, 'find_in_note 需要 note_id 与 keyword。');
+    return _err('find_in_note 需要 note_id 与 keyword。');
   }
   final row = _noteRow(id);
-  if (row == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
-  _json(c, {
+  return _json({
     'count': _hits(content, keyword).count,
     'positions': _allHits(content, keyword, SqlLimits.maxFindPositions),
   });
@@ -494,11 +477,11 @@ void _findInNote(FunctionContext c) {
 ///
 /// 只回 id / title / snippet，**不回正文**：命中之后用 read_around 定位那一段，
 /// 比把整篇灌进来便宜得多。
-void _searchNotes(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _searchNotes(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final keyword = (_str(c, 0) ?? '').trim();
-  if (keyword.isEmpty) return _err(c, 'search_notes 需要 keyword。');
+  if (keyword.isEmpty) return _err('search_notes 需要 keyword。');
   final limit = _num(c, 1, SqlLimits.defaultSearchLimit,
       min: 1, max: SqlLimits.maxSearchLimit);
   final pattern = _likePattern(keyword);
@@ -519,21 +502,21 @@ void _searchNotes(FunctionContext c) {
       'snippet': idx >= 0 ? _snippet(content, idx, keyword.length) : _head(content),
     });
   }
-  _json(c, out);
+  return _json(out);
 }
 
 /// 在一篇笔记里找全部命中。offset 可以直接喂给 read_preview。
-void _searchInNote(FunctionContext c) {
-  if (_dbOf(c) == null) return;
+Object? _searchInNote(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);
   final keyword = _str(c, 1);
   if (id == null || id.isEmpty || keyword == null || keyword.isEmpty) {
-    return _err(c, 'search_in_note 需要 note_id 与 keyword。');
+    return _err('search_in_note 需要 note_id 与 keyword。');
   }
   final limit = _num(c, 2, SqlLimits.defaultSnippetLimit,
       min: 1, max: SqlLimits.maxSnippetLimit);
   final row = _noteRow(id);
-  if (row == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
   final lowerContent = content.toLowerCase();
   final lower = keyword.toLowerCase();
@@ -545,13 +528,13 @@ void _searchInNote(FunctionContext c) {
     out.add({'offset': i, 'snippet': _snippet(content, i, keyword.length)});
     from = i + keyword.length;
   }
-  _json(c, out);
+  return _json(out);
 }
 
 /// 数条数。传 NULL 数全部（含未归档），传笔记库 id 只数这个库。
-void _countNotes(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _countNotes(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final nb = _str(c, 0);
   final ResultSet rows = (nb == null || nb.isEmpty)
       ? db.select('SELECT COUNT(*) AS n FROM notes WHERE deleted_at IS NULL')
@@ -560,12 +543,12 @@ void _countNotes(FunctionContext c) {
           'AND notebook_id = ?',
           [nb],
         );
-  c.result(rows.first['n']);
+  return rows.first['n'];
 }
 
-void _recentNotes(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _recentNotes(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final limit = _num(c, 0, SqlLimits.defaultRecentLimit,
       min: 1, max: SqlLimits.maxSearchLimit);
   final rows = db.select(
@@ -573,7 +556,7 @@ void _recentNotes(FunctionContext c) {
     'ORDER BY updated_at DESC LIMIT ?',
     [limit],
   );
-  _json(c, [for (final r in rows) _brief(r)]);
+  return _json([for (final r in rows) _brief(r)]);
 }
 
 // ============================================================================
@@ -584,19 +567,19 @@ void _recentNotes(FunctionContext c) {
 ///
 /// 与 NoteRepository._create 写的是同一组列：source 记 'ai'（这张表当初就为此
 /// 留了这个取值），派生字段走 TextUtils，时间戳是 Unix 秒。
-void _createNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _createNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final title = safeTruncate((_str(c, 0) ?? '').trim(), AiLimits.titleHardMax);
   final content = _str(c, 1) ?? '';
   var notebookId = _str(c, 2);
   if (notebookId != null && notebookId.isEmpty) notebookId = null;
   if (notebookId != null && _notebookRow(notebookId) == null) {
-    return _err(c,
+    return _err(
         '没有 id = $notebookId 的笔记库。先用 list_notebooks 确认；要放进「我的轻笔记」就传 NULL。');
   }
   final sizeErr = _checkSize(content);
-  if (sizeErr != null) return _err(c, sizeErr);
+  if (sizeErr != null) return _err(sizeErr);
 
   final id = _uuid.v4();
   final now = _now();
@@ -618,14 +601,14 @@ void _createNote(FunctionContext c) {
       now,
     ],
   );
-  _json(c, {'ok': true, 'note_id': id});
+  return _json({'ok': true, 'note_id': id});
 }
 
-void _createNotebook(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _createNotebook(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final name = (_str(c, 0) ?? '').trim();
-  if (name.isEmpty) return _err(c, '笔记库名不能为空。');
+  if (name.isEmpty) return _err('笔记库名不能为空。');
   final id = _uuid.v4();
   final now = _now();
   db.execute(
@@ -633,20 +616,20 @@ void _createNotebook(FunctionContext c) {
     'VALUES (?, ?, 0, ?, ?, NULL)',
     [id, safeTruncate(name, AiLimits.titleHardMax), now, now],
   );
-  _json(c, {'ok': true, 'notebook_id': id});
+  return _json({'ok': true, 'notebook_id': id});
 }
 
 /// 复制一篇笔记。
 ///
 /// 复制出来的**不置顶、没有切片**：切片会在第一次被读到时按需现切
 ///（NoteChunkRepository 的懒回填），所以这里不用管它。
-void _duplicateNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _duplicateNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'duplicate_note 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('duplicate_note 需要 note_id。');
   final src = _noteRow(id);
-  if (src == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (src == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
 
   final content = (src['content'] as String?) ?? '';
   final newId = _uuid.v4();
@@ -668,7 +651,7 @@ void _duplicateNote(FunctionContext c) {
       now,
     ],
   );
-  _json(c, {'ok': true, 'new_note_id': newId});
+  return _json({'ok': true, 'new_note_id': newId});
 }
 
 // ============================================================================
@@ -679,52 +662,50 @@ void _duplicateNote(FunctionContext c) {
 ///
 /// delete_unique 等价于把 old 换成空串 —— 两者共用一条路径，
 /// 所以「锚点必须唯一」这条规则不可能只在其中一个上生效。
-void _uniqueReplace(FunctionContext c, {required bool remove}) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _uniqueReplace(SqliteArguments c, {required bool remove}) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final old = _str(c, 1);
   final added = remove ? '' : _str(c, 2);
   if (id == null || id.isEmpty || old == null || added == null) {
-    return _err(
-        c,
-        remove
+    return _err(remove
             ? 'delete_unique 需要 note_id 与 old 两个参数。'
             : 'replace_unique 需要 note_id、old、new 三个参数。');
   }
   final note = _noteRow(id);
-  if (note == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (note['content'] as String?) ?? '';
   final bad = _anchorError(content, old);
-  if (bad != null) return _err(c, bad);
+  if (bad != null) return _err(bad);
   final writeErr = _writeContent(id, content.replaceFirst(old, added));
-  if (writeErr != null) return _err(c, writeErr);
-  _json(c, {'ok': true});
+  if (writeErr != null) return _err(writeErr);
+  return _json({'ok': true});
 }
 
-void _replaceUnique(FunctionContext c) => _uniqueReplace(c, remove: false);
+Object? _replaceUnique(SqliteArguments c) => _uniqueReplace(c, remove: false);
 
-void _deleteUnique(FunctionContext c) => _uniqueReplace(c, remove: true);
+Object? _deleteUnique(SqliteArguments c) => _uniqueReplace(c, remove: true);
 
 /// insert_after / insert_before 的公共实现。
 ///
 /// 插入的内容自带一个换行：这两个函数的用途是「在这一段前后加一句」，
 /// 而 Markdown 里不加换行会把新内容接进原来那一行，读起来是错的。
-void _insertAt(FunctionContext c, {required bool after}) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _insertAt(SqliteArguments c, {required bool after}) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final anchor = _str(c, 1);
   final added = _str(c, 2);
   if (id == null || id.isEmpty || anchor == null || added == null) {
     final name = after ? 'insert_after' : 'insert_before';
-    return _err(c, '$name 需要 note_id、anchor、content 三个参数。');
+    return _err('$name 需要 note_id、anchor、content 三个参数。');
   }
   final note = _noteRow(id);
-  if (note == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (note['content'] as String?) ?? '';
   final bad = _anchorError(content, anchor);
-  if (bad != null) return _err(c, bad);
+  if (bad != null) return _err(bad);
 
   final at = content.indexOf(anchor);
   final String next;
@@ -735,24 +716,24 @@ void _insertAt(FunctionContext c, {required bool after}) {
     next = '${_slice(content, 0, at)}$added\n${_slice(content, at, content.length)}';
   }
   final writeErr = _writeContent(id, next);
-  if (writeErr != null) return _err(c, writeErr);
-  _json(c, {'ok': true});
+  if (writeErr != null) return _err(writeErr);
+  return _json({'ok': true});
 }
 
-void _insertAfter(FunctionContext c) => _insertAt(c, after: true);
+Object? _insertAfter(SqliteArguments c) => _insertAt(c, after: true);
 
-void _insertBefore(FunctionContext c) => _insertAt(c, after: false);
+Object? _insertBefore(SqliteArguments c) => _insertAt(c, after: false);
 
-void _appendToNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _appendToNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final added = _str(c, 1);
   if (id == null || id.isEmpty || added == null) {
-    return _err(c, 'append_to_note 需要 note_id 与 content。');
+    return _err('append_to_note 需要 note_id 与 content。');
   }
   final note = _noteRow(id);
-  if (note == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (note['content'] as String?) ?? '';
   final String next;
   if (content.isEmpty) {
@@ -763,43 +744,43 @@ void _appendToNote(FunctionContext c) {
     next = '$content\n$added';
   }
   final writeErr = _writeContent(id, next);
-  if (writeErr != null) return _err(c, writeErr);
-  _json(c, {'ok': true});
+  if (writeErr != null) return _err(writeErr);
+  return _json({'ok': true});
 }
 
-void _prependToNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _prependToNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final added = _str(c, 1);
   if (id == null || id.isEmpty || added == null) {
-    return _err(c, 'prepend_to_note 需要 note_id 与 content。');
+    return _err('prepend_to_note 需要 note_id 与 content。');
   }
   final note = _noteRow(id);
-  if (note == null) return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+  if (note == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (note['content'] as String?) ?? '';
   final next = content.isEmpty ? added : '$added\n$content';
   final writeErr = _writeContent(id, next);
-  if (writeErr != null) return _err(c, writeErr);
-  _json(c, {'ok': true});
+  if (writeErr != null) return _err(writeErr);
+  return _json({'ok': true});
 }
 
-void _renameNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _renameNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final rawTitle = _str(c, 1);
   if (id == null || id.isEmpty || rawTitle == null) {
-    return _err(c, 'rename_note 需要 note_id 与 new_title。');
+    return _err('rename_note 需要 note_id 与 new_title。');
   }
   if (_noteRow(id) == null) {
-    return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+    return _err('没有 id = $id 的笔记（或它已被删除）。');
   }
   db.execute(
     'UPDATE notes SET title = ?, updated_at = ? WHERE id = ?',
     [safeTruncate(rawTitle.trim(), AiLimits.titleHardMax), _now(), id],
   );
-  _json(c, {'ok': true});
+  return _json({'ok': true});
 }
 
 /// 移动笔记。notebook_id 传 NULL = 移回「我的轻笔记」。
@@ -807,18 +788,18 @@ void _renameNote(FunctionContext c) {
 /// is_inbox 跟着一起改：它和 notebook_id 是同一个意思的两种表示
 ///（见 AppDatabase.moveNoteToNotebook），只改一个会留下
 /// 「已归档但没有笔记库」的行 —— 那种行在两个入口都看不见。
-void _moveNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _moveNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'move_note 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('move_note 需要 note_id。');
   if (_noteRow(id) == null) {
-    return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+    return _err('没有 id = $id 的笔记（或它已被删除）。');
   }
   var notebookId = _str(c, 1);
   if (notebookId != null && notebookId.isEmpty) notebookId = null;
   if (notebookId != null && _notebookRow(notebookId) == null) {
-    return _err(c,
+    return _err(
         '没有 id = $notebookId 的笔记库。先用 list_notebooks 确认；要移回「我的轻笔记」就传 NULL。');
   }
   if (notebookId == null) {
@@ -832,26 +813,26 @@ void _moveNote(FunctionContext c) {
       [notebookId, _now(), id],
     );
   }
-  _json(c, {'ok': true});
+  return _json({'ok': true});
 }
 
-void _renameNotebook(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _renameNotebook(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
   final name = (_str(c, 1) ?? '').trim();
   if (id == null || id.isEmpty) {
-    return _err(c, 'rename_notebook 需要 notebook_id 与 new_name。');
+    return _err('rename_notebook 需要 notebook_id 与 new_name。');
   }
-  if (name.isEmpty) return _err(c, '笔记库名不能为空。');
+  if (name.isEmpty) return _err('笔记库名不能为空。');
   if (_notebookRow(id) == null) {
-    return _err(c, '没有 id = $id 的笔记库（或它已被删除）。先用 list_notebooks 确认。');
+    return _err('没有 id = $id 的笔记库（或它已被删除）。先用 list_notebooks 确认。');
   }
   db.execute(
     'UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ?',
     [safeTruncate(name, AiLimits.titleHardMax), _now(), id],
   );
-  _json(c, {'ok': true});
+  return _json({'ok': true});
 }
 
 // ============================================================================
@@ -866,13 +847,13 @@ void _renameNotebook(FunctionContext c) {
 ///
 /// 设计上这是**不可撤销**的：界面上没有回收站入口，所以 prompt 明确要求
 /// 「只在用户明确要求删的时候才调」，且没有确认层。
-void _deleteNote(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _deleteNote(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'delete_note 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('delete_note 需要 note_id。');
   if (_noteRow(id) == null) {
-    return _err(c, '没有 id = $id 的笔记（或它已被删除）。');
+    return _err('没有 id = $id 的笔记（或它已被删除）。');
   }
   final now = _now();
   db.execute(
@@ -880,7 +861,7 @@ void _deleteNote(FunctionContext c) {
     [now, now, id],
   );
   db.execute('DELETE FROM note_chunks WHERE note_id = ?', [id]);
-  _json(c, {'ok': true});
+  return _json({'ok': true});
 }
 
 /// 删笔记库：**库里的笔记不删**，退回「我的轻笔记」。
@@ -888,13 +869,13 @@ void _deleteNote(FunctionContext c) {
 /// 顺序与 AppDatabase.softDeleteNotebook 一致：先把笔记挪出去，再删库。
 /// 反过来的话，中间失败会留下「笔记指向一个已删的库」—— 那种笔记
 /// 只在「最近笔记」里看得见，库页里找不到。
-void _deleteNotebook(FunctionContext c) {
-  final db = _dbOf(c);
-  if (db == null) return;
+Object? _deleteNotebook(SqliteArguments c) {
+  final db = _dbOf();
+  if (db == null) return _err(_noDb);
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err(c, 'delete_notebook 需要 notebook_id。');
+  if (id == null || id.isEmpty) return _err('delete_notebook 需要 notebook_id。');
   if (_notebookRow(id) == null) {
-    return _err(c, '没有 id = $id 的笔记库（或它已被删除）。先用 list_notebooks 确认。');
+    return _err('没有 id = $id 的笔记库（或它已被删除）。先用 list_notebooks 确认。');
   }
   final now = _now();
   db.execute(
@@ -906,5 +887,5 @@ void _deleteNotebook(FunctionContext c) {
     'UPDATE notebooks SET deleted_at = ?, updated_at = ? WHERE id = ?',
     [now, now, id],
   );
-  _json(c, {'ok': true});
+  return _json({'ok': true});
 }

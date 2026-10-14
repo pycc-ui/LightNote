@@ -57,18 +57,6 @@ class NoteChunk {
   /// 去重等于完全失效。
   String keyOf(String noteId) => '$noteId:$index';
 
-  NoteChunk withFeedState({DateTime? lastUsedAt, int? nextWindowStart}) =>
-      NoteChunk(
-        index: index,
-        heading: heading,
-        level: level,
-        start: start,
-        end: end,
-        contentHash: contentHash,
-        lastUsedAt: lastUsedAt ?? this.lastUsedAt,
-        nextWindowStart: nextWindowStart ?? this.nextWindowStart,
-      );
-
   /// 从**原文**里取出这一片的正文。
   ///
   /// 越界时返回空串而不是抛错：偏移失效的那一刻不该让整个页面崩掉，

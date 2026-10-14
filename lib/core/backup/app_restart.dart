@@ -40,7 +40,4 @@ class AppRestart {
     // 这种既难看又容易被误改的死代码。
     exit(0);
   }
-
-  /// 直接用 `exit(0)` 结束自己（用于平台不支持自重启时的兜底）。
-  static Never quitNow() => exit(0);
 }

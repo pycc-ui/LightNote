@@ -27,10 +27,6 @@ class DeepSeekConfig {
   /// 供 UI 选择器枚举。顺序即展示顺序（flash 在前，默认）。
   static const selectableModels = <String>[modelFlash, modelPro];
 
-  /// 模型显示名。
-  static String modelLabel(String model) =>
-      model.contains('pro') ? 'DeepSeek Pro' : 'DeepSeek Flash';
-
   /// 上下文 1M / 最大输出 384K。实际调用请留出余量，
   /// 单次请求正文建议不超过 20 万字符，超长笔记应先分段。
   static const maxContextTokens = 1000000;

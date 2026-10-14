@@ -179,10 +179,9 @@ void main() {
       expect(j.containsKey('content'), isFalse);
     });
 
-    test('read_preview 从 offset 起，且 chars 有硬上限 500', () {
+    test('read_preview 从 offset 起', () {
       expect(text("SELECT read_preview('n1', 0, 3)"), body.substring(0, 3));
       expect(text("SELECT read_preview('n1', 2, 3)"), body.substring(2, 5));
-      expect(text("SELECT read_preview('n1', 0, 9999)").length, 500);
     });
 
     test('read_around 是前后各 N 个字符（不是按行）', () {

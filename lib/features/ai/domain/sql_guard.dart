@@ -1,4 +1,4 @@
-import '../../core/util/app_params.dart';
+import '../../../core/util/app_params.dart';
 
 /// 一条 SQL 的**放行判定**。
 class SqlCheck {

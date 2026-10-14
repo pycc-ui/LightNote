@@ -91,13 +91,12 @@ void main() {
         ],
       });
 
-      final cards = AiPrompts.parseFeedCards(raw);
+      final card = AiPrompts.parseFeedCard(raw);
 
-      expect(cards, hasLength(1));
       // `safeTruncate` 截到上限并补省略号（"被截了"的可见标记）
-      expect(cards!.single.title, '${'标' * AiLimits.feedCardTitleMax}…');
-      expect(cards.single.body, '${'正' * AiLimits.feedCardBodyMax}…');
-      expect(cards.single.tag, '记忆', reason: '标签仍然剥掉 # 号');
+      expect(card!.title, '${'标' * AiLimits.feedCardTitleMax}…');
+      expect(card.body, '${'正' * AiLimits.feedCardBodyMax}…');
+      expect(card.tag, '记忆', reason: '标签仍然剥掉 # 号');
     });
 
     test('没超长的原样通过（别把正常卡片也改了）', () {
@@ -107,9 +106,9 @@ void main() {
         ],
       });
 
-      final cards = AiPrompts.parseFeedCards(raw);
-      expect(cards!.single.title, '抄书是最没用的努力');
-      expect(cards.single.body, '正文内容。');
+      final card = AiPrompts.parseFeedCard(raw);
+      expect(card!.title, '抄书是最没用的努力');
+      expect(card.body, '正文内容。');
     });
   });
 

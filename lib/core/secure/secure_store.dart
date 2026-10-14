@@ -87,22 +87,4 @@ class SecureStore {
   static Future<void> writeApiKey(String key) => _write(_kApiKey, key.trim());
 
   static Future<void> deleteApiKey() => _delete(_kApiKey);
-
-  static Future<bool> hasApiKey() async => (await readApiKey()) != null;
-
-  // ---- 模型选择 ----
-
-  /// 默认 flash：支持 JSON Output 与思考模式，价格是 pro 的 1/4 左右，
-  /// 日常整理与卡片生成足够。
-  // ---- 思考模式 ----
-
-  /// 重要：DeepSeek 思考模式**默认开启**，且 effort 默认 high。
-  /// 对"打个标签"这类轻量任务，开启会显著增加耗时与费用，
-  /// 所以这里默认关闭，只在深度任务时由业务层显式开启。
-  static Future<void> wipe() async {
-    _memoryFallback.clear();
-    try {
-      await _storage.deleteAll();
-    } catch (_) {}
-  }
 }

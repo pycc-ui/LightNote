@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
 
@@ -161,9 +160,6 @@ class ToolExecutor {
     final s = v is String ? v : v.toString();
     return s.trim().isEmpty ? null : s;
   }
-
-  /// 把一个工具结果编码成回灌给模型的字符串（`role: tool` 的 content）。
-  static String encodeResult(ToolResult r) => r.encode();
 
   /// 把模型给的 `arguments`（JSON 字符串）解析成 map。
   ///

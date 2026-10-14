@@ -879,12 +879,6 @@ class AppDatabase extends _$AppDatabase {
   // AI 结果与审计
   // ==========================================================================
 
-  Future<void> markNoteAiDone(String noteId) {
-    return (update(notes)..where((t) => t.id.equals(noteId))).write(
-      NotesCompanion(lastAiAt: Value(DateTime.now().toUtc())),
-    );
-  }
-
   Future<void> insertAiCall(AiCallsCompanion entry) {
     return into(aiCalls).insert(entry);
   }
@@ -1084,13 +1078,6 @@ class AppDatabase extends _$AppDatabase {
       ..where(noteChunks.noteId.equals(noteId));
     final row = await q.getSingle();
     return row.read(c) ?? 0;
-  }
-
-  /// 取某一片。没有返回 null（调用方据此触发重切）。
-  Future<NoteChunkRow?> chunkAt(String noteId, int idx) {
-    return (select(noteChunks)
-          ..where((t) => t.noteId.equals(noteId) & t.idx.equals(idx)))
-        .getSingleOrNull();
   }
 
   /// 记一次「这片被卡片流用掉了」，并把窗口轮换位推进到 [nextWindowStart]。

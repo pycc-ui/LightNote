@@ -2075,7 +2075,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
   /// `AiModel.parse`，认不出 pro 就回默认的 flash，不会因为老值而选到
   /// 不存在的模型。
   ///
-  /// 卡片流与摘要**不读这一列**（它们固定用 flash）。
+  /// 卡片流**不读这一列**（固定用 flash）。
   final String workspaceScope;
 
   /// 思考强度：low / medium / high
@@ -3669,7 +3669,7 @@ class $NoteChunksTable extends NoteChunks
 class NoteChunkRow extends DataClass implements Insertable<NoteChunkRow> {
   final String noteId;
 
-  /// 顺序号，0 起。**AI 的 `readChunk(noteId, idx)` 用的就是它。**
+  /// 顺序号，0 起。**搜索返回的"命中哪一片"用的就是它。**
   final int idx;
 
   /// 标题路径，如 `工作 / 项目A / 风险`。无标题时为空串。
@@ -4053,6 +4053,390 @@ class NoteChunksCompanion extends UpdateCompanion<NoteChunkRow> {
   }
 }
 
+class $AiFunctionsTable extends AiFunctions
+    with TableInfo<$AiFunctionsTable, AiFunction> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $AiFunctionsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _categoryMeta = const VerificationMeta(
+    'category',
+  );
+  @override
+  late final GeneratedColumn<String> category = GeneratedColumn<String>(
+    'category',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _signatureMeta = const VerificationMeta(
+    'signature',
+  );
+  @override
+  late final GeneratedColumn<String> signature = GeneratedColumn<String>(
+    'signature',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _descriptionMeta = const VerificationMeta(
+    'description',
+  );
+  @override
+  late final GeneratedColumn<String> description = GeneratedColumn<String>(
+    'description',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _exampleMeta = const VerificationMeta(
+    'example',
+  );
+  @override
+  late final GeneratedColumn<String> example = GeneratedColumn<String>(
+    'example',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    name,
+    category,
+    signature,
+    description,
+    example,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ai_functions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AiFunction> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('category')) {
+      context.handle(
+        _categoryMeta,
+        category.isAcceptableOrUnknown(data['category']!, _categoryMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_categoryMeta);
+    }
+    if (data.containsKey('signature')) {
+      context.handle(
+        _signatureMeta,
+        signature.isAcceptableOrUnknown(data['signature']!, _signatureMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_signatureMeta);
+    }
+    if (data.containsKey('description')) {
+      context.handle(
+        _descriptionMeta,
+        description.isAcceptableOrUnknown(
+          data['description']!,
+          _descriptionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_descriptionMeta);
+    }
+    if (data.containsKey('example')) {
+      context.handle(
+        _exampleMeta,
+        example.isAcceptableOrUnknown(data['example']!, _exampleMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {name};
+  @override
+  AiFunction map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AiFunction(
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      category: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}category'],
+      )!,
+      signature: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}signature'],
+      )!,
+      description: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}description'],
+      )!,
+      example: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}example'],
+      ),
+    );
+  }
+
+  @override
+  $AiFunctionsTable createAlias(String alias) {
+    return $AiFunctionsTable(attachedDatabase, alias);
+  }
+}
+
+class AiFunction extends DataClass implements Insertable<AiFunction> {
+  /// 函数名。**必须与 `createFunction` 注册的名字一模一样**，否则 AI 照着
+  /// 这张表写出来的 SQL 会报 "no such function"。
+  final String name;
+
+  /// read / create / modify / delete（与《AI 操作数据库设计》的四类一致）。
+  /// AI 靠它判断"这个函数会不会改数据"；我们自己也用它挑出写函数
+  /// （见 `aiWriteFunctions`，执行器据此决定要不要让界面刷新）。
+  final String category;
+
+  /// 签名，如 `replace_unique(note_id, old, new)`
+  final String signature;
+
+  /// 一句话说明：**什么时候用它**、边界在哪
+  final String description;
+
+  /// 可直接照抄进 SQL 的例子（可空）
+  final String? example;
+  const AiFunction({
+    required this.name,
+    required this.category,
+    required this.signature,
+    required this.description,
+    this.example,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['name'] = Variable<String>(name);
+    map['category'] = Variable<String>(category);
+    map['signature'] = Variable<String>(signature);
+    map['description'] = Variable<String>(description);
+    if (!nullToAbsent || example != null) {
+      map['example'] = Variable<String>(example);
+    }
+    return map;
+  }
+
+  AiFunctionsCompanion toCompanion(bool nullToAbsent) {
+    return AiFunctionsCompanion(
+      name: Value(name),
+      category: Value(category),
+      signature: Value(signature),
+      description: Value(description),
+      example: example == null && nullToAbsent
+          ? const Value.absent()
+          : Value(example),
+    );
+  }
+
+  factory AiFunction.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AiFunction(
+      name: serializer.fromJson<String>(json['name']),
+      category: serializer.fromJson<String>(json['category']),
+      signature: serializer.fromJson<String>(json['signature']),
+      description: serializer.fromJson<String>(json['description']),
+      example: serializer.fromJson<String?>(json['example']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'name': serializer.toJson<String>(name),
+      'category': serializer.toJson<String>(category),
+      'signature': serializer.toJson<String>(signature),
+      'description': serializer.toJson<String>(description),
+      'example': serializer.toJson<String?>(example),
+    };
+  }
+
+  AiFunction copyWith({
+    String? name,
+    String? category,
+    String? signature,
+    String? description,
+    Value<String?> example = const Value.absent(),
+  }) => AiFunction(
+    name: name ?? this.name,
+    category: category ?? this.category,
+    signature: signature ?? this.signature,
+    description: description ?? this.description,
+    example: example.present ? example.value : this.example,
+  );
+  AiFunction copyWithCompanion(AiFunctionsCompanion data) {
+    return AiFunction(
+      name: data.name.present ? data.name.value : this.name,
+      category: data.category.present ? data.category.value : this.category,
+      signature: data.signature.present ? data.signature.value : this.signature,
+      description: data.description.present
+          ? data.description.value
+          : this.description,
+      example: data.example.present ? data.example.value : this.example,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AiFunction(')
+          ..write('name: $name, ')
+          ..write('category: $category, ')
+          ..write('signature: $signature, ')
+          ..write('description: $description, ')
+          ..write('example: $example')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(name, category, signature, description, example);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AiFunction &&
+          other.name == this.name &&
+          other.category == this.category &&
+          other.signature == this.signature &&
+          other.description == this.description &&
+          other.example == this.example);
+}
+
+class AiFunctionsCompanion extends UpdateCompanion<AiFunction> {
+  final Value<String> name;
+  final Value<String> category;
+  final Value<String> signature;
+  final Value<String> description;
+  final Value<String?> example;
+  final Value<int> rowid;
+  const AiFunctionsCompanion({
+    this.name = const Value.absent(),
+    this.category = const Value.absent(),
+    this.signature = const Value.absent(),
+    this.description = const Value.absent(),
+    this.example = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AiFunctionsCompanion.insert({
+    required String name,
+    required String category,
+    required String signature,
+    required String description,
+    this.example = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : name = Value(name),
+       category = Value(category),
+       signature = Value(signature),
+       description = Value(description);
+  static Insertable<AiFunction> custom({
+    Expression<String>? name,
+    Expression<String>? category,
+    Expression<String>? signature,
+    Expression<String>? description,
+    Expression<String>? example,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (name != null) 'name': name,
+      if (category != null) 'category': category,
+      if (signature != null) 'signature': signature,
+      if (description != null) 'description': description,
+      if (example != null) 'example': example,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AiFunctionsCompanion copyWith({
+    Value<String>? name,
+    Value<String>? category,
+    Value<String>? signature,
+    Value<String>? description,
+    Value<String?>? example,
+    Value<int>? rowid,
+  }) {
+    return AiFunctionsCompanion(
+      name: name ?? this.name,
+      category: category ?? this.category,
+      signature: signature ?? this.signature,
+      description: description ?? this.description,
+      example: example ?? this.example,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (category.present) {
+      map['category'] = Variable<String>(category.value);
+    }
+    if (signature.present) {
+      map['signature'] = Variable<String>(signature.value);
+    }
+    if (description.present) {
+      map['description'] = Variable<String>(description.value);
+    }
+    if (example.present) {
+      map['example'] = Variable<String>(example.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AiFunctionsCompanion(')
+          ..write('name: $name, ')
+          ..write('category: $category, ')
+          ..write('signature: $signature, ')
+          ..write('description: $description, ')
+          ..write('example: $example, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -4066,6 +4450,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $AppKvTable appKv = $AppKvTable(this);
   late final $FeedReserveTable feedReserve = $FeedReserveTable(this);
   late final $NoteChunksTable noteChunks = $NoteChunksTable(this);
+  late final $AiFunctionsTable aiFunctions = $AiFunctionsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -4079,6 +4464,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     appKv,
     feedReserve,
     noteChunks,
+    aiFunctions,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -6796,6 +7182,217 @@ typedef $$NoteChunksTableProcessedTableManager =
       NoteChunkRow,
       PrefetchHooks Function({bool noteId})
     >;
+typedef $$AiFunctionsTableCreateCompanionBuilder =
+    AiFunctionsCompanion Function({
+      required String name,
+      required String category,
+      required String signature,
+      required String description,
+      Value<String?> example,
+      Value<int> rowid,
+    });
+typedef $$AiFunctionsTableUpdateCompanionBuilder =
+    AiFunctionsCompanion Function({
+      Value<String> name,
+      Value<String> category,
+      Value<String> signature,
+      Value<String> description,
+      Value<String?> example,
+      Value<int> rowid,
+    });
+
+class $$AiFunctionsTableFilterComposer
+    extends Composer<_$AppDatabase, $AiFunctionsTable> {
+  $$AiFunctionsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get signature => $composableBuilder(
+    column: $table.signature,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get example => $composableBuilder(
+    column: $table.example,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$AiFunctionsTableOrderingComposer
+    extends Composer<_$AppDatabase, $AiFunctionsTable> {
+  $$AiFunctionsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get category => $composableBuilder(
+    column: $table.category,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get signature => $composableBuilder(
+    column: $table.signature,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get example => $composableBuilder(
+    column: $table.example,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$AiFunctionsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $AiFunctionsTable> {
+  $$AiFunctionsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get category =>
+      $composableBuilder(column: $table.category, builder: (column) => column);
+
+  GeneratedColumn<String> get signature =>
+      $composableBuilder(column: $table.signature, builder: (column) => column);
+
+  GeneratedColumn<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get example =>
+      $composableBuilder(column: $table.example, builder: (column) => column);
+}
+
+class $$AiFunctionsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $AiFunctionsTable,
+          AiFunction,
+          $$AiFunctionsTableFilterComposer,
+          $$AiFunctionsTableOrderingComposer,
+          $$AiFunctionsTableAnnotationComposer,
+          $$AiFunctionsTableCreateCompanionBuilder,
+          $$AiFunctionsTableUpdateCompanionBuilder,
+          (
+            AiFunction,
+            BaseReferences<_$AppDatabase, $AiFunctionsTable, AiFunction>,
+          ),
+          AiFunction,
+          PrefetchHooks Function()
+        > {
+  $$AiFunctionsTableTableManager(_$AppDatabase db, $AiFunctionsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$AiFunctionsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$AiFunctionsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$AiFunctionsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> name = const Value.absent(),
+                Value<String> category = const Value.absent(),
+                Value<String> signature = const Value.absent(),
+                Value<String> description = const Value.absent(),
+                Value<String?> example = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AiFunctionsCompanion(
+                name: name,
+                category: category,
+                signature: signature,
+                description: description,
+                example: example,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String name,
+                required String category,
+                required String signature,
+                required String description,
+                Value<String?> example = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AiFunctionsCompanion.insert(
+                name: name,
+                category: category,
+                signature: signature,
+                description: description,
+                example: example,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$AiFunctionsTable, AiFunction>(table),
+                  BaseReferences<_$AppDatabase, $AiFunctionsTable, AiFunction>(
+                    db,
+                    table,
+                    e,
+                  ),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$AiFunctionsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $AiFunctionsTable,
+      AiFunction,
+      $$AiFunctionsTableFilterComposer,
+      $$AiFunctionsTableOrderingComposer,
+      $$AiFunctionsTableAnnotationComposer,
+      $$AiFunctionsTableCreateCompanionBuilder,
+      $$AiFunctionsTableUpdateCompanionBuilder,
+      (
+        AiFunction,
+        BaseReferences<_$AppDatabase, $AiFunctionsTable, AiFunction>,
+      ),
+      AiFunction,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -6816,4 +7413,6 @@ class $AppDatabaseManager {
       $$FeedReserveTableTableManager(_db, _db.feedReserve);
   $$NoteChunksTableTableManager get noteChunks =>
       $$NoteChunksTableTableManager(_db, _db.noteChunks);
+  $$AiFunctionsTableTableManager get aiFunctions =>
+      $$AiFunctionsTableTableManager(_db, _db.aiFunctions);
 }

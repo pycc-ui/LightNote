@@ -30,11 +30,6 @@ class DeepSeekClient {
     _apiKey = (key == null || key.trim().isEmpty) ? null : key.trim();
   }
 
-  DeepSeekClient withApiKey(String? key) {
-    setApiKey(key);
-    return this;
-  }
-
   /// 流式对话。
   ///
   /// 产出 [AiEvent] 序列：若干 [AiChunk] / [AiReasoning]，最后以 [AiDone]

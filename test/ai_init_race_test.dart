@@ -70,8 +70,8 @@ class _StubClient extends DeepSeekClient {
 const _oneCard = '{"cards":[{"title":"标题","body":"正文","tag":"标签"}]}';
 
 /// 用一份最简素材去触发一次真实请求。
-Future<List<FeedDraft>> _generate(AiRepository ai) => ai.generateFeedNotes(
-      const [FeedMaterial(title: '素材标题', chunk: '素材片段')],
+Future<FeedDraft> _generate(AiRepository ai) => ai.generateFeedNote(
+      const FeedMaterial(title: '素材标题', chunk: '素材片段'),
     );
 
 void main() {
@@ -101,9 +101,9 @@ void main() {
       final ai = AiRepository(db: db, client: client);
 
       // **故意不调 ai.init()**
-      final cards = await _generate(ai);
+      final card = await _generate(ai);
 
-      expect(cards, hasLength(1));
+      expect(card.title, '标题');
       expect(client.keyStateOnCall, [true],
           reason: '发请求时必须已经有 Key——这正是修复点');
     });
@@ -145,7 +145,7 @@ void main() {
       // 三个并发请求，共用同一个初始化 future
       final results = await Future.wait([_generate(ai), _generate(ai), _generate(ai)]);
 
-      expect(results.every((r) => r.length == 1), isTrue);
+      expect(results.every((r) => r.title == '标题'), isTrue);
       expect(client.keyStateOnCall.every((had) => had), isTrue,
           reason: '三个并发请求都必须在有 Key 之后才发出');
     });
@@ -155,9 +155,9 @@ void main() {
       final ai = AiRepository(db: db, client: client);
 
       await ai.saveApiKey('sk-just-set');
-      final cards = await _generate(ai);
+      final card = await _generate(ai);
 
-      expect(cards, hasLength(1));
+      expect(card.title, '标题');
       expect(client.keyStateOnCall, [true]);
     });
   });

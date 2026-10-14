@@ -10,7 +10,6 @@ import '../app_info.dart';
 import '../db/app_database.dart';
 import '../db/database_location.dart';
 import 'backup_models.dart';
-import 'pending_import.dart';
 
 /// 备份与恢复。
 ///
@@ -304,30 +303,6 @@ class BackupService {
     } finally {
       _deleteQuietly(staging);
     }
-  }
-
-  // ==========================================================================
-  // 导入：第二步——安排在下次启动时换库
-  // ==========================================================================
-
-  /// 把导入任务写成「待处理」，返回提示文案。
-  ///
-  /// 为什么不在当前进程里直接换库：
-  /// 数据库已经打开，Windows 上文件被占用根本换不掉；即使换掉了，
-  /// 已经打开的连接指向的是旧 inode，接下来的读写会落到一个"已删除"的文件上。
-  /// 所以换库统一放在下次启动、**连接建立之前**做（见 [PendingImport]）。
-  Future<PendingImport> scheduleImport(
-    ImportPreview preview, {
-    ImportStrategy strategy = ImportStrategy.replace,
-  }) async {
-    final pending = PendingImport.create(
-      archivePath: preview.archivePath,
-      strategy: strategy,
-      stats: preview.manifest.stats,
-      importedAt: DateTime.now().toUtc(),
-    );
-    await pending.write();
-    return pending;
   }
 
   // ==========================================================================
