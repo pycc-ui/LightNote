@@ -1,3 +1,4 @@
+import '../../../core/db/ai_functions.dart';
 import '../../../core/util/app_params.dart';
 
 /// 一条 SQL 的**放行判定**。
@@ -37,7 +38,9 @@ class SqlCheck {
 ///   1. 一次只有一条语句（分号只能出现在结尾）；
 ///   2. 必须以 SELECT / WITH 开头；
 ///   3. 正文（剥掉字符串字面量与注释之后）里不许出现 UPDATE / INSERT /
-///      DELETE / REPLACE INTO 这类写语句，也不许出现 DDL 与 PRAGMA。
+///      DELETE / REPLACE INTO 这类写语句，也不许出现 DDL 与 PRAGMA；
+///   4. **非 read 函数不许和 FROM / JOIN 出现在同一条语句里** —— 那会对每一行
+///      调一次，批量函数还要再乘以批量条数。
 ///
 /// 写操作因此**只能**走 ai_functions 里的函数 —— 它们以 SELECT 开头、
 /// 由 UDF 内部完成写入，正好落在通道里。
@@ -73,6 +76,27 @@ class SqlGuard {
 
   static final _selectOrWith = RegExp(r'^(SELECT|WITH)\b');
 
+  /// 非 read 函数的**调用点**（名字后面跟左括号）。
+  ///
+  /// 名单来自清单的 category（[kAiNonReadFunctions]），不在这里抄一份：
+  /// 抄了就会和 `ai_functions.dart` 分叉，而分叉的表现是「新加的写函数
+  /// 可以嵌在 FROM 里按行调用」—— 那种问题没人会主动去发现。
+  static final _nonReadCall = RegExp(
+    '\\b(${kAiNonReadFunctions.join('|')})\\s*\\(',
+    caseSensitive: false,
+  );
+
+  static final _hasFrom = RegExp(r'\b(FROM|JOIN)\b');
+
+  /// 拒绝理由要写成**能照着改**的样子：模型下一轮要么去掉 FROM，要么改用读函数。
+  static const _writeWithFromReason =
+      '写函数不能出现在带 FROM / JOIN 的查询里：那会对每一行调一次'
+      '（SELECT update_notes_batch(…) FROM notes 会逐行改库，批量函数还要乘以批量条数）。'
+      '写操作一次只作用于参数里点名的那几篇：'
+      'SELECT update_notes_batch(\'[…] JSON 数组 …\')；'
+      '要挑对象就先用读函数查 id，再拿 id 去调写函数。'
+      '读函数（read_preview / stat_note / search_notes …）可以嵌在查询里。';
+
   /// 校验一条 SQL。
   static SqlCheck check(String raw) {
     final sql = raw.trim();
@@ -101,6 +125,16 @@ class SqlGuard {
     }
     if (_replaceInto.hasMatch(upper)) {
       return SqlCheck.reject(_reasonOf('REPLACE INTO'));
+    }
+
+    // 写函数（含 mark_functions）不能嵌进带 FROM / JOIN 的语句：那会**逐行**调一次。
+    //
+    // 这条不是洁癖，是数据事故：`SELECT update_notes_batch(...) FROM notes`
+    // 在有 200 篇笔记的库上会改 200 轮，而 AI 的本意通常只是「改那一篇」。
+    // 读函数不受限制 —— 它们本来就是拿来嵌在查询里的
+    //（SELECT id, read_preview(id, 0, 200) FROM notes 是推荐写法）。
+    if (_nonReadCall.hasMatch(code) && _hasFrom.hasMatch(upper)) {
+      return SqlCheck.reject(_writeWithFromReason);
     }
     return SqlCheck.allow(returnsRows: true);
   }

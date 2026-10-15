@@ -62,6 +62,22 @@ class AiChatRepository {
   Stream<List<AiMessage>> watchMessages(String conversationId) =>
       _db.watchMessages(conversationId);
 
+  /// **当前正在看的会话**（进程内记住，不落库）。
+  ///
+  /// 为什么放内存而不是 `app_kv`：
+  ///   · 要的语义是「冷启动空、页面重建时记住」—— 而「冷启动」就是新进程，
+  ///     这个字段天然为空，正好是要的结果；换成 `app_kv` 反而要多一步
+  ///     「启动时清 key」，那一步漏了就永远清不掉（而且它本来就不是数据）；
+  ///   · 它只是「上次看到哪」，不是笔记内容，不值得一次 IO 加一个要维护的 key。
+  ///
+  /// ⚠️ 它与「会话列表的第一条」**不是一回事**：列表按 `updated_at` 排，
+  /// 排出来的是「最近聊过的」；而用户可能正翻着一条老会话，回来时应该还在那条上。
+  String? currentConversationId;
+
+  /// 按 id 取一条会话（`_bootstrap` 用它校验「记住的那条还在不在」）。
+  Future<AiConversation?> conversationById(String id) =>
+      _db.getConversation(id);
+
   Future<AiConversation> createConversation({
     String model = AiModel.flash,
     String thinkingEffort = 'medium',
@@ -268,6 +284,19 @@ class AiChatRepository {
       await _db.updateAiMessage(row.id, row.content);
     });
 
+    // ---- 预算：用户回答 = 任务还要继续 ----
+    //
+    // 所以预算 +[AgentLimits.roundExtension]（硬上限兜住）。那多半是模型在
+    // "轮数快用完"时问的"要不要继续"，但**不判断问题内容**：
+    //   · 猜问题文本不可靠（是模型自己组织的话）；
+    //   · 用户会回答一个澄清问题，本身就说明他还想让这件事做完。
+    // 用户答"不用了"也不用特殊处理：prompt 要求模型收到否定就直接收尾，
+    // 多给的那点预算是"允许"而不是"要求"，它不会自己用掉。
+    final baseBudget =
+        pending.budget > 0 ? pending.budget : AgentLimits.maxRounds;
+    final budget = (baseBudget + AgentLimits.roundExtension)
+        .clamp(AgentLimits.maxRounds, AgentLimits.maxRoundsHard);
+
     await _drive(
       conversationId: conversationId,
       assistantId: row.id,
@@ -280,6 +309,8 @@ class AiChatRepository {
       // 续写：用户已经看到"（等你回答）"，接下来的输出接在它后面
       append: true,
       asksSoFar: pending.asks,
+      roundsUsed: pending.rounds,
+      roundBudget: budget,
     );
 
     await _db.touchConversation(conversationId);
@@ -305,6 +336,8 @@ class AiChatRepository {
     required String model,
     required bool append,
     int asksSoFar = 0,
+    int roundsUsed = 0,
+    int? roundBudget,
   }) async {
     // ---- 续写起点：**在本次 run 开始时就定死** ----
     //
@@ -356,6 +389,15 @@ class AiChatRepository {
       executor: executor,
     );
 
+    // 「本轮执行记录」：只收**改了笔记**的那些 description（见 ToolResult.mutated）。
+    // 两个用处：用户能翻回去看 AI 到底改了哪些笔记；「继续」时模型知道
+    // 哪些已经做完了，**不要重复做**。
+    final ops = <String>[];
+
+    // 先盖一个「正在生成」的戳：成功时清掉、失败时换成具体原因。
+    // 冷启动还看到它 → 上次是被系统杀掉的（那是唯一能观测到被杀的办法）。
+    await _db.setMessageInterrupt(assistantId, inFlightReason);
+
     final buffer = StringBuffer();
     await for (final event in loop.run(
       systemPrompt: await rebuildPrompt(),
@@ -363,6 +405,10 @@ class AiChatRepository {
       history: history,
       dbHistory: dbHistory,
       asksSoFar: asksSoFar,
+      // 轮数**跨挂起累计**：用户回答之后循环重新跑，不带回来的话
+      // 预算每问一次就重置一次（软上限等于不存在）。
+      roundsUsed: roundsUsed,
+      roundBudget: roundBudget,
     )) {
       switch (event) {
         case AgentText(:final delta):
@@ -372,7 +418,8 @@ class AiChatRepository {
           await writeText(buffer.toString());
 
         case AgentFinished(:final text, :final usage):
-          await writeText(text);
+          await writeText('$text${_opsBlock(ops)}');
+          await _db.setMessageInterrupt(assistantId, null);
           await _log(usage,
               model: model, thinkingEnabled: thinkingEnabled, success: true);
 
@@ -380,7 +427,9 @@ class AiChatRepository {
             :final request,
             :final toolCallId,
             :final asks,
-            :final messages
+            :final messages,
+            :final rounds,
+            :final budget
           ):
           // 挂起：把"等回答"写进**数据库**（不是内存状态），
           // 用户随时回答 —— 哪怕重启 App 之后。
@@ -388,12 +437,14 @@ class AiChatRepository {
           // ⚠️ 消息内容与挂起记录**同一个事务**：分开写的话，
           // 中间崩一次会留下"有挂起记录但没有问题文本"（用户看到空白卡片）
           // 或者"有问题文本但已挂起失效"（点了没反应）。两种都很难查。
-          final said = _joined(base, buffer.toString());
+          final saidBody = _joined(base, buffer.toString());
+          final said = (saidBody.isEmpty ? awaitingPlaceholder : saidBody) +
+              _opsBlock(ops);
           await _db.transaction(() async {
-            await _db.updateAiMessage(
-              assistantId,
-              said.isEmpty ? awaitingPlaceholder : said,
-            );
+            await _db.updateAiMessage(assistantId, said);
+            // 挂起不是"中断"：状态由 pendingAction 表达（界面显示答题卡）。
+            // 不清的话，用户在挂起期间重开 App 会同时看到"未完成"和答题卡。
+            await _db.setMessageInterrupt(assistantId, null);
             await _db.setPendingAction(
               assistantId,
               PendingAsk(
@@ -404,19 +455,33 @@ class AiChatRepository {
                 // 用错的话用户回答完就没法接着跑。
                 messages: messages,
                 asks: asks,
+                // 轮数与预算一起存：恢复时要把它们带回循环（见 answerAsk）
+                rounds: rounds,
+                budget: budget,
               ).encode(),
             );
           });
 
-        case AgentFailed(:final message, :final usage):
+        case AgentFailed(:final message, :final usage, :final code):
           await writeText(
-            buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message',
+            (buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message') +
+                _opsBlock(ops),
           );
+          // 记下"为什么没写完"：界面据此显示「未完成 + 继续」。
+          // 没有错误码的失败（例如轮数用尽）也要留痕 —— 否则用户看到的
+          // 是一条正常的回答加上一句⚠️，而按钮不会出现。
+          await _db.setMessageInterrupt(
+              assistantId, code ?? interruptUnknownReason);
           await _log(usage,
               model: model, thinkingEnabled: thinkingEnabled, success: false);
 
+        case AgentToolDone(:final description, :final mutated):
+          // 只有**改了笔记**的调用进执行记录：读函数每轮都会调，攒起来是噪音。
+          if (mutated && description != null && description.trim().isNotEmpty) {
+            ops.add(description.trim());
+          }
+
         case AgentToolStarted():
-        case AgentToolDone():
           break; // 工具活动不写进正文（进度由 UI 的 LogBar 承担）
       }
     }
@@ -429,13 +494,40 @@ class AiChatRepository {
   /// "（等你回答）这几个字永远粘在回答开头"。
   static const awaitingPlaceholder = '（等你回答）';
 
+  /// 「正在生成」的中断标记（`ai_messages.interrupt_reason`）。
+  ///
+  /// 每轮开始前写上、成功/挂起时清掉。于是**冷启动还看到它**只有一种解释：
+  /// 上次生成被系统杀掉或 App 崩了 —— 那是我们唯一能观测到"进程没了"的办法
+  /// （`foreground_killed` 那种事没有任何回调会告诉我们）。
+  static const inFlightReason = 'in_flight';
+
+  /// 失败但**没有错误码**时用的兜底原因（例如轮数用尽）。
+  static const interruptUnknownReason = 'interrupted';
+
+  /// 清掉某条消息的中断标记（界面上点「知道了」）。
+  Future<void> clearInterrupt(String messageId) =>
+      _db.setMessageInterrupt(messageId, null);
+
+  /// 「本轮执行记录」那段文本。没有改动过笔记时返回空串。
+  ///
+  /// 追加在助手消息**末尾**，而不是单独一列：
+  ///   · 用户翻回去就能看见 AI 到底改了哪些笔记（现在只有底部提示条一闪而过）；
+  ///   · 它是助手消息的一部分，所以「继续」时模型天然看得到——
+  ///     这正是"别把已经做过的再做一遍"的依据。
+  static String _opsBlock(List<String> ops) {
+    if (ops.isEmpty) return '';
+    return '\n\n---\n*本轮执行：${ops.join('；')}*';
+  }
+
   /// 续写模式下，把"行里已有的内容"翻译成**续写起点**。
   ///
   /// 只有一种情况要当空：行里还是 [awaitingPlaceholder]（AI 只是提了个问题、
   /// 还没说任何话）。那时续写的输出应当**顶掉**占位符，而不是接在它后面 ——
   /// 否则回答会以"（等你回答）"开头。
+  /// 用 `startsWith` 而不是 `==`：挂起时我们还会在占位符后面追加一段
+  /// 「本轮执行记录」，那种行同样要当空（否则回答会以"（等你回答）"开头）。
   static String _baseForAppend(String rowContent) =>
-      rowContent == awaitingPlaceholder ? '' : rowContent;
+      rowContent.startsWith(awaitingPlaceholder) ? '' : rowContent;
 
   /// 「续写起点 + 本次已产生的文本」。两段之间空一行（与工具轮的垫话同一套观感）。
   static String _joined(String base, String text) {

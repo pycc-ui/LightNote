@@ -1,4 +1,4 @@
-// AI 的 SQL 通道：安全校验（SqlGuard）与 25 个 UDF 的行为。
+// AI 的 SQL 通道：安全校验（SqlGuard）与 26 个 UDF 的行为。
 //
 // 分两块测，因为它们的失败方式完全不同：
 //   · SqlGuard 是**纯逻辑**，不连库，逐条喂样例就行；
@@ -128,7 +128,13 @@ void main() {
       const ok = [
         'SELECT 1',
         'SELECT * FROM notes WHERE deleted_at IS NULL',
+        // 写函数可以独立调用（参数里点名改哪几篇）
         "SELECT update_notes_batch('[{\"id\":\"n1\"}]')",
+        // **读**函数可以嵌在带 FROM 的查询里 —— 这正是推荐写法
+        'SELECT id, read_preview(id, 0, 200) AS p FROM notes WHERE deleted_at IS NULL',
+        'SELECT n.id, stat_note(n.id) AS meta FROM notes n',
+        // 参数（字符串字面量）里出现 from / join 是正常正文，剥掉字面量后不该命中
+        "SELECT update_notes_batch('[{\"id\":\"n1\",\"title\":\"from join 测试\"}]')",
         'WITH x AS (SELECT 1 AS a) SELECT * FROM x',
         'SELECT 1;',
         // 参数里出现 delete / update 是**正常正文**：
@@ -163,8 +169,32 @@ void main() {
       }
     });
 
+    test('拒绝：写函数 + FROM / JOIN（那会按行调一次）', () {
+      const bad = [
+        // 最典型的：本意是「改那一篇」，实际会按 notes 的行数改 N 遍
+        "SELECT update_notes_batch('[{\"id\":\"n1\"}]') FROM notes",
+        "SELECT n.id, rename_note(n.id, 'x') FROM notes n",
+        // 批量函数还要再乘以批量条数，危害更大
+        "SELECT update_notes_batch('[{\"id\":\"n1\"}]') FROM notes n "
+            'JOIN notebooks b ON b.id = n.notebook_id',
+        // system 类（mark_functions）同样不能嵌 —— 它在 kAiKvFunctions 里，
+        // 只查 kAiWriteFunctions 会漏掉它
+        "SELECT mark_functions('[\"search_notes\"]') FROM notes",
+      ];
+      for (final sql in bad) {
+        final r = SqlGuard.check(sql);
+        expect(r.ok, isFalse, reason: sql);
+        expect(r.reason, contains('FROM'), reason: sql);
+      }
+    });
+
     test('拒绝的理由要能教模型改写法', () {
       expect(SqlGuard.check('DELETE FROM notes').reason, contains('ai_functions'));
+      expect(
+        SqlGuard.check("SELECT rename_note(id, 'x') FROM notes").reason,
+        contains('读函数'),
+        reason: '要顺带告诉它读函数可以嵌，不然下一轮可能干脆不敢用查询',
+      );
     });
   });
 
@@ -429,7 +459,7 @@ void main() {
     });
   });
 
-  group('UDF：系统（mark_functions）', () {
+  group('UDF：系统与信号（mark_functions / finish）', () {
     /// app_kv 里现在存着哪几个名字（按同一个解析函数读回来）。
     List<String> pinned() {
       final rows = db.select('SELECT value FROM app_kv WHERE key = ?',
@@ -446,6 +476,27 @@ void main() {
       expect(r['description'], contains('2'),
           reason: 'description 要带实际条数（AI 靠它确认标记生效）');
       expect((r['data'] as Map)['added'], ['search_notes', 'read_preview']);
+    });
+
+    test('finish 只是信号：不改任何数据，但带 finished 标记', () {
+      final r = json("SELECT finish('已把《项目A》的风险段落改好')");
+
+      expect(r['ok'], true);
+      expect(r['description'], '已把《项目A》的风险段落改好',
+          reason: 'description 会显示在操作记录里，也是继续生成时看到的那句');
+      expect((r['data'] as Map)['finished'], true,
+          reason: 'AgentLoop 认的就是这一格（见 tool_types.dart 的 ToolResult.raw）');
+
+      // 「什么都不改」是它的定义：笔记与 app_kv 都不该动
+      expect(db.select("SELECT content FROM notes WHERE id = 'n1'").single['content'],
+          body);
+      expect(db.select('SELECT COUNT(*) AS n FROM app_kv').single['n'], 0);
+    });
+
+    test('finish 不带 reason 也能用（reason 是可选的）', () {
+      final r = json('SELECT finish()');
+      expect(r['ok'], true);
+      expect((r['data'] as Map)['finished'], true);
     });
 
     test('只增不减：再标一个，之前的还在', () {
@@ -530,8 +581,8 @@ void main() {
   });
 
   group('清单与注册必须对齐', () {
-    test('25 个函数名都能被 SQLite 找到', () {
-      expect(kAiFunctions.length, 25);
+    test('26 个函数名都能被 SQLite 找到', () {
+      expect(kAiFunctions.length, 26,
       var message = '';
       for (final f in kAiFunctions) {
         try {

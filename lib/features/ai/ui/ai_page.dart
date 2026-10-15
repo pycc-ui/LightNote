@@ -64,16 +64,26 @@ class _AiPageState extends State<AiPage> {
 
     if (!mounted) return;
 
-    final conversations = await repo.watchConversations().first;
-    if (!mounted) return;
+    // 回到**上次看的那条会话**，而不是「最近聊过的第一条」。
+    //
+    // 这两件事不一样：会话列表按 `updated_at` 排，第一条是最近聊过的；
+    // 而用户上次可能在翻一条老会话。记住的是「上次看到哪」，所以它存在仓储里
+    //（进程内），见 [AiChatRepository.currentConversationId]。
+    //
+    // 冷启动（新进程）这个值为空 → 页面停在「新会话」的空状态；
+    // 页面重建（返回再进）还是同一个进程 → 回到上次那条。
+    // 空状态**不建行**：行由第一次发送时创建，见 [_newConversation]。
+    final remembered = repo.currentConversationId;
+    if (remembered == null) return;
 
-    if (conversations.isEmpty) {
-      // 一条会话都没有（全新安装，或全被删了）：停在"新会话"的空状态。
-      // 不建行 —— 行由第一次发送时创建，见 [_newConversation]。
+    final c = await repo.conversationById(remembered);
+    if (!mounted) return;
+    if (c == null) {
+      // 那条会话已经被删了（可能在会话记录页删的）→ 忘掉它，停在空状态。
+      // 不在这里做的话，下次进来还会拿着一个不存在的 id 去查。
+      repo.currentConversationId = null;
       return;
     }
-
-    final c = conversations.first;
     _activate(
       conversationId: c.id,
       model: AiModel.parse(c.workspaceScope),
@@ -92,6 +102,9 @@ class _AiPageState extends State<AiPage> {
     required String model,
     required String effort,
   }) {
+    // 记住「当前看的是哪条」：切到别的会话、以及点「新建会话」（传 null）
+    // 都在这里过一遍，所以这里写一次就够，不必每个调用点各写一遍。
+    context.read<AiChatRepository>().currentConversationId = conversationId;
     setState(() {
       _conversationId = conversationId;
       _model = model;
@@ -108,13 +121,18 @@ class _AiPageState extends State<AiPage> {
   Future<String> _ensureConversation() async {
     final id = _conversationId;
     if (id != null) return id;
-    final conv = await context.read<AiChatRepository>().createConversation(
+    // 先拿引用再 await：`context.read` 不该在 await 之后用（页面可能已经没了）
+    final repo = context.read<AiChatRepository>();
+    final conv = await repo.createConversation(
           // 模型必须**在这里一起落库**：`send` / `answerAsk` 都从会话记录里
           // 读模型（那是唯一真相），不传的话"发第一句话之前选的模型"
           // 会被静默丢掉。
           model: _model,
           thinkingEffort: _effort,
         );
+    // 记进仓储用的是**仓储自己的引用**，不看页面是否还在：
+    // 用户发完第一句就退出、再进来时，应该回到这条会话（而不是空状态）。
+    repo.currentConversationId = conv.id;
     if (mounted) setState(() => _conversationId = conv.id);
     return conv.id;
   }
@@ -208,6 +226,11 @@ class _AiPageState extends State<AiPage> {
                       return _MessageList(
                         messages: messages,
                         controller: _scrollController,
+                        // 「正在生成」时最后那条不该显示成"未完成"——
+                        // 它只是还没写完（气泡里已经有转圈了）。
+                        busy: _sending,
+                        onContinue: _continueInterrupted,
+                        onDismiss: _dismissInterrupted,
                       );
                     },
                   ),
@@ -249,7 +272,8 @@ class _AiPageState extends State<AiPage> {
   /// 而是**不可能发生**。
   ///
   /// 两个连带好处：会话列表里没有空条目（否则最新那条永远是刚点出来的空会话）；
-  /// 重开 App 看到的是上次真正聊过的会话，而不是一个空壳。
+  /// 重开 App 停在空状态、返回再进回到上次看的那条（由
+  /// [AiChatRepository.currentConversationId] 记住，见 [_bootstrap]）。
   ///
   /// 输入框里已经打的字**不清**：切会话（包括切到旧的）都不该吃掉用户正在写的东西。
   void _newConversation() {
@@ -482,6 +506,12 @@ class _AiPageState extends State<AiPage> {
     if (ok != true) return;
 
     final n = await repo.deleteConversations(ids);
+    // 「记住的那条」被删了就一起清掉。不能只靠上面那个 `ids.contains(_conversationId)`：
+    // 用户可能正停在空状态（_conversationId == null），而删掉的正是他上次看的那条。
+    // 不清的话，下次进页面会拿一个不存在的 id 去查（虽然会兜住，但那是一次白查）。
+    if (ids.contains(repo.currentConversationId)) {
+      repo.currentConversationId = null;
+    }
     if (sheetCtx.mounted) Navigator.pop(sheetCtx);
 
     // 删掉的里面有**当前**会话 → 回到"新会话"的空状态
@@ -595,6 +625,30 @@ class _AiPageState extends State<AiPage> {
     }
   }
 
+  /// 「继续」：把上次被打断的那一轮接着做完。
+  ///
+  /// 实现上就是**把一句话放进输入框再发出去** —— 复用 `_send` 的整条路径
+  /// （先答待答的问题、失败有提示、发完滚到底）。这样「继续」没有自己的分支，
+  /// 而这句指令用户也看得见：他有权知道 App 替他发了什么。
+  ///
+  /// ⚠️ 强调「不要重复做」：工具往来**不落库**，模型只看得见自己写过的那段文字，
+  /// 以及消息末尾那段「本轮执行记录」—— 后者正是为了这件事才写进去的
+  ///（见 AiChatRepository 的 _opsBlock）。
+  Future<void> _continueInterrupted(String reasonLabel) async {
+    _inputController.text = '（继续）上次的回答被中断了（$reasonLabel），请接着上面的内容继续。'
+        '**已经执行过的操作不要重复做**（上一条消息末尾有执行记录）。';
+    await _send();
+  }
+
+  /// 「知道了」：把这条的中断标记清掉，不再提示。
+  ///
+  /// 只清标记、不动内容：内容是真实产出（可能只写了一半），
+  /// 删掉才是真的丢东西。
+  Future<void> _dismissInterrupted(String messageId) async {
+    final repo = context.read<AiChatRepository>();
+    await repo.clearInterrupt(messageId);
+  }
+
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if (text.isEmpty || _sending) return;
@@ -687,10 +741,25 @@ class _LogoView extends StatelessWidget {
 }
 
 class _MessageList extends StatelessWidget {
-  const _MessageList({required this.messages, required this.controller});
+  const _MessageList({
+    required this.messages,
+    required this.controller,
+    required this.busy,
+    required this.onContinue,
+    required this.onDismiss,
+  });
 
   final List<AiMessage> messages;
   final ScrollController controller;
+
+  /// 正在生成（最后一条不算"未完成"）。
+  final bool busy;
+
+  /// 「继续」：接着上次被打断的那一轮往下做。
+  final void Function(String reasonLabel) onContinue;
+
+  /// 「知道了」：把这条的中断标记清掉（不再提示）。
+  final Future<void> Function(String messageId) onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -704,7 +773,15 @@ class _MessageList extends StatelessWidget {
         final theme = Theme.of(context);
         final content = m.content.trim();
 
-        return Align(
+        // ---- 这条回答写完了没有 ----
+        //
+        // `interrupt_reason != null` 表示"没写完"，但**正在生成的那条**
+        // 也是这个值（每轮开始就会写上 in_flight）—— 所以要看 busy：
+        // 真正在跑的最后一条不算未完成，它就是还没写完。
+        final generating = busy && i == messages.length - 1;
+        final interrupted = !isUser && m.interruptReason != null && !generating;
+
+        final bubble = Align(
           alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
           child: Container(
             margin: const EdgeInsets.only(bottom: AppSpacing.sm),
@@ -746,7 +823,85 @@ class _MessageList extends StatelessWidget {
                     : MarkdownView(content),
           ),
         );
+
+        if (!interrupted) return bubble;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            bubble,
+            _InterruptedBar(
+              reason: m.interruptReason,
+              onContinue: onContinue,
+              onDismiss: () => onDismiss(m.id),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+          ],
+        );
       },
+    );
+  }
+}
+
+/// 「这条回答没写完」的提示条。
+///
+/// 内容**并没有丢**（每个 chunk 都落库了）—— 所以这里不是"重试"，而是"接着做"。
+/// 两种情况下会出现：
+///   · 网络 / 超时 / 限流导致这一轮失败（`interrupt_reason` 是错误码）；
+///   · App 被系统杀掉或崩了：下次冷启动时残留的 `in_flight` 就是这个意思。
+class _InterruptedBar extends StatelessWidget {
+  const _InterruptedBar({
+    required this.reason,
+    required this.onContinue,
+    required this.onDismiss,
+  });
+
+  final String? reason;
+  final void Function(String reasonLabel) onContinue;
+  final VoidCallback onDismiss;
+
+  /// 错误码 → 人话。认不出来就笼统说"没写完" —— 宁可含糊，也别编一个原因。
+  static String labelOf(String? code) => switch (code) {
+        'network' => '网络断开',
+        'timeout' => '等待超时',
+        'rate_limited' => '被限流',
+        'server_error' => '服务端错误',
+        'unauthorized' => 'API Key 无效',
+        'insufficient_balance' => '余额不足',
+        'cancelled' => '已取消',
+        'rounds' => '轮数到上限',
+        'in_flight' => 'App 被系统中断',
+        _ => '没写完',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = labelOf(reason);
+    return Padding(
+      padding: const EdgeInsets.only(left: AppSpacing.xs, top: AppSpacing.xs),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.error_outline,
+              size: 16, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: AppSpacing.xs),
+          Flexible(
+            child: Text(
+              '上次生成中断（$label）',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ),
+          TextButton(
+            onPressed: () => onContinue(label),
+            child: const Text('继续'),
+          ),
+          TextButton(
+            onPressed: onDismiss,
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
     );
   }
 }

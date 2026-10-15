@@ -75,12 +75,14 @@ class ToolExecutor {
 
     try {
       final rows = await _db.customSelect(query).get();
-      _notifyIfWrite(query);
+      // 顺手拿到「这次有没有改笔记数据」：判定本来就在做（见 _notifyIfWrite），
+      // 结果还要往上传，供上层攒「本轮执行记录」（ToolResult.mutated）。
+      final mutated = _notifyIfWrite(query);
       // UDF 的返回值**本身就是最终形状**：`SELECT func(...)` 只回一行一列，
       // 那格是一段 `{ok, description, data}` JSON —— 直接采纳，别套进 rows 里
       //（套了就变成 AI 看到 `[{ "func(...)": "{\"ok\":…}" }]`，多一层解析）。
       final udf = _udfResultOf(rows);
-      if (udf != null) return ToolResult.raw(udf);
+      if (udf != null) return ToolResult.raw(udf, mutated: mutated);
       return ToolResult.success(_pack(rows));
     } catch (e) {
       // 把 SQLite 的报错原样交给模型：`no such function: xxx` /
@@ -156,7 +158,8 @@ class ToolExecutor {
   ///
   /// 两类分开：改笔记的函数通知三张笔记表；`mark_functions` 只动 `app_kv`
   /// （它改的是"加载哪几个函数详情"，与笔记无关，通知笔记表是白刷）。
-  void _notifyIfWrite(String sql) {
+  /// 返回**这次 SQL 有没有改笔记数据**（`kAiWriteFunctions` 里出现过名字）。
+  bool _notifyIfWrite(String sql) {
     final lower = sql.toLowerCase();
     bool hit(Set<String> names) {
       for (final name in names) {
@@ -173,8 +176,11 @@ class ToolExecutor {
       ],
       if (hit(kAiKvFunctions)) const TableUpdate('app_kv'),
     };
-    if (updates.isEmpty) return;
+    if (updates.isEmpty) return false;
     _db.notifyUpdates(updates);
+    // 只报「改了笔记」：`mark_functions` 也返回 true 的话，每轮都会往消息里
+    // 记一条「标记了几个函数」—— 那是噪音，而且与「改了哪些笔记」无关。
+    return hit(kAiWriteFunctions);
   }
 
   // ==========================================================================

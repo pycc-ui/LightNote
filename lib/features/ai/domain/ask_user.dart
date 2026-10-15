@@ -71,6 +71,8 @@ class PendingAsk {
     required this.request,
     this.messages = const [],
     this.asks = 1,
+    this.rounds = 0,
+    this.budget = 0,
   });
 
   /// 要回灌结果的那次调用（`role: tool` 必须带它）
@@ -87,10 +89,20 @@ class PendingAsk {
   /// 循环重新跑。只在新循环里从 0 数的话上限永远到不了，用户会被反复问。
   final int asks;
 
+  /// 提问那一刻已经用掉的**工具轮数**，以及那次运行的总预算。
+  ///
+  /// 为什么要存：用户回答之后循环是**重新跑**的，不把这两个数带回去，
+  /// 预算就从头开始 —— 软上限等于失效（可以无限问、无限续）。
+  /// 老记录里没有这两个字段，读出来是 0；0 按"不知道"处理（见 answerAsk）。
+  final int rounds;
+  final int budget;
+
   Map<String, Object?> toJson() => {
         'kind': 'askUser',
         'toolCallId': toolCallId,
         'asks': asks,
+        'rounds': rounds,
+        'budget': budget,
         'request': {
           'question': request.question,
           'type': request.type.name,
@@ -193,6 +205,9 @@ class PendingAsk {
         ),
         messages: messages,
         asks: (v['asks'] is int ? v['asks'] as int : 1).clamp(1, 99),
+        // 老记录没有这两个字段 → 0（"不知道"，由调用方兜底）
+        rounds: v['rounds'] is int ? v['rounds'] as int : 0,
+        budget: v['budget'] is int ? v['budget'] as int : 0,
       );
     } catch (_) {
       return null;

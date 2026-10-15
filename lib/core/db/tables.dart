@@ -138,7 +138,22 @@ class AiMessages extends Table {
 
   /// 用于「操作前预览变更」：AI 提议的写操作以 JSON 形式暂存，
   /// 用户确认后才执行。null 表示纯聊天消息。
+  ///
+  /// v13 起它只承载一种东西：`askUser` 的**持久化挂起**（见 ask_user.dart）。
   TextColumn get pendingAction => text().nullable()();
+
+  /// 这条回答**为什么没写完**（v14 新增）。null = 正常写完 / 还在写。
+  ///
+  /// 取值直接用 DeepSeek 客户端的错误码（`network` / `timeout` / `rate_limited` /
+  /// `cancelled` / …）外加两个自制值：
+  ///   · `in_flight`：**正在生成**。写在每一轮开始前、成功时清掉 ——
+  ///     所以下次**冷启动**还看到它，就说明上次是被系统杀掉的（这是唯一
+  ///     能观测到"进程被杀"的办法，`foreground_killed` 那种事观测不到）；
+  ///   · `rounds`：轮数预算用尽被强行结束。
+  ///
+  /// 内容本身**一直都在**（每个 chunk 都落库了）—— 这一列只回答"写完了没有"，
+  /// 界面据此显示「未完成 + 继续」。
+  TextColumn get interruptReason => text().nullable()();
 
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
   /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。

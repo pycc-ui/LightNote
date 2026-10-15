@@ -50,7 +50,7 @@ Database? _udfDb;
 
 const _uuid = Uuid();
 
-/// 把 25 个函数注册到一条连接上。**开库时调用一次**（见 AppDatabase 的 _openConnection）。
+/// 把 26 个函数注册到一条连接上。**开库时调用一次**（见 AppDatabase 的 _openConnection）。
 ///
 /// ⚠️ 这个函数会被 drift 送到**背景 isolate** 里执行，所以它必须是顶层函数，
 /// 不能写成闭包：闭包捕获的对象在 Dart 里不允许跨 isolate 传。
@@ -92,6 +92,7 @@ const _functions = <String, ScalarFunction>{
   'delete_notebook': _deleteNotebook,
   'delete_notes_batch': _deleteNotesBatch,
   'mark_functions': _markFunctions,
+  'finish': _finish,
 };
 
 // ============================================================================
@@ -1286,4 +1287,35 @@ List<String> _readPinnedFunctions(Database db) {
   );
   if (rows.isEmpty) return const [];
   return parsePinnedFunctions(rows.first['value'] as String?);
+}
+
+// ============================================================================
+// 信号（1 个）
+// ============================================================================
+
+/// `finish(reason)`：**声明完成**的信号函数 —— **不改任何数据**。
+///
+/// ## 为什么需要一个"什么都没做"的函数
+///
+/// `AgentLoop` 原来的终止条件是「这一轮没提工具」。那只能说明模型**没提工具**，
+/// 说明不了「任务做完了」—— 它可能只说了一句「我先看看」就停了，
+/// 而这一轮就此结束，用户拿到一句没头没尾的话。
+///
+/// 有了这个信号，「完成」第一次变成**机器可读**的一件事，而且成本是 0：
+/// 模型是「边写结论边调 finish」的（同一轮里），循环收到就直接结束，
+/// **不会再发一轮请求**。（若按普通工具回灌结果，每个任务都要多跑一轮 —— 
+/// 每次「读完笔记给结论」都多烧一次调用，那是纯浪费。）
+///
+/// ⚠️ 返回里的 `finished: true` 是**三处共用的约定**：
+///   · 这里（函数返回值）、
+///   · `ToolResult.raw()`（认这一格，置 `ToolResult.finished`）、
+///   · `AgentLoop`（据 `finished` 收尾）。
+/// 改名要三处一起改 —— 这是本文件里唯一一个"返回值参与控制流"的函数。
+Object? _finish(SqliteArguments c) {
+  final reason = (_str(c, 0) ?? '').trim();
+  // 不碰数据库（连连接都不需要）：它只是把"做完了"这件事说出来。
+  return _ok(
+    {'finished': true, 'reason': reason},
+    description: reason.isEmpty ? '完成（未说明做了什么）' : reason,
+  );
 }

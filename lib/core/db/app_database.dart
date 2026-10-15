@@ -317,6 +317,15 @@ class AppDatabase extends _$AppDatabase {
             await m.createTable(aiFunctions);
           }
 
+          // ---- 13 -> 14：ai_messages 加 interrupt_reason ----
+          if (from < 14) {
+            // 纯新增列（不动数据、不重建表）—— 与 v11 那次 workspace_scope
+            // 是同一类迁移，风险最低。老消息读出来是 NULL = 正常完成。
+            await customStatement(
+              'ALTER TABLE ai_messages ADD COLUMN interrupt_reason TEXT NULL',
+            );
+          }
+
           // 升级路径的索引统一在这里补。
           //
           // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
@@ -336,7 +345,7 @@ class AppDatabase extends _$AppDatabase {
 
           // AI 操作层的两件启动活（见 core/db/ai_udfs.dart 与 ai_functions.dart）：
           //   · 触发器 —— 正文一变就清切片
-          //   · 函数清单 —— 25 条种子数据，按版本号对齐
+          //   · 函数清单 —— 26 条种子数据，按版本号对齐
           //
           // 放在 beforeOpen 而不是 onCreate/onUpgrade：这两件事都是**每次打开
           // 对齐一次**的幂等动作，「新库建了、老库漏了」这种分叉在这里不会发生。
@@ -968,6 +977,17 @@ class AppDatabase extends _$AppDatabase {
 
   Future<void> insertAiMessage(AiMessagesCompanion entry) {
     return into(aiMessages).insert(entry);
+  }
+
+  /// 标记 / 清除一条助手消息的**中断原因**（null = 正常写完）。
+  ///
+  /// 单独一个方法而不是并进 [updateAiMessage]：正文的写入路径是"每个 chunk
+  /// 都写一次"（还要保证幂等替换），而中断状态只在几个关键时刻变一次 ——
+  /// 混在一起会让"写正文"顺手把状态抹掉（或反过来）。
+  Future<void> setMessageInterrupt(String id, String? reason) {
+    return (update(aiMessages)..where((t) => t.id.equals(id))).write(
+      AiMessagesCompanion(interruptReason: Value(reason)),
+    );
   }
 
   Future<void> updateAiMessage(String id, String content) {

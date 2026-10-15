@@ -159,7 +159,7 @@ abstract final class SearchLimits {
 }
 
 // ============================================================================
-// AI 的 SQL 通道（`sql` 工具 + 25 个 UDF）的上限
+// AI 的 SQL 通道（`sql` 工具 + 26 个 UDF）的上限
 // ============================================================================
 //
 // 这批数字有两个读法，别混：
@@ -233,7 +233,20 @@ abstract final class SqlLimits {
 
 abstract final class AgentLimits {
   /// 一次用户输入最多允许几轮工具往返。
+  /// **软上限**：一次用户输入的默认工具往返预算。也用作"每次续多少轮"。
+  ///
+  /// 到最后一轮之前模型会收到一条提醒（走 system prompt 尾部），让它自己决定：
+  /// 没做完就 `askUser` 问用户要不要继续，做完了就 `finish`。
   static const maxRounds = 15;
+
+  /// 用户同意"继续"时，预算一次加多少轮。
+  static const roundExtension = 15;
+
+  /// **硬上限**：无论用户点多少次"继续"都不会超过它。
+  ///
+  /// 它防的不是模型，而是"用户手滑连点继续"和"模型每次都问一遍" ——
+  /// 每一次续都是真金白银（每轮都会重发历史）。
+  static const maxRoundsHard = 45;
 
   /// 一轮用户输入里 `askUser` 最多问几次（跨恢复累计）。
   static const maxAsksPerTurn = 5;

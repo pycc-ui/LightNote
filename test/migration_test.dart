@@ -515,7 +515,7 @@ void main() {
     // ⚠️ 这一句是**故意的硬编码**：加迁移时它必须跟着改。
     // 上面那句是"等于常量"（永远成立、抓不到忘改版本号）；
     // 这句才有用 —— 它逼你在改 `kCurrentSchemaVersion` 时确认这里。
-    expect(kCurrentSchemaVersion, 13);
+    expect(kCurrentSchemaVersion, 14);
   });
 
   test('v13：ai_capabilities 换成 ai_functions，并灌入函数清单', () async {
@@ -542,8 +542,9 @@ void main() {
         .customSelect('SELECT COUNT(*) AS n FROM ai_functions')
         .getSingle();
     expect(count.read<int>('n'), kAiFunctions.length);
-    expect(kAiFunctions.length, 25,
-        reason: '25 个函数是 v4 设计里定死的数（11 读 + 3 建 + 8 改 + 2 删 + 1 系统）；'
+    expect(kAiFunctions.length, 26,
+        reason: '26 个函数是 v5 设计里定死的数'
+            '（11 读 + 3 建 + 8 改 + 2 删 + 1 系统 + 1 信号）；'
             '改这张表要同步改文档与测试');
 
     // 触发器也在 beforeOpen 里建（清切片那条，见 core/db/ai_udfs.dart）
@@ -555,6 +556,22 @@ void main() {
       contains('ai_notes_content_changed'),
       reason: '正文一变就要清切片，触发器没建出来的话偏移会静默失效',
     );
+  });
+
+  test('v14：ai_messages 多出 interrupt_reason（断线续传靠它）', () async {
+    final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    seedV1([
+      {'id': 'n1', 'folder_id': null, 'is_inbox': 1, 'ts': t, 'title': 'A'},
+    ]);
+
+    final db = openCurrent();
+    addTearDown(db.close);
+    await db.allActiveNotes(); // 触发迁移
+
+    final cols = await db.customSelect('PRAGMA table_info(ai_messages)').get();
+    final names = cols.map((r) => r.read<String>('name')).toSet();
+    expect(names.contains('interrupt_reason'), isTrue,
+        reason: 'v14 要给 ai_messages 加这一列；没有它，界面上就分不出「写完了」和「被打断了」');
   });
 
   test('v1 老库升到 v10 后，note_chunks 表被建出来且可用', () async {

@@ -5,7 +5,7 @@
 // 查一次 `SELECT name, signature FROM ai_functions` 拿到目录，再用
 // `mark_functions` 把常用的几个标记为常驻（见本文件末尾与 ai_udfs.dart）。于是：
 //
-//   · system prompt 里只写「去查 ai_functions」，不用把 25 个函数抄一遍；
+//   · system prompt 里只写「去查 ai_functions」，不用把 26 个函数抄一遍；
 //   · **加一个函数 = 这里加一条 + 在 ai_udfs.dart 里注册一次**，prompt 一个字都不用改。
 //
 // 为什么清单在 Dart 里而不是一段 SQL 里：它要和 `createFunction` 的注册名对齐。
@@ -34,7 +34,11 @@ class AiFunctionSpec {
     this.example,
   });
 
-  /// read / create / modify / delete / system
+  /// read / create / modify / delete / system / meta
+  ///
+  /// 后两类都不是「读写笔记」：`system` 改的是 app_kv（`mark_functions` 钉住函数详情），
+  /// `meta` 什么都不改、只给 App 一个信号（`finish`）。分开是因为执行器要按它决定
+  /// 「通知哪几张表」——把 `finish` 归进 system 会让它白通知一次 app_kv。
   final String category;
   final String name;
   final String signature;
@@ -45,16 +49,20 @@ class AiFunctionSpec {
 /// 清单版本。**改 kAiFunctions 就要 +1**，否则已装 App 的库不会跟着更新。
 ///
 /// v4（=3）：加了 `mark_functions`（第 25 个）。
-const kAiFunctionsVersion = 3;
+/// v5（=4）：加了 `finish`（第 26 个，信号类）—— 让「任务做完了」变成机器可读的一件事。
+const kAiFunctionsVersion = 4;
 
-/// 25 个函数。顺序按「读 → 建 → 改 → 删 → 系统」排，与《AI 操作数据库设计》一致。
+/// 26 个函数。顺序按「读 → 建 → 改 → 删 → 系统 → 信号」排，与《AI 操作数据库设计》一致。
 ///
 /// v3 的重要变化：**有批量版的单次函数全部砍掉**（create_note / append_to_note /
 /// replace_unique / delete_unique / move_note / delete_note）——单次也走批量函数
 /// （数组放一个元素）。所以从 30 变成 24，AI 只学一种写法。
 ///
-/// v4（本版）：加回"系统"类里的 `mark_functions`，25 个 —— 它不读写笔记，
+/// v4：加回"系统"类里的 `mark_functions`，25 个 —— 它不读写笔记，
 /// 而是让 AI **自己决定哪些函数的详情常驻**（见文件末尾的说明）。
+
+/// v5（本版）：加第 26 个 —— `finish`（信号类）。**不改任何数据**，
+/// 只告诉 App「这一轮就是最终答复，可以收尾了」。
 const kAiFunctions = <AiFunctionSpec>[
   // ---------------------------------------------------------------- 读（11）
   AiFunctionSpec(
@@ -251,6 +259,19 @@ const kAiFunctions = <AiFunctionSpec>[
         '需要的函数已经在「已加载函数详情」里时**不要重复标记**。',
     example: "SELECT mark_functions('[\"search_notes\",\"read_preview\"]');",
   ),
+
+  // -------------------------------------------------------------- 信号（1）
+  AiFunctionSpec(
+    name: 'finish',
+    category: 'meta',
+    signature: 'finish(reason)',
+    description: '**声明这一轮的任务已经做完**。不改任何数据，只给 App 一个信号：'
+        '结论已经给出，可以收尾（App 收到就不再跑下一轮）。reason 一句话说明做完了什么。'
+        '给最终回答时**顺手调它**——文字照常写在消息里，同一轮加上 finish(…) 即可；'
+        '任务没做完就别调：要么继续调函数，要么用 askUser 问清楚。'
+        '**不要**只说一句「我先看看 / 接下来我会…」就停下。',
+    example: "SELECT finish('已把《项目A》的风险段落改成「风险已识别」');",
+  ),
 ];
 
 /// 会改**笔记数据**的函数名（category 是 create / modify / delete）。
@@ -269,6 +290,19 @@ final kAiWriteFunctions = <String>{
 final kAiKvFunctions = <String>{
   for (final f in kAiFunctions)
     if (f.category == 'system') f.name,
+};
+
+/// **所有非 read 函数**（写笔记的 + 只动 app_kv 的）。
+///
+/// 第三个集合的理由：上面两个集合回答的是「这次改动该通知哪几张表」，
+/// 而 `SqlGuard` 要回答的是另一个问题 —— 「这个函数能不能嵌在带 FROM 的查询里」。
+/// 答案对**所有**非 read 函数都一样：不能。所以别拿上面两个集合去凑
+///（`mark_functions` 在 system 里，只取 `kAiWriteFunctions` 会漏掉它），
+/// 也别在 Guard 里抄一份函数名清单 —— 抄了就会和这张表分叉，
+/// 而分叉的表现是「新加的写函数可以按行调用」，没人会发现。
+final kAiNonReadFunctions = <String>{
+  for (final f in kAiFunctions)
+    if (f.category != 'read') f.name,
 };
 
 // ============================================================================

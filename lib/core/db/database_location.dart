@@ -49,7 +49,10 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///   13 `ai_capabilities`（v1 遗留的死表）换成 `ai_functions`：
 ///      AI 的操作语言从「自定义命令脚本」改成 **SQL + UDF**，函数清单落库，
 ///      加函数 = INSERT 一行。老表没有任何读写方、必然是空的，直接删了重建。
-const kCurrentSchemaVersion = 13;
+///   14 ai_messages 新增 interrupt_reason（这条回答为什么没写完：网络断了 /
+///      被系统杀了 / 轮数用尽……）。内容本来就一直在落库，这一列只回答
+///      "写完了没有"，界面据此显示「未完成 + 继续」。
+const kCurrentSchemaVersion = 14;
 
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';

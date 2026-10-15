@@ -171,7 +171,7 @@ AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished
 
 **循环**（`AgentLoop.run`，`maxRounds = 15`）：提工具 → 执行 → 回灌 → 再发一轮，直到模型不再提工具。
 三条终止条件缺一个都会挂死：没提工具（正常结束）、`askUser`（挂起等用户，对话存进数据库，重启后可续）、
-轮数上限 15（防「每次都提一段必然失败的脚本」导致无限烧钱；15 不是"鼓励跑满"，而是让「读 → 改 → 复查」
+轮数预算（防「每次都提一段必然失败的调用」导致无限烧钱；15 不是"鼓励跑满"，而是让「读 → 改 → 复查」
 这种多步任务不必被硬切断）。SQL 的初衷就是**一条语句干完一批事**，多数任务 1~3 轮就够。工具的中间往来
 不落库。
 
@@ -309,7 +309,7 @@ uncached = promptTokens - cached
 
 | 护栏 | 值 |
 |---|---|
-| 一次用户输入最多几轮工具往返 | `maxRounds = 15` |
+| 一次用户输入最多几轮工具往返 | `maxRounds = 15`（软上限；用户同意可 +15，硬上限 `maxRoundsHard = 45`） |
 | 一轮最多问用户几次 | `maxAsksPerTurn = 5`（到上限就明确拒绝并让它收尾） |
 | 单次 SQL 的字符数上限 | `maxStatementChars = 20000` |
 | 回灌给模型的结果：行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000`（截断会明说） |
@@ -339,11 +339,11 @@ uncached = promptTokens - cached
 ## 4. AI Agent：工具约定、挂起与安全
 
 > 出处：`tool_specs.dart`（清单）、`tool_executor.dart`（执行 / 结果截断）、`sql_guard.dart`（放行判定）、
-> `core/db/ai_udfs.dart`（25 个函数与业务约束）、`agent_loop.dart`（循环 / 上限 / 事件）、
+> `core/db/ai_udfs.dart`（26 个函数与业务约束）、`agent_loop.dart`（循环 / 上限 / 事件）、
 > `ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、`ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库）、
 > `history_chunker.dart`（会话切片）。
 > 协议报文（`tools` / `tool_calls` / `role: tool`）见 1.4，事件类型见 1.3，省 token 的角度见 3.2（3）。
-> 数据库操作那一层（25 个函数、函数清单、安全判定）另有专文：[AI操作数据库设计](AI操作数据库设计.md)。
+> 数据库操作那一层（26 个函数、函数清单、安全判定）另有专文：[AI操作数据库设计](AI操作数据库设计.md)。
 
 ### 4.1 工具清单与调用约定
 
@@ -393,7 +393,7 @@ SELECT replace_unique('n1', '主要风险是时间紧', '风险已识别');  -- 
 
 | 上限 | 值 | 出处 |
 |---|---|---|
-| 一次用户输入的工具往返轮数 | `maxRounds = 15` | `agent_loop.dart` |
+| 一次用户输入的工具往返轮数（软上限 / 每次续 / 硬上限） | `15` / `+15` / `45` | `app_params.dart`、`agent_loop.dart` |
 | 单条 SQL 的字符数 | `maxStatementChars = 20000` | `sql_guard.dart` |
 | 回灌给模型的行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000` | `tool_executor.dart` |
 | 一次读的字符数 | `maxReadChars = 500`（默认 200） | `ai_udfs.dart` |
@@ -454,7 +454,8 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 记录（`PendingAsk.asks`，解析时 `clamp(1,99)`），恢复时用 `asksSoFar` 带回来。到上限不是简单丢弃，
 而是回一条明确的失败："这一轮已经问过 5 次了，不要再问。请用现有信息给出最好的答案……"。
 
-> 只有 `askUser` 的次数被带回来了：`maxRounds` 在每次 `run()` 里重新从 0 数，挂起恢复后轮数预算会重置。
+> `askUser` 的次数（`asks`）与**轮数预算**（`rounds` / `budget`）都会被带回来：用户回答之后循环是重新跑的，
+> 不把这两个数存进挂起记录，预算就从头开始（软上限等于不存在）。
 > `_drive` 每次都新建 `ToolExecutor`，所以它与上一句用户输入之间不共享任何状态（这一版本来也没有撤销栈）。
 
 **选项为什么由 App 现查**（`AskResolver`）：模型只给筛选条件
@@ -496,8 +497,8 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
   （一次十步的整理任务要点十次），而真正危险的批量操作并不因为它就变得安全，用户看到的只是又一个要点的框。
   第三版把约束前移到「**写操作只能调用函数**」：安全性来自数据模型，不是点击次数。
 - **拦住什么**：`SqlGuard` 只放行单条 `SELECT` / `WITH`，直接 `UPDATE` / `INSERT` / `DELETE` 表一律拒绝；
-  25 个函数里**没有任何批量删除**（一次只删一篇 / 一个库，且是逻辑删除）。模型若要「清空整个库」，
-  得连发几十次调用，而那会被轮数上限（15）挡住。
+  批量删除**存在**（`delete_notes_batch`），但一次最多 10 条（`SqlLimits.maxBatchSize`）、且是逻辑删除。
+  「清空整个库」得连发几十次调用，而那会被轮数上限（15）挡住。
 - **拦不住什么**：模型在轮数内删掉一篇笔记 / 一个笔记库是**立即生效**的 —— 这是明确接受的取舍
   （见 [AI操作数据库设计](AI操作数据库设计.md) 第 14 节）。prompt 因此写死一条：只在用户明确要求时才做。
 - **删除的代价**：内部是软删除（`deletedAt` 置位、行还在、切片显式清掉），但界面上**没有回收站入口**，
@@ -538,13 +539,38 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
   token）；删会话时按同一个键清掉。它拼在 system prompt 的末尾（`withSummary`），不占历史消息位置、
   也不改写历史（保缓存）。
 
-### 4.7 验收口径与上线后要观察什么（AI 行为）
+### 4.7 断线续传与轮数预算
+
+**断线续传**：内容其实**一直没丢**（正文每个 chunk 都落库），缺的是「这条写完了没有」。
+
+- `ai_messages.interrupt_reason`（v14）记状态：`in_flight`（每轮开始写、成功或挂起时清掉）、
+  错误码（`network` / `timeout` / `rate_limited` / …）、`rounds`（轮数用尽）。
+- **冷启动还看到 `in_flight`，就是上次被系统杀了或 App 崩了** —— 那是唯一能观测到「进程没了」
+  的办法（没有任何回调会告诉我们 `foreground_killed`）。Android 前台服务要不要上，就看这个数量。
+- 界面：气泡下面显示「上次生成中断（网络断开）」+「继续」「知道了」。「继续」= 把一句话放进输入框再发出去
+  （复用 `_send` 的整条路径，所以没有第二条发送分支）。
+- ⚠️ **为什么「继续」要强调「不要重复做」**：工具往来**不落库**，模型只看得见自己写过的那段文字。
+  所以每条助手消息末尾会追加一段「本轮执行：…」（把 `ToolResult.mutated` 的那些 `description` 攒起来）——
+  用户能翻回去看 AI 到底改了哪些笔记，模型续做时也知道哪些已经做完了。
+
+**轮数预算**：软上限 15 轮、用户同意后每次 +15、硬上限 45。
+
+- 快到上限（还剩 ≤2 轮）时，`AgentLoop` 往**每轮重拼的 system prompt 末尾**追加一段提醒，
+  让模型自己决定：没做完就 `askUser` 问用户要不要继续（**要说清继续会再发生一次调用费用**），
+  做完了就 `finish` 收尾。
+- **为什么不由 App 直接弹问题**：App 发起的提问没有对应的 assistant `tool_calls`，而挂起恢复是把答案当
+  `role: tool` 回灌、要用 `toolCallId` 对上那条消息 —— 伪造会让整条请求被协议拒绝。让模型自己问，
+  恢复路径一行都不用改。
+- 用户回答后预算 +15，并且 `rounds` / `budget` 与 `asks` 一起存进挂起记录（`PendingAsk`）：
+  循环是重新跑的，不把这两个数带回来，预算每问一次就重置（软上限等于不存在）。
+
+### 4.8 验收口径与上线后要观察什么（AI 行为）
 
 **可断言的验收口径**（这些点都有对应测试文件：`agent_loop_test` / `agent_dialogs_test` /
 `deepseek_tool_calling_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` /
 `history_summary_test` / `history_chunker_test`；是否全绿以 `flutter test` 为准）：
 
-- [x] `sql` 能读能写：25 个函数可被 AI 调用，也能嵌在 SQL 里（`test/ai_sql_test.dart`）
+- [x] `sql` 能读能写：26 个函数可被 AI 调用，也能嵌在 SQL 里（`test/ai_sql_test.dart`）
 - [x] 只放行单条 `SELECT` / `WITH`：写表 / DDL / `PRAGMA` / 多语句一律拒绝
 - [x] 锚点不唯一时拒绝，且**一个字都不动**；错误信息告诉模型把锚点写长一点
 - [x] 正文与派生字段一起写（`excerpt` / `word_count` 与 `TextUtils` 同口径）、切片由触发器清掉

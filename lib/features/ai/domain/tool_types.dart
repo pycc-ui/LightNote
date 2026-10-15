@@ -107,6 +107,8 @@ class ToolResult {
     this.data,
     this.error,
     this.description,
+    this.finished = false,
+    this.mutated = false,
   });
 
   final bool ok;
@@ -122,6 +124,20 @@ class ToolResult {
   /// 是模型下一轮识别"做过什么"的锚点。
   final String? description;
 
+  /// **这是不是一次「声明完成」**（`finish()` 这个信号函数）。
+  ///
+  /// 只有它会为真。`AgentLoop` 看到就**当场收尾**：不回灌结果、不再发一轮 ——
+  /// 所以它不参与"工具结果"那套流程，是个控制信号。
+  final bool finished;
+
+  /// **这次调用改了笔记数据**（SqlGuard 名单里的写函数）。
+  ///
+  /// 用来攒「本轮执行记录」：`_drive` 把有改动的 `description` 收集起来，
+  /// 追加在那条助手消息末尾 —— 用户能翻回去看 AI 到底改了哪些笔记，
+  /// 而「继续」时模型也知道**哪些已经做完了，不要重复做**。
+  /// 读函数不算（它们不改数据，攒起来只是噪音）。
+  final bool mutated;
+
   factory ToolResult.success(Object? data) => ToolResult(ok: true, data: data);
 
   factory ToolResult.failure(String error) =>
@@ -130,7 +146,7 @@ class ToolResult {
   /// UDF 的返回值**本身就是最终形状**（`{ok, description, data}` / `{ok:false, error}`）。
   /// 这里把它摊回字段，好让上层读到 `ok` / `error`，`encode()` 再原样发回去 ——
   /// 避免"把一段 JSON 再包进 rows 里"那种双层嵌套。
-  factory ToolResult.raw(String json) {
+  factory ToolResult.raw(String json, {bool mutated = false}) {
     final decoded = jsonDecode(json);
     if (decoded is! Map) return ToolResult(ok: true, data: json);
     final ok = decoded['ok'] == true;
@@ -139,6 +155,13 @@ class ToolResult {
       data: ok ? decoded['data'] : null,
       error: ok ? null : (decoded['error'] as String? ?? '未知错误'),
       description: decoded['description'] as String?,
+      // `finish()` 的约定：data 里带 finished: true（见 ai_udfs.dart 的 _finish）。
+      // 认这一格而不是认函数名：函数名在 SQL 文本里，可能是字符串的一部分。
+      finished: ok && decoded['data'] is Map &&
+          (decoded['data'] as Map)['finished'] == true,
+      // 改没改数据由**调用方**（执行器）判定：它看的是 SQL 里的函数名，
+      // 而 UDF 的返回值里没有这个信息（读函数也返回同样的形状）。
+      mutated: mutated,
     );
   }
 

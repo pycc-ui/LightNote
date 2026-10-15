@@ -41,9 +41,20 @@ class AgentToolStarted extends AgentEvent {
 
 /// 某个工具执行完了
 class AgentToolDone extends AgentEvent {
-  const AgentToolDone(this.name, {required this.ok});
+  const AgentToolDone(
+    this.name, {
+    required this.ok,
+    this.description,
+    this.mutated = false,
+  });
   final String name;
   final bool ok;
+
+  /// UDF 给的一句话操作摘要（如「删除笔记 n1「会议记录」」）。
+  final String? description;
+
+  /// 这次调用**改了笔记数据**。仓储据此攒「本轮执行记录」写进消息末尾。
+  final bool mutated;
 }
 
 /// 模型要问用户，循环**停在这里**等回答。
@@ -56,9 +67,18 @@ class AgentAwaitingUser extends AgentEvent {
     required this.toolCallId,
     this.asks = 1,
     this.messages = const [],
+    this.rounds = 0,
+    this.budget = AgentLimits.maxRounds,
   });
   final AskRequest request;
   final String toolCallId;
+
+  /// 到这一刻为止用掉的**工具轮数**（含这一轮），以及这次运行的总预算。
+  ///
+  /// 调用方要把它们一起存进挂起记录：用户回答之后循环是**重新跑**的，
+  /// 不把这两个数带回来，预算就永远从头开始（等于软上限失效）。
+  final int rounds;
+  final int budget;
 
   /// 这一轮里问到第几次了。**调用方要把它一起存下来** ——
   /// 用户回答之后恢复循环时得从这一次接着数，否则上限永远到不了。
@@ -107,9 +127,15 @@ class AgentFinished extends AgentEvent {
 /// 出错（网络、Key 没配……）。**已经收到的文字照旧留在回答里**，
 /// 所以这里只给原因，不让调用方丢掉半截内容。
 class AgentFailed extends AgentEvent {
-  const AgentFailed(this.message, {this.usage = const AgentUsage()});
+  const AgentFailed(this.message, {this.usage = const AgentUsage(), this.code});
   final String message;
   final AgentUsage usage;
+
+  /// 机器可读的错误码（`network` / `timeout` / `rounds` / …）。
+  ///
+  /// 消息要落进 `ai_messages.interrupt_reason` 供界面显示"为什么没写完"，
+  /// 而拿 [message] 去认是不可靠的 —— 那是一句给人看的中文。
+  final String? code;
 }
 
 // ============================================================================
@@ -122,14 +148,18 @@ class AgentFailed extends AgentEvent {
 /// 一次用户输入通常只需要 1~3 轮：模型一条 SQL 就能把要读的读完，
 /// 而不是像旧的 function calling 那样一个工具一轮、`O(N²)` 地重发历史。
 ///
-/// ## 三条终止条件（缺一个都会挂死）
+/// ## 四条终止条件（缺一个都会挂死）
 ///
-/// 1. 模型这一轮**没提工具** → 正常结束
-/// 2. `askUser` → 停下来等用户（持久化挂起，见《AI接入设计》）
-/// 3. **轮数上限** [maxRounds] → 强行结束
+/// 1. `finish(...)` → **声明完成**，当场收尾（不再发一轮）
+/// 2. 模型这一轮**没提工具** → 正常结束
+/// 3. `askUser` → 停下来等用户（持久化挂起，见《AI接入设计》）
+/// 4. **轮数预算用尽** → 强行结束
 ///
-/// 第 3 条不是防御性代码而是必需品：模型有可能每次都提一个必然失败的工具
-/// （脚本一直写错），没有上限就是**无限烧钱**。
+/// 第 4 条不是防御性代码而是必需品：模型有可能每次都提一个必然失败的调用
+/// （SQL 一直写错），没有上限就是**无限烧钱**。而预算是**可以续的** ——
+/// 快到上限时模型会收到一条提醒（[budgetNotice]），由它自己 `askUser` 问用户
+/// 要不要继续，用户同意后预算 +[AgentLimits.roundExtension]，硬上限
+/// [AgentLimits.maxRoundsHard] 兜底。
 class AgentLoop {
   const AgentLoop({required this.round, required this.executor});
 
@@ -157,6 +187,8 @@ class AgentLoop {
     Future<String> Function()? rebuildPrompt,
     List<AiMessage> dbHistory = const [],
     int asksSoFar = 0,
+    int roundsUsed = 0,
+    int? roundBudget,
   }) async* {
     final messages = List<AgentMessage>.from(history);
     final tools = specsForRequest();
@@ -165,9 +197,24 @@ class AgentLoop {
     // ⚠️ 从 [asksSoFar] 起算：挂起恢复时调用方会把已经问过的次数带回来
     var asks = asksSoFar;
 
-    for (var roundNo = 0; roundNo < maxRounds; roundNo++) {
+    // ---- 预算：**跨挂起累计** ----
+    //
+    // [roundsUsed] 是这次用户输入之前已经用掉的轮数（挂起恢复时由调用方带回来，
+    // 见 PendingAsk.rounds）；[roundBudget] 是这次允许用到的总数。
+    // 不传预算就按"再来一轮默认额度"算，并一律夹到硬上限 ——
+    // 硬上限是最后一道闸，不能靠调用方自觉。
+    final budget = (roundBudget ?? (roundsUsed + maxRounds))
+        .clamp(roundsUsed, AgentLimits.maxRoundsHard);
+
+    for (var roundNo = 0; roundNo < budget - roundsUsed; roundNo++) {
       executor.beginTurn();
-      final prompt = await _promptFor(systemPrompt, rebuildPrompt);
+      final used = roundsUsed + roundNo;
+      // 快到上限时，把"还剩几轮"追加在 prompt **末尾**：
+      // 不碰协议、不碰消息，也不需要改 rebuildPrompt 的签名 ——
+      // 每轮本来就要重拼一次 prompt（mark_functions 的详情靠它生效）。
+      final prompt =
+          (await _promptFor(systemPrompt, rebuildPrompt)) +
+              _budgetNotice(used, budget);
 
       // ---- 一次请求 ----
       var text = '';
@@ -193,9 +240,9 @@ class AgentLoop {
               yield AgentText(e.fullText);
             }
             calls = e.toolCalls;
-          case AiError(:final message):
+          case AiError(:final message, :final code):
             if (text.trim().isNotEmpty) answer.write(text);
-            yield AgentFailed(message, usage: usage);
+            yield AgentFailed(message, usage: usage, code: code);
             errored = true;
         }
       }
@@ -249,6 +296,9 @@ class AgentLoop {
             asks: asks,
             // 回答之后要接着跑，所以把此刻的对话一起交出去
             messages: List<AgentMessage>.from(messages),
+            // 轮数也要交出去（含这一轮）—— 回答完恢复时得从它还回来
+            rounds: used + 1,
+            budget: budget,
           );
           return;
         }
@@ -259,7 +309,28 @@ class AgentLoop {
           ToolExecutor.parseArgs(call.arguments),
           history: dbHistory,
         );
-        yield AgentToolDone(call.name, ok: result.ok);
+        yield AgentToolDone(
+          call.name,
+          ok: result.ok,
+          description: result.description,
+          mutated: result.mutated,
+        );
+
+        // `finish()` = **声明完成**：当场收尾，不回灌、不再发一轮。
+        //
+        // 模型是「边写结论边调 finish」的（同一轮里），所以答案就是这一轮
+        // 已经流出来的文字。按普通工具回灌的话，每个任务都要多跑一轮请求 ——
+        // 而「读完笔记给结论」是最常见的路径，那等于每次收尾都多花一次钱。
+        if (result.finished) {
+          final said = answer.toString().trimRight();
+          yield AgentFinished(
+            // 兜底：只调了 finish、一个字没写（违反 prompt，但别让用户看到空白）
+            said.isEmpty ? (result.description ?? '已完成。') : said,
+            usage: usage,
+          );
+          return;
+        }
+
         messages.add(
           AgentMessage.tool(toolCallId: call.id, content: result.encode()),
         );
@@ -268,10 +339,32 @@ class AgentLoop {
 
     // 轮数用尽：把已经拿到的内容交出去，并明说可能没查完
     yield AgentFailed(
-      '工具调用轮数达到上限（$maxRounds 轮），已停止。'
-      '${answer.isEmpty ? '' : '下面是已经拿到的部分内容。'}',
+      '工具调用轮数达到上限（$budget 轮），已停止。'
+      '${answer.isEmpty ? '' : '下面是已经拿到的部分内容。'}'
+      '如果任务还没做完，再发一句「继续」就行。',
       usage: usage,
+      // 这个原因会落进 `ai_messages.interrupt_reason`：界面上要能显示
+      // "上次是被轮数上限打断的"，而不是一个笼统的"未完成"。
+      code: 'rounds',
     );
+  }
+
+  /// 快到预算上限时追加在 system prompt **末尾**的一段提醒。
+
+  /// 只在"还剩 ≤2 轮"时出现：早一点提醒才有用（还剩 1 轮时它已经没机会收尾了）。
+
+  /// 为什么走 prompt 而不是让 App 自己问：App 主动发起的提问没有对应的
+  /// assistant `tool_calls`，而挂起恢复是把答案当 `role: tool` 回灌、要用
+  /// `toolCallId` 对上那条消息 —— App 伪造提问会让整条请求被协议拒绝。
+  /// 让**模型自己**调 `askUser` 就没有这个问题，恢复路径一行都不用改。
+  static String _budgetNotice(int used, int budget) {
+    if (budget - used > 2) return '';
+    final left = budget - used;
+    return '\n\n## 轮数提醒\n'
+        '已经用了 $used 轮，最多 $budget 轮（还剩 $left 轮）。\n'
+        '- 任务还没做完：调 askUser 问用户要不要继续（**说清继续会再发生一次调用费用**）；'
+        '用户同意后上限会 +${AgentLimits.roundExtension} 轮（最多 ${AgentLimits.maxRoundsHard} 轮）。\n'
+        '- 已经做完：直接给结论，并在同一轮调 finish(…) 收尾。';
   }
   /// 这一轮真正发给模型的 system prompt。
   ///
