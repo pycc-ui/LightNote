@@ -88,7 +88,7 @@ abstract final class FeedLimits {
   static const poolTarget = 3;
 
   /// 补池的并发路数（≈一次最多生成几张）。
-  static const genParallelism = 2;
+  static const genParallelism = 3;
 
   /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
   static const recentNoteKeep = 15;
