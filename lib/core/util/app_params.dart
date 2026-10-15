@@ -77,20 +77,18 @@ abstract final class FeedLimits {
   /// 一屏显示几张卡片（骨架屏与首屏用）。屏幕上一屏就是 3 张。
   static const batchSize = 3;
 
-  /// 无预留时首屏先只生成几张：取一屏，其余丢后台补池。
+  /// 首屏几张：无预留时先只生成这几张、其余丢后台补池；
+  /// 有预留时取出来的也是这一批（预留 = 上次看过的那一屏）。
   static const firstScreenCount = batchSize;
 
   /// 每次下拉取几张。比一屏少，免把后台池子抽得太快。
   static const pullSize = 2;
 
   /// 后台常备几张（池子的目标值，不是下限）。
-  static const poolTarget = 6;
+  static const poolTarget = 3;
 
   /// 补池的并发路数（≈一次最多生成几张）。
-  static const genParallelism = 3;
-
-  /// 每次启动给**下次**预留几张（存进 `feed_reserve`）。
-  static const reserveSize = 3;
+  static const genParallelism = 2;
 
   /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
   static const recentNoteKeep = 15;
@@ -99,13 +97,13 @@ abstract final class FeedLimits {
   static const recentChunkKeep = 30;
 
   /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
-  static const recentTitleKeep = 20;
+  static const recentTitleKeep = 10;
 
   /// 一份素材的字符数（从片里开出的窗口大小）。
   ///
   /// 400：卡片流的全部内容就是这**一段截断的原文**，窗口给足一点，
   /// 模型才有足够素材把卡片写具体。
-  static const windowChars = 400;
+  static const windowChars = 250;
 
   /// 单批素材的字符预算。依赖片的硬上限 700 不会失控。
   static const windowBatchBudget = 4000;

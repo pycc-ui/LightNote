@@ -25,10 +25,11 @@ import 'widgets/feed_card.dart';
 ///   · **轻笔记**（本页）= AI 生成的内容，看完可以收下，也可以直接走掉
 ///   · **我的轻笔记**（笔记库页的区块）= 已经收下、但还没归档的笔记
 ///
-/// ## 生成策略：后台备 6 张、一屏 3 张
+/// ## 生成策略：一屏 3 张；下拉才补池
 ///
-/// 池子里常备 [kFeedPoolTarget] 张，首屏取 [kFeedFirstScreenCount] 张、下拉 [kFeedPullSize] 张。
-/// 取完立刻在后台补，所以**下拉刷新通常是瞬间出内容**，不用等 AI。
+/// 首屏取 [kFeedFirstScreenCount] 张、下拉取 [kFeedPullSize] 张。
+/// **进入时不预热池子**（省 token）：有预留就直接显示、没有就当场生成一屏；
+/// 只有下拉刷新才后台补池，所以第一次下拉可能要等一次生成。
 ///
 /// 生成结果**不落库**：收下才写成笔记。所以杀掉进程后没收下的那批
 /// 就没了，下次会重新生成（内容不同）。
@@ -154,10 +155,11 @@ class _InboxPageState extends State<InboxPage> {
         return;
       }
 
-      // 先把池子填好（含"上次留的 3 张"），再取第一屏。
+      // 先把池子填好（含"上次留的那几张"），再取第一屏。
       //
-      // 预热内部已经把"后 3 张"存进 `feed_reserve` 表并留给下次。
-      // 它失败会安静返回 false，页面照旧走 `takeBatch` 的按需生成，
+      // 预热只负责"把池子填起来"；**预留的写回在下面 `_loadBatch` 里**——
+      // 用户看过的那一屏就是下次的预留（见 `FeedRepository.stashReserve`）。
+      // 预热失败会安静返回 false，页面照旧走 `takeBatch` 的按需生成，
       // 所以没配 Key 时不会卡住。
       await feed.warmUpIfNeeded();
       if (!mounted) return;
@@ -195,6 +197,7 @@ class _InboxPageState extends State<InboxPage> {
       // —— 一次拿太多会把后台池子抽干。
       final batch = await feed.takeBatch(
         size: first ? kFeedFirstScreenCount : kFeedPullSize,
+        first: first,
       );
       if (!mounted) return;
 
@@ -214,6 +217,8 @@ class _InboxPageState extends State<InboxPage> {
         _phase = _FeedPhase.ready;
         _error = null;
       });
+      final firstThree = _cards.take(kFeedFirstScreenCount).map((c) => c.draft).toList();
+      await feed.stashReserve(firstThree);
     } catch (e) {
       if (!mounted) return;
       // 已经有内容时失败不该把它清掉——那样用户会白等一场

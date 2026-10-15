@@ -29,7 +29,7 @@ const kFeedFirstScreenCount = kFeedBatchSize;
 /// （首屏仍是 [kFeedFirstScreenCount] 张）。
 const kFeedPullSize = FeedLimits.pullSize;
 
-/// 后台常备几张。低于这个数就在取完一屏后补。
+/// 后台常备几张。低于这个数就在**下拉取完后**补（首屏不补，见 [takeBatch]）。
 ///
 /// 取 8 ≈ 4 屏余量：够用户连刷几次不用等生成。
 /// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kGenParallelism] 张），
@@ -45,11 +45,6 @@ const kFeedPoolTarget = FeedLimits.poolTarget;
 /// 取 4（3 路补池 + 1 路余量给预留/收尾）：手机上并发请求是 I/O 等待、不占 CPU，
 /// 4 路很轻；再多的收益递减，而且输入 token 会按路数重复（每路都重发一份系统提示词）。
 const kGenParallelism = FeedLimits.genParallelism;
-
-/// 每次启动给**下次**预留几张（存进 `feed_reserve` 表）。
-///
-/// 取 6：下次进入先把这 6 张放进内存池，首屏 3 张秒出、又够一次下拉。
-const kFeedReserveSize = FeedLimits.reserveSize;
 
 /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
 ///
@@ -434,7 +429,8 @@ class FeedRepository {
   // 生成与取用
   // ==========================================================================
 
-  /// 取一批卡片，并保证后台继续补足池子。
+  /// 取一批卡片。**只有下拉刷新（[first]=false）才后台补足池子**；首屏不补
+  /// —— 进卡片流不等于要刷卡，避免"一进来就先烧一批 token"。
   ///
   /// [size] 是这一批取几张：首屏传 [kFeedFirstScreenCount]，下拉刷新用默认的
   /// [kFeedPullSize]。**池里不够 [size] 时有几张给几张**（1、2 张也顶一顶），
@@ -443,7 +439,10 @@ class FeedRepository {
   /// 生成不是"池子空了才启动"：
   ///   1. 池子空 → `await refill`（唯一会等的地方）
   ///   2. 从池子头部取 [size] 张
-  ///   3. 不管池子还剩多少，都后台 `refill`（提前启动下一批）
+  ///   3. 不是首屏（[first]=false）→ 后台 `refill`（提前启动下一批）
+  ///
+  /// 首屏（[first]=true）故意**不**补池：所以进入后池子是空的，
+  /// **第一次下拉会走第 1 步、当场等一次生成**（之后才转后台预热）。
   ///
   /// 真正决定"能连刷几次不用等"的是 [kFeedPoolTarget]。池子真空时只能等，
   /// 靠把池子备厚来避免走到那一步。
@@ -456,6 +455,7 @@ class FeedRepository {
   Future<List<FeedDraft>> takeBatch({
     FeedSource? override,
     int size = kFeedPullSize,
+    bool first = false,
   }) async {
     final source = override ?? await resolveSource();
     if (_pool.isEmpty) {
@@ -465,8 +465,11 @@ class FeedRepository {
     final batch = _pool.take(take).toList(growable: false);
     _pool.removeRange(0, take);
 
-    // 提前补：不 await，也不看池子是否为空
-    _refillInBackground(source);
+    // 下拉刷新才提前补池（不 await）；首屏不补，避免一进来就烧 token
+    if(!first)
+    {
+      _refillInBackground(source);
+    }
     return batch;
   }
 
@@ -632,15 +635,20 @@ class FeedRepository {
   // 流程（每次进入都会跑）：
   //
   // ```
-  // ① 先试着从 feed_reserve 表里拉上次存的（最多 kFeedReserveSize 张，消费即清）
-  // ② 有 → 就用它当这一屏，这次不申请；同时后台 refill() 按缺口补池
-  // ③ 没有 → 只生成首屏 kFeedFirstScreenCount 张，其余（补池 + 给下次留预留）全丢后台
+  // ① 先试着从 feed_reserve 表里拉上次存的（消费即清）
+  // ② 有 → 就用它当这一屏，这次不申请；也不再后台补池（省 token）
+  // ③ 没有 → 当场并发生成首屏 kFeedFirstScreenCount 张；同样不后台补池
   // ```
   //
   // 于是：
-  //   · 库里有预留 → 进入秒出，不花一次生成的等待
-  //   · 库里没有   → 当场并发生成一屏（比一次生成一批快得多），剩下的后台补
+  //   · 库里有预留 → 进入秒出，且**零生成**
+  //   · 库里没有   → 当场并发生成一屏（比一次生成一批快得多）
   //     （第一次装 App 必然走这条）
+  //   进入时**都不预热池子**：下拉刷新（`takeBatch(first:false)`）才补。
+  //
+  // **预留写回不在这里**：用户看过的那一屏就是下次的预留 —— 展示后由 UI 调
+  // [stashReserve] 抄一份进 `feed_reserve`。零额外 AI 调用；代价是下次开屏
+  // 先看到上次那几张，下拉才出新的。
   //
   // 它不影响列表的追加/替换：列表行为由 `InboxPage._loadBatch(first:)` 决定
   // （首次替换、下拉前向追加），这里只负责"池子里有什么牌"。
@@ -669,15 +677,14 @@ class FeedRepository {
         _pool.addAll(reserved);
         // 预留那几张也是"已经生成过"的，列进标题记忆里避免下一批撞车
         _rememberReserved(reserved);
-        // 后台补：先把预留填满、再补内存池（见 [_fillPoolForNextTime]）。
-        // 不 await —— 有预留时这一屏已经秒出，后台的事不挡用户。
-        unawaited(_fillPoolForNextTime(source));
+        //节省流量(用户一进来可能并不是来刷卡的,但是一进来就烧钱)
         return true;
       }
 
-      // ---- ③ 没有预留：先只生成一屏，秒上屏，剩下的丢后台补 ----
+      // ---- ③ 没有预留：当场并发生成一屏，秒上屏 ----
       //
       // 并发生成 [kFeedFirstScreenCount] 张（3 路单卡）比一个请求里要 3 张快得多。
+      // 生成完**不预热池子**：下拉刷新才补（见 [takeBatch] 的 [first]）。
       final materials = await gatherSources(
         source,
         limit: kFeedFirstScreenCount,
@@ -687,9 +694,6 @@ class FeedRepository {
       final drafts = await _generateCardsParallel(materials);
       _pool.addAll(drafts);
 
-      // 再把池子补起来、并给下次留好预留。不 await：它在后台跑，不影响首屏。
-      // `_fillPoolForNextTime` 会先把预留填满、再补内存池。
-      _fillPoolForNextTime(source);
       return true;
     } catch (_) {
       // 失败：不抛，但必须把已取出的预留放回池子——
@@ -717,36 +721,19 @@ class FeedRepository {
     });
   }
 
-  /// 后台补池：**先把下次的预留填满，再补当前内存池**。
+  /// 把 [drafts] 存成「下次开屏的预留」。
   ///
-  /// 「预留优先」是刻意的：预留是"下次打开秒出"的本钱，先把它做出来，这一路
-  /// 再并回来补内存池（对应"增加一路先负责填充预留，做完来帮忙"）。
+  /// 由 UI 在展示完一屏后调用（见 `InboxPage._loadBatch`）：预留 = **用户刚看过的这几张**。
+  /// 下次开屏 `takeFeedReserve()` 先取出来当首屏（秒出），用户下拉才拿新的。
   ///
-  /// **不 await**：这是给"下一次"和后台准备的，不该让这一屏等它。
-  /// 整套步骤包在 try/catch 里（理由见 [_refillInBackground]）。
-  Future<void> _fillPoolForNextTime(FeedSource source) async {
+  /// 与旧做法（后台**单独生成**几张）不同：这里不额外调用 AI，只是把已经生成好的
+  /// 卡片抄一份进 `feed_reserve`。失败只打日志——预留只是"下次更快"，不该影响这次。
+  Future<void> stashReserve(List<FeedDraft> drafts) async {
     try {
-      await _fillReserve(source);
-      await refill(source);
+      await _db.replaceFeedReserve(drafts);
     } catch (e) {
-      debugPrint('[Feed] 后台补预留 / 补池失败（忽略）：$e');
+      debugPrint('[Feed] 写预留失败（忽略）：$e');
     }
-  }
-
-  /// 生成 [kFeedReserveSize] 张存进 `feed_reserve`（给下次启动秒出）。
-  ///
-  /// 与"从池子末尾搬几张过去"不同：这里**单独生成**，所以不会掏空当前内存池。
-  /// 失败或没素材就跳过——预留只是"下次更快"，不该拖累这次。
-  Future<void> _fillReserve(FeedSource source) async {
-    final materials = await gatherSources(source, limit: kFeedReserveSize);
-    if (materials.isEmpty) return;
-    final drafts = await _generateCardsParallel(materials);
-    if (drafts.isEmpty) return;
-
-    final reserved = drafts.take(kFeedReserveSize).toList(growable: false);
-    await _db.replaceFeedReserve(reserved);
-    // 预留那几张也是"已经生成过"的，列进标题记忆里避免下一批撞车
-    _rememberReserved(reserved);
   }
 }
 
