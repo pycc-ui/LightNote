@@ -24,6 +24,7 @@ part 'app_database.g.dart';
     AppKv,
     FeedReserve,
     NoteChunks,
+    NoteVectors,
     AiFunctions,
   ],
 )
@@ -326,6 +327,17 @@ class AppDatabase extends _$AppDatabase {
             );
           }
 
+          // ---- 14 -> 15：笔记切片的向量（RAG 语义检索）----
+          //
+          // 只加一张空表：**不做任何回填**。向量由 `RagIndexer` 在启动/保存后
+          // 慢慢补（和 note_chunks 的懒回填同一套路数）—— 全量回填会让升级那
+          // 一刻卡住启动，而且那时嵌入模型还没初始化完。
+          //
+          // 表空着不影响任何老功能：检索引擎按 `content_hash` 对齐，没有向量就
+          // 是「这一路没召回」，AI 手里还有 search_notes 那些工具。
+          if (from < 15) {
+            await m.createTable(noteVectors);
+          }
           // 升级路径的索引统一在这里补。
           //
           // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
@@ -1128,6 +1140,160 @@ class AppDatabase extends _$AppDatabase {
       variables: [Variable<int>(limit)],
       readsFrom: {notes, noteChunks},
     ).map((r) => r.read<String>('id')).get();
+  }
+
+  // ==========================================================================
+  // 笔记切片的向量（note_vectors）
+  //
+  // 这一层也只碰数据库：嵌入器（`TextEmbedder`）在 `features/ai/` 下，
+  // `core/` 不能反向依赖它，所以收进来的是现成的 `NoteVectorsCompanion`。
+  //
+  // 两条约定，读的时候必须一起满足才算「有效向量」：
+  //   · `note_vectors.content_hash` == `note_chunks.content_hash`（那句话还在这）
+  //   · `note_vectors.model` == 当前模型
+  // 因此失效不需要谁去删行 —— 不匹配自然查不出来。
+  // ==========================================================================
+
+  /// 写入/更新若干片的向量（按 (note_id, idx) 覆盖）。
+  Future<void> putNoteVectors(String noteId, List<NoteVectorsCompanion> rows) {
+    if (rows.isEmpty) return Future.value();
+    return batch((b) {
+      for (final r in rows) {
+        b.insert(noteVectors, r, onConflict: DoUpdate((_) => r));
+      }
+    });
+  }
+
+  /// 清掉某篇笔记的全部向量（软删笔记时调）。
+  Future<void> clearNoteVectors(String noteId) {
+    return (delete(noteVectors)..where((t) => t.noteId.equals(noteId))).go();
+  }
+
+  /// 检索的**第一趟**：把当前模型下所有「仍然对得上」的向量读出来。
+  ///
+  /// 只取 (id, idx, hash, 字节)，**不取正文** —— 候选可能上千条，把正文一起
+  /// 拖出来是白花内存。算完余弦选出前几条之后，再按 (id, idx) 单独取那几片的
+  /// 正文（见 [chunkAt]）。
+  ///
+  /// `JOIN note_chunks` 是**过滤而不是装饰**：`content_hash` 对不上的行根本不会
+  /// 出现；`JOIN notes` 上的 `deleted_at IS NULL` 把软删的笔记排除掉
+  /// （软删不触发外键级联，向量行还留着）。
+  Future<List<NoteVector>> validVectors(String model) {
+    final q = select(noteVectors).join([
+      innerJoin(
+        noteChunks,
+        noteChunks.noteId.equalsExp(noteVectors.noteId) &
+            noteChunks.idx.equalsExp(noteVectors.idx),
+      ),
+      innerJoin(notes, notes.id.equalsExp(noteVectors.noteId)),
+    ])
+      ..where(noteVectors.model.equals(model) &
+          noteChunks.contentHash.equalsExp(noteVectors.contentHash) &
+          notes.deletedAt.isNull());
+    return q.map((r) => r.readTable(noteVectors)).get();
+  }
+
+  /// 取某一片（调用方再去取它所属的笔记正文）。
+  ///
+  /// [expectHash] 非空时**要比对**，对不上返回 null：语义检索算完余弦到这里来
+  /// 取正文，中间隔着几次 await —— 期间用户可能刚好改了正文，那这条就不能用了
+  /// （片的内容和向量已经不是一个东西）。不传则只按 (id, 片号) 取，关键词那一路
+  /// 是当场搜出来的、不存在这个时间差。
+  Future<NoteChunkRow?> chunkAt(String noteId, int idx, {int? expectHash}) async {
+    final row = await (select(noteChunks)
+          ..where((t) => t.noteId.equals(noteId) & t.idx.equals(idx)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    if (expectHash != null && row.contentHash != expectHash) return null;
+    return row;
+  }
+
+  /// 当前模型下有多少条有效向量（判断「索引是不是基本是空的」）。
+  Future<int> validVectorCount(String model) async {
+    final c = countAll();
+    final q = selectOnly(noteChunks).join([
+      innerJoin(
+        noteVectors,
+        noteVectors.noteId.equalsExp(noteChunks.noteId) &
+            noteVectors.idx.equalsExp(noteChunks.idx),
+      ),
+      innerJoin(notes, notes.id.equalsExp(noteChunks.noteId)),
+    ])
+      ..addColumns([c])
+      ..where(noteVectors.model.equals(model) &
+          noteVectors.contentHash.equalsExp(noteChunks.contentHash) &
+          notes.deletedAt.isNull());
+    final row = await q.getSingle();
+    return row.read(c) ?? 0;
+  }
+
+  /// 有哪些笔记「还缺向量」，一次最多给 [limit] 篇。
+  ///
+  /// **按笔记而不是按片**：一篇的正文要一次读出来、所有缺向量的片一起算，所以
+  /// 调度单位是篇。逐片调度会把同一篇正文反复读出来。
+  Future<List<String>> noteIdsMissingVectors(String model, {int limit = 20}) {
+    return customSelect(
+      'SELECT DISTINCT c.note_id AS id FROM note_chunks c '
+      'JOIN notes n ON n.id = c.note_id '
+      'LEFT JOIN note_vectors v ON v.note_id = c.note_id AND v.idx = c.idx '
+      '  AND v.content_hash = c.content_hash AND v.model = ? '
+      'WHERE n.deleted_at IS NULL AND v.note_id IS NULL '
+      'LIMIT ?',
+      variables: [Variable<String>(model), Variable<int>(limit)],
+      readsFrom: {notes, noteChunks, noteVectors},
+    ).map((r) => r.read<String>('id')).get();
+  }
+
+  /// 某篇笔记现有的向量行（**不校验 hash**，调用方自己比）。
+  ///
+  /// 索引时要回答的是"这一片算过没有"，而"算过但正文变了"也算没算过 ——
+  /// 所以要把 `content_hash` 一起读出来给调用方比。
+  Future<List<NoteVector>> vectorsOf(String noteId, String model) {
+    return (select(noteVectors)
+          ..where((t) => t.noteId.equals(noteId) & t.model.equals(model)))
+        .get();
+  }
+
+  /// 全部切片总数（不含软删的笔记）。和 [validVectorCount] 一起算索引覆盖率。
+  Future<int> chunkTotalCount() async {
+    final c = countAll();
+    final q = selectOnly(noteChunks).join([
+      innerJoin(notes, notes.id.equalsExp(noteChunks.noteId)),
+    ])
+      ..addColumns([c])
+      ..where(notes.deletedAt.isNull());
+    final row = await q.getSingle();
+    return row.read(c) ?? 0;
+  }
+
+  /// 死向量的主键：模型换了（`model <> ?`），或者那片已经不存在 / hash 对不上。
+  ///
+  /// 返回 `(note_id, idx)` —— 这张表的主键就是这两列，够定位了。
+  Future<List<(String, int)>> staleVectorIds(
+    String currentModel, {
+    int limit = 500,
+  }) {
+    return customSelect(
+      'SELECT v.note_id AS note_id, v.idx AS idx FROM note_vectors v '
+      'LEFT JOIN note_chunks c ON c.note_id = v.note_id AND c.idx = v.idx '
+      '  AND c.content_hash = v.content_hash '
+      'WHERE v.model <> ? OR c.note_id IS NULL '
+      'LIMIT ?',
+      variables: [Variable<String>(currentModel), Variable<int>(limit)],
+      readsFrom: {noteVectors, noteChunks},
+    ).map((r) => (r.read<String>('note_id'), r.read<int>('idx'))).get();
+  }
+
+  /// 按主键删若干行向量。
+  Future<void> deleteVectors(List<(String, int)> keys) {
+    if (keys.isEmpty) return Future.value();
+    return transaction(() async {
+      for (final (noteId, idx) in keys) {
+        await (delete(noteVectors)
+              ..where((t) => t.noteId.equals(noteId) & t.idx.equals(idx)))
+            .go();
+      }
+    });
   }
 
   // ==========================================================================

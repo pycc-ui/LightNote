@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/db/app_database.dart';
+import '../../ai/data/rag_index_schedule.dart';
 import '../../../core/util/text_utils.dart';
 import 'note_chunk_repository.dart';
 
@@ -146,6 +147,15 @@ class NoteRepository {
     // **唯一漏斗**：编辑页（防抖 500ms 后）、导入、AI 写入都走它。
     if (nextContent != existing.content) {
       await _chunks.onNoteSaved(id, nextContent);
+
+      // 语义检索的向量也跟着正文走，但**绝不能在这里等**：嵌入一条要 74ms
+      // 纯 CPU（实测），而这条路径是编辑页防抖 500ms 后 await 的 —— 同步等
+      // 等于用户每停一次手就多卡一下。交给后台调度，落后几秒没有影响。
+      //
+      // `instance` 在测试里是 null（没人调 `RagIndexSchedule.start`），
+      // 所以测试一行都不会执行到，也不会有"库关了后台还在查库"那种错
+      //（`feed_repository` 踩过同一个坑，注释还留着）。
+      RagIndexSchedule.instance?.noteChanged(id);
     }
   }
 

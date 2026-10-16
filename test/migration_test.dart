@@ -515,7 +515,7 @@ void main() {
     // ⚠️ 这一句是**故意的硬编码**：加迁移时它必须跟着改。
     // 上面那句是"等于常量"（永远成立、抓不到忘改版本号）；
     // 这句才有用 —— 它逼你在改 `kCurrentSchemaVersion` 时确认这里。
-    expect(kCurrentSchemaVersion, 14);
+    expect(kCurrentSchemaVersion, 15);
   });
 
   test('v13：ai_capabilities 换成 ai_functions，并灌入函数清单', () async {
@@ -573,6 +573,32 @@ void main() {
     expect(names.contains('interrupt_reason'), isTrue,
         reason: 'v14 要给 ai_messages 加这一列；没有它，界面上就分不出「写完了」和「被打断了」');
   });
+  test('v15：note_vectors 表被建出来（语义检索的向量存这儿）', () async {
+    final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    seedV1([
+      {'id': 'n1', 'folder_id': null, 'is_inbox': 1, 'ts': t, 'title': 'A'},
+    ]);
+
+    final db = openCurrent();
+    addTearDown(db.close);
+    await db.allActiveNotes(); // 触发迁移
+
+    final cols = await db.customSelect('PRAGMA table_info(note_vectors)').get();
+    final names = cols.map((r) => r.read<String>('name')).toSet();
+    expect(
+      names,
+      containsAll(<String>[
+        'note_id', 'idx', 'content_hash', 'model', 'dim', 'vec', 'created_at',
+      ]),
+    );
+
+    // 迁移只建空表、不做任何回填：全量回填会在升级那一刻卡住启动
+    final rows =
+        await db.customSelect('SELECT COUNT(*) AS c FROM note_vectors').get();
+    expect(rows.first.read<int>('c'), 0,
+        reason: 'v15 只建表；向量由 RagIndexer 后台慢慢补');
+  });
+
 
   test('v1 老库升到 v10 后，note_chunks 表被建出来且可用', () async {
     final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;

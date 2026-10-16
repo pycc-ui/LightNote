@@ -1,12 +1,14 @@
 // AI 操作数据库的**函数清单**（`ai_functions` 表的种子数据）。
 //
 // 一个函数一条记录：名字 / 分类 / 签名 / 说明 / 例子。这张表是**给 AI 看的**，
-// 不是给人看的 —— AI 需要的函数没在 system prompt 的「已加载详情」里时，
-// 查一次 `SELECT name, signature FROM ai_functions` 拿到目录，再用
-// `mark_functions` 把常用的几个标记为常驻（见本文件末尾与 ai_udfs.dart）。于是：
+// 不是给人看的 —— 函数详情由 `prompts.dart` 从这份清单**生成**进 system prompt，
+// 所以这张表同时也是"AI 眼里有哪些工具"的单一真相。于是：
 //
-//   · system prompt 里只写「去查 ai_functions」，不用把 26 个函数抄一遍；
+//   · system prompt 里不用手抄函数文档（抄了就会和实现分叉）；
 //   · **加一个函数 = 这里加一条 + 在 ai_udfs.dart 里注册一次**，prompt 一个字都不用改。
+//
+// ⚠️ 曾经有过 `mark_functions`（让 AI 把几个函数"钉"成常驻，按需加载详情）。
+// 详情改成全量常驻之后它彻底多余，已删（见下面 v4 = 5 那段历史）。
 //
 // 为什么清单在 Dart 里而不是一段 SQL 里：它要和 `createFunction` 的注册名对齐。
 // 两处写名字的地方挨得越近，改名时越不容易漏（漏了的表现是 AI 照着表写 SQL，
@@ -35,9 +37,10 @@ class AiFunctionSpec {
 
   /// read / create / modify / delete / system / meta
   ///
-  /// 后两类都不是「读写笔记」：`system` 改的是 app_kv（`mark_functions` 钉住函数详情），
-  /// `meta` 什么都不改、只给 App 一个信号（`finish`）。分开是因为执行器要按它决定
-  /// 「通知哪几张表」——把 `finish` 归进 system 会让它白通知一次 app_kv。
+  /// 后两类都不是「读写笔记」：`system` 改的是 app_kv（比如会话摘要那类记在
+  /// app_kv 里的派生数据），`meta` 什么都不改、只给 App 一个信号（`finish`）。
+  /// 分开是因为执行器要按它决定「通知哪几张表」—— 把 `finish` 归进 system
+  /// 会让它白通知一次 app_kv。
   final String category;
   final String name;
   final String signature;
@@ -45,29 +48,23 @@ class AiFunctionSpec {
   final String? example;
 }
 
-/// 清单版本。**改 kAiFunctions 就要 +1**，否则已装 App 的库不会跟着更新。
+/// 清单版本。**改 `kAiFunctions` 就要 +1**，否则已装 App 的库不会跟着更新
+///（对齐逻辑见 `AppDatabase._ensureAiFunctions`：库里的版本号对不上才会重写这张表）。
 ///
-/// v4（=3）：加了 `mark_functions`（第 25 个）。
-/// v5（=4）：加了 `finish`（第 26 个，信号类）—— 让「任务做完了」变成机器可读的一件事。
-/// v6（=5）：**函数文档全量进 System Prompt** 之后的一次大整理 ——
-///   · 加 `outline_notes`（标题目录，聚合任务靠它选材）
-///   · `read_preview` 改名并扩能成 `read_note_batch`（能一次读一批，返回 next_offset）
-///   · 删 `stat_note`（字段并入 `outline_notes`）
-///   · 删 `mark_functions`（详情常驻之后它彻底多余了）
-///   → 26 − 2 + 1 = **25 个**
+/// ## 版本史
+///
+/// 下面的数字**就是常量值**（以前这里混用过"第几次内容修订"，两套编号放在一起
+/// 读起来自相矛盾，已统一）。
+///
+/// | 版本 | 改了什么 | 条数 |
+/// |---|---|---|
+/// | 2 | 砍掉所有"单次"函数（`create_note` / `append_to_note` / `replace_unique` / `delete_unique` / `move_note` / `delete_note`）—— 单次也走批量函数（数组放一个元素），AI 只学一种写法 | 30 → 24 |
+/// | 3 | 加 `mark_functions`（系统类）：让 AI 自己决定哪些函数的详情常驻 | 24 → 25 |
+/// | 4 | 加 `finish`（信号类）：**不改任何数据**，只告诉 App「这一轮就是最终答复」—— 把"任务做完了"变成机器可读的一件事 | 25 → 26 |
+/// | **5** | 函数文档**全量进 System Prompt** 之后的大整理（当前）：加 `outline_notes`（标题目录，聚合任务靠它选材）；`read_preview` 改名并扩能成 `read_note_batch`（一次读一批、返回 `next_offset`）；删 `stat_note`（字段并入 `outline_notes`）；删 `mark_functions`（详情常驻之后它彻底多余了） | 26 − 2 + 1 = **25** |
 const kAiFunctionsVersion = 5;
 
 /// 25 个函数。顺序按「读 → 建 → 改 → 删 → 信号」排，与《AI 操作数据库设计》一致。
-///
-/// v3 的重要变化：**有批量版的单次函数全部砍掉**（create_note / append_to_note /
-/// replace_unique / delete_unique / move_note / delete_note）——单次也走批量函数
-/// （数组放一个元素）。所以从 30 变成 24，AI 只学一种写法。
-///
-/// v4：加回"系统"类里的 `mark_functions`，25 个 —— 它不读写笔记，
-/// 而是让 AI **自己决定哪些函数的详情常驻**（见文件末尾的说明）。
-
-/// v5（本版）：加第 26 个 —— `finish`（信号类）。**不改任何数据**，
-/// 只告诉 App「这一轮就是最终答复，可以收尾了」。
 const kAiFunctions = <AiFunctionSpec>[
   // ---------------------------------------------------------------- 读（11）
   AiFunctionSpec(

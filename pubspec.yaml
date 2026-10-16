@@ -58,6 +58,8 @@ dependencies:
   # Windows 保持原来的保存对话框不动。分平台的分支就在
   # lib/core/backup/file_dialogs.dart 的 pickExportTarget / shareArchive 里。
   share_plus: ^12.0.2
+  bert_tokenizer: ^1.2.0
+  onnxruntime: ^1.4.1
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -82,3 +84,14 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # 语义检索用的中文小模型（bge-small-zh-v1.5，int8 量化）。
+  #
+  # 为什么打进包而不是首次运行时下载（`模型进 apk 包`）：
+  #   · 免掉一次下载交互与"下到一半失败"的状态；
+  #   · 代价是**每个用户都要付这 23.9MB**（连从不搜索的人也一样）——
+  #     这是我按你的决定做的，数字记在设计稿第 6 节里。
+  # 换模型只需要替换这两个文件（`vocab.txt` + `model_int8.onnx`），代码不用动。
+  assets:
+    - assets/models/bge-small-zh-v1.5/vocab.txt
+    - assets/models/bge-small-zh-v1.5/model_int8.onnx

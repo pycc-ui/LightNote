@@ -4129,6 +4129,487 @@ class NoteChunksCompanion extends UpdateCompanion<NoteChunkRow> {
   }
 }
 
+class $NoteVectorsTable extends NoteVectors
+    with TableInfo<$NoteVectorsTable, NoteVector> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $NoteVectorsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
+  @override
+  late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
+    'note_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES notes (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _idxMeta = const VerificationMeta('idx');
+  @override
+  late final GeneratedColumn<int> idx = GeneratedColumn<int>(
+    'idx',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _contentHashMeta = const VerificationMeta(
+    'contentHash',
+  );
+  @override
+  late final GeneratedColumn<int> contentHash = GeneratedColumn<int>(
+    'content_hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _modelMeta = const VerificationMeta('model');
+  @override
+  late final GeneratedColumn<String> model = GeneratedColumn<String>(
+    'model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dimMeta = const VerificationMeta('dim');
+  @override
+  late final GeneratedColumn<int> dim = GeneratedColumn<int>(
+    'dim',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _vecMeta = const VerificationMeta('vec');
+  @override
+  late final GeneratedColumn<Uint8List> vec = GeneratedColumn<Uint8List>(
+    'vec',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    noteId,
+    idx,
+    contentHash,
+    model,
+    dim,
+    vec,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'note_vectors';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<NoteVector> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('note_id')) {
+      context.handle(
+        _noteIdMeta,
+        noteId.isAcceptableOrUnknown(data['note_id']!, _noteIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_noteIdMeta);
+    }
+    if (data.containsKey('idx')) {
+      context.handle(
+        _idxMeta,
+        idx.isAcceptableOrUnknown(data['idx']!, _idxMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_idxMeta);
+    }
+    if (data.containsKey('content_hash')) {
+      context.handle(
+        _contentHashMeta,
+        contentHash.isAcceptableOrUnknown(
+          data['content_hash']!,
+          _contentHashMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_contentHashMeta);
+    }
+    if (data.containsKey('model')) {
+      context.handle(
+        _modelMeta,
+        model.isAcceptableOrUnknown(data['model']!, _modelMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_modelMeta);
+    }
+    if (data.containsKey('dim')) {
+      context.handle(
+        _dimMeta,
+        dim.isAcceptableOrUnknown(data['dim']!, _dimMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dimMeta);
+    }
+    if (data.containsKey('vec')) {
+      context.handle(
+        _vecMeta,
+        vec.isAcceptableOrUnknown(data['vec']!, _vecMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_vecMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {noteId, idx};
+  @override
+  NoteVector map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return NoteVector(
+      noteId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}note_id'],
+      )!,
+      idx: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}idx'],
+      )!,
+      contentHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}content_hash'],
+      )!,
+      model: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}model'],
+      )!,
+      dim: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}dim'],
+      )!,
+      vec: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}vec'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+    );
+  }
+
+  @override
+  $NoteVectorsTable createAlias(String alias) {
+    return $NoteVectorsTable(attachedDatabase, alias);
+  }
+}
+
+class NoteVector extends DataClass implements Insertable<NoteVector> {
+  /// 属于哪篇笔记。删笔记时级联清掉。
+  final String noteId;
+
+  /// 对应 `note_chunks.idx`。
+  final int idx;
+
+  /// 算这条向量时，那一片的正文 hash。
+  ///
+  /// **和 `note_chunks.content_hash` 相等才算有效** —— 正文改了就自动失配，
+  /// 不需要任何一方主动删除（见类注释第 2 条）。
+  final int contentHash;
+
+  /// 嵌入模型标识（如 `bge-small-zh-v1.5-int8`）。换模型 = 旧行全部不匹配。
+  final String model;
+
+  /// 维度。读的时候要校验，防止模型换了但字节长度对不上时读出垃圾。
+  final int dim;
+
+  /// Float32 小端字节，长度必须是 `dim * 4`。
+  final Uint8List vec;
+  final DateTime createdAt;
+  const NoteVector({
+    required this.noteId,
+    required this.idx,
+    required this.contentHash,
+    required this.model,
+    required this.dim,
+    required this.vec,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['note_id'] = Variable<String>(noteId);
+    map['idx'] = Variable<int>(idx);
+    map['content_hash'] = Variable<int>(contentHash);
+    map['model'] = Variable<String>(model);
+    map['dim'] = Variable<int>(dim);
+    map['vec'] = Variable<Uint8List>(vec);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    return map;
+  }
+
+  NoteVectorsCompanion toCompanion(bool nullToAbsent) {
+    return NoteVectorsCompanion(
+      noteId: Value(noteId),
+      idx: Value(idx),
+      contentHash: Value(contentHash),
+      model: Value(model),
+      dim: Value(dim),
+      vec: Value(vec),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory NoteVector.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return NoteVector(
+      noteId: serializer.fromJson<String>(json['noteId']),
+      idx: serializer.fromJson<int>(json['idx']),
+      contentHash: serializer.fromJson<int>(json['contentHash']),
+      model: serializer.fromJson<String>(json['model']),
+      dim: serializer.fromJson<int>(json['dim']),
+      vec: serializer.fromJson<Uint8List>(json['vec']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'noteId': serializer.toJson<String>(noteId),
+      'idx': serializer.toJson<int>(idx),
+      'contentHash': serializer.toJson<int>(contentHash),
+      'model': serializer.toJson<String>(model),
+      'dim': serializer.toJson<int>(dim),
+      'vec': serializer.toJson<Uint8List>(vec),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+    };
+  }
+
+  NoteVector copyWith({
+    String? noteId,
+    int? idx,
+    int? contentHash,
+    String? model,
+    int? dim,
+    Uint8List? vec,
+    DateTime? createdAt,
+  }) => NoteVector(
+    noteId: noteId ?? this.noteId,
+    idx: idx ?? this.idx,
+    contentHash: contentHash ?? this.contentHash,
+    model: model ?? this.model,
+    dim: dim ?? this.dim,
+    vec: vec ?? this.vec,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  NoteVector copyWithCompanion(NoteVectorsCompanion data) {
+    return NoteVector(
+      noteId: data.noteId.present ? data.noteId.value : this.noteId,
+      idx: data.idx.present ? data.idx.value : this.idx,
+      contentHash: data.contentHash.present
+          ? data.contentHash.value
+          : this.contentHash,
+      model: data.model.present ? data.model.value : this.model,
+      dim: data.dim.present ? data.dim.value : this.dim,
+      vec: data.vec.present ? data.vec.value : this.vec,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NoteVector(')
+          ..write('noteId: $noteId, ')
+          ..write('idx: $idx, ')
+          ..write('contentHash: $contentHash, ')
+          ..write('model: $model, ')
+          ..write('dim: $dim, ')
+          ..write('vec: $vec, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    noteId,
+    idx,
+    contentHash,
+    model,
+    dim,
+    $driftBlobEquality.hash(vec),
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is NoteVector &&
+          other.noteId == this.noteId &&
+          other.idx == this.idx &&
+          other.contentHash == this.contentHash &&
+          other.model == this.model &&
+          other.dim == this.dim &&
+          $driftBlobEquality.equals(other.vec, this.vec) &&
+          other.createdAt == this.createdAt);
+}
+
+class NoteVectorsCompanion extends UpdateCompanion<NoteVector> {
+  final Value<String> noteId;
+  final Value<int> idx;
+  final Value<int> contentHash;
+  final Value<String> model;
+  final Value<int> dim;
+  final Value<Uint8List> vec;
+  final Value<DateTime> createdAt;
+  final Value<int> rowid;
+  const NoteVectorsCompanion({
+    this.noteId = const Value.absent(),
+    this.idx = const Value.absent(),
+    this.contentHash = const Value.absent(),
+    this.model = const Value.absent(),
+    this.dim = const Value.absent(),
+    this.vec = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  NoteVectorsCompanion.insert({
+    required String noteId,
+    required int idx,
+    required int contentHash,
+    required String model,
+    required int dim,
+    required Uint8List vec,
+    required DateTime createdAt,
+    this.rowid = const Value.absent(),
+  }) : noteId = Value(noteId),
+       idx = Value(idx),
+       contentHash = Value(contentHash),
+       model = Value(model),
+       dim = Value(dim),
+       vec = Value(vec),
+       createdAt = Value(createdAt);
+  static Insertable<NoteVector> custom({
+    Expression<String>? noteId,
+    Expression<int>? idx,
+    Expression<int>? contentHash,
+    Expression<String>? model,
+    Expression<int>? dim,
+    Expression<Uint8List>? vec,
+    Expression<DateTime>? createdAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (noteId != null) 'note_id': noteId,
+      if (idx != null) 'idx': idx,
+      if (contentHash != null) 'content_hash': contentHash,
+      if (model != null) 'model': model,
+      if (dim != null) 'dim': dim,
+      if (vec != null) 'vec': vec,
+      if (createdAt != null) 'created_at': createdAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  NoteVectorsCompanion copyWith({
+    Value<String>? noteId,
+    Value<int>? idx,
+    Value<int>? contentHash,
+    Value<String>? model,
+    Value<int>? dim,
+    Value<Uint8List>? vec,
+    Value<DateTime>? createdAt,
+    Value<int>? rowid,
+  }) {
+    return NoteVectorsCompanion(
+      noteId: noteId ?? this.noteId,
+      idx: idx ?? this.idx,
+      contentHash: contentHash ?? this.contentHash,
+      model: model ?? this.model,
+      dim: dim ?? this.dim,
+      vec: vec ?? this.vec,
+      createdAt: createdAt ?? this.createdAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (noteId.present) {
+      map['note_id'] = Variable<String>(noteId.value);
+    }
+    if (idx.present) {
+      map['idx'] = Variable<int>(idx.value);
+    }
+    if (contentHash.present) {
+      map['content_hash'] = Variable<int>(contentHash.value);
+    }
+    if (model.present) {
+      map['model'] = Variable<String>(model.value);
+    }
+    if (dim.present) {
+      map['dim'] = Variable<int>(dim.value);
+    }
+    if (vec.present) {
+      map['vec'] = Variable<Uint8List>(vec.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NoteVectorsCompanion(')
+          ..write('noteId: $noteId, ')
+          ..write('idx: $idx, ')
+          ..write('contentHash: $contentHash, ')
+          ..write('model: $model, ')
+          ..write('dim: $dim, ')
+          ..write('vec: $vec, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $AiFunctionsTable extends AiFunctions
     with TableInfo<$AiFunctionsTable, AiFunction> {
   @override
@@ -4526,6 +5007,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $AppKvTable appKv = $AppKvTable(this);
   late final $FeedReserveTable feedReserve = $FeedReserveTable(this);
   late final $NoteChunksTable noteChunks = $NoteChunksTable(this);
+  late final $NoteVectorsTable noteVectors = $NoteVectorsTable(this);
   late final $AiFunctionsTable aiFunctions = $AiFunctionsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -4540,6 +5022,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     appKv,
     feedReserve,
     noteChunks,
+    noteVectors,
     aiFunctions,
   ];
   @override
@@ -4564,6 +5047,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('note_chunks', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'notes',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('note_vectors', kind: UpdateKind.delete)],
     ),
   ]);
 }
@@ -4954,6 +5444,24 @@ final class $$NotesTableReferences
       manager.$state.copyWith(prefetchedData: cache),
     );
   }
+
+  static MultiTypedResultKey<$NoteVectorsTable, List<NoteVector>>
+  _noteVectorsRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.noteVectors,
+    aliasName: 'notes__id__note_vectors__note_id',
+  );
+
+  $$NoteVectorsTableProcessedTableManager get noteVectorsRefs {
+    final manager = $$NoteVectorsTableTableManager(
+      $_db,
+      $_db.noteVectors,
+    ).filter((f) => f.noteId.id.sqlEquals($_itemColumn<String>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_noteVectorsRefsTable($_db));
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
 }
 
 class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
@@ -5063,6 +5571,31 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
           }) => $$NoteChunksTableFilterComposer(
             $db: $db,
             $table: $db.noteChunks,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+
+  Expression<bool> noteVectorsRefs(
+    Expression<bool> Function($$NoteVectorsTableFilterComposer f) f,
+  ) {
+    final $$NoteVectorsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.noteVectors,
+      getReferencedColumn: (t) => t.noteId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$NoteVectorsTableFilterComposer(
+            $db: $db,
+            $table: $db.noteVectors,
             $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
             joinBuilder: joinBuilder,
             $removeJoinBuilderFromRootComposer:
@@ -5258,6 +5791,31 @@ class $$NotesTableAnnotationComposer
     );
     return f(composer);
   }
+
+  Expression<T> noteVectorsRefs<T extends Object>(
+    Expression<T> Function($$NoteVectorsTableAnnotationComposer a) f,
+  ) {
+    final $$NoteVectorsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.noteVectors,
+      getReferencedColumn: (t) => t.noteId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$NoteVectorsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.noteVectors,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
 }
 
 class $$NotesTableTableManager
@@ -5273,7 +5831,11 @@ class $$NotesTableTableManager
           $$NotesTableUpdateCompanionBuilder,
           (Note, $$NotesTableReferences),
           Note,
-          PrefetchHooks Function({bool notebookId, bool noteChunksRefs})
+          PrefetchHooks Function({
+            bool notebookId,
+            bool noteChunksRefs,
+            bool noteVectorsRefs,
+          })
         > {
   $$NotesTableTableManager(_$AppDatabase db, $NotesTable table)
     : super(
@@ -5359,10 +5921,17 @@ class $$NotesTableTableManager
               )
               .toList(),
           prefetchHooksCallback:
-              ({notebookId = false, noteChunksRefs = false}) {
+              ({
+                notebookId = false,
+                noteChunksRefs = false,
+                noteVectorsRefs = false,
+              }) {
                 return PrefetchHooks(
                   db: db,
-                  explicitlyWatchedTables: [if (noteChunksRefs) db.noteChunks],
+                  explicitlyWatchedTables: [
+                    if (noteChunksRefs) db.noteChunks,
+                    if (noteVectorsRefs) db.noteVectors,
+                  ],
                   addJoins:
                       <
                         T extends TableManagerState<
@@ -5418,6 +5987,27 @@ class $$NotesTableTableManager
                               ),
                           typedResults: items,
                         ),
+                      if (noteVectorsRefs)
+                        await $_getPrefetchedData<
+                          Note,
+                          $NotesTable,
+                          NoteVector
+                        >(
+                          currentTable: table,
+                          referencedTable: $$NotesTableReferences
+                              ._noteVectorsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$NotesTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).noteVectorsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.noteId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
                     ];
                   },
                 );
@@ -5438,7 +6028,11 @@ typedef $$NotesTableProcessedTableManager =
       $$NotesTableUpdateCompanionBuilder,
       (Note, $$NotesTableReferences),
       Note,
-      PrefetchHooks Function({bool notebookId, bool noteChunksRefs})
+      PrefetchHooks Function({
+        bool notebookId,
+        bool noteChunksRefs,
+        bool noteVectorsRefs,
+      })
     >;
 typedef $$AiCallsTableCreateCompanionBuilder =
     AiCallsCompanion Function({
@@ -7279,6 +7873,363 @@ typedef $$NoteChunksTableProcessedTableManager =
       NoteChunkRow,
       PrefetchHooks Function({bool noteId})
     >;
+typedef $$NoteVectorsTableCreateCompanionBuilder =
+    NoteVectorsCompanion Function({
+      required String noteId,
+      required int idx,
+      required int contentHash,
+      required String model,
+      required int dim,
+      required Uint8List vec,
+      required DateTime createdAt,
+      Value<int> rowid,
+    });
+typedef $$NoteVectorsTableUpdateCompanionBuilder =
+    NoteVectorsCompanion Function({
+      Value<String> noteId,
+      Value<int> idx,
+      Value<int> contentHash,
+      Value<String> model,
+      Value<int> dim,
+      Value<Uint8List> vec,
+      Value<DateTime> createdAt,
+      Value<int> rowid,
+    });
+
+final class $$NoteVectorsTableReferences
+    extends BaseReferences<_$AppDatabase, $NoteVectorsTable, NoteVector> {
+  $$NoteVectorsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $NotesTable _noteIdTable(_$AppDatabase db) =>
+      db.notes.createAlias('note_vectors__note_id__notes__id');
+
+  $$NotesTableProcessedTableManager get noteId {
+    final $_column = $_itemColumn<String>('note_id')!;
+
+    final manager = $$NotesTableTableManager(
+      $_db,
+      $_db.notes,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_noteIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$NoteVectorsTableFilterComposer
+    extends Composer<_$AppDatabase, $NoteVectorsTable> {
+  $$NoteVectorsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get idx => $composableBuilder(
+    column: $table.idx,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get contentHash => $composableBuilder(
+    column: $table.contentHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get dim => $composableBuilder(
+    column: $table.dim,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get vec => $composableBuilder(
+    column: $table.vec,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$NotesTableFilterComposer get noteId {
+    final $$NotesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.noteId,
+      referencedTable: $db.notes,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$NotesTableFilterComposer(
+            $db: $db,
+            $table: $db.notes,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$NoteVectorsTableOrderingComposer
+    extends Composer<_$AppDatabase, $NoteVectorsTable> {
+  $$NoteVectorsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get idx => $composableBuilder(
+    column: $table.idx,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get contentHash => $composableBuilder(
+    column: $table.contentHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get model => $composableBuilder(
+    column: $table.model,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get dim => $composableBuilder(
+    column: $table.dim,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get vec => $composableBuilder(
+    column: $table.vec,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$NotesTableOrderingComposer get noteId {
+    final $$NotesTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.noteId,
+      referencedTable: $db.notes,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$NotesTableOrderingComposer(
+            $db: $db,
+            $table: $db.notes,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$NoteVectorsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $NoteVectorsTable> {
+  $$NoteVectorsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get idx =>
+      $composableBuilder(column: $table.idx, builder: (column) => column);
+
+  GeneratedColumn<int> get contentHash => $composableBuilder(
+    column: $table.contentHash,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get model =>
+      $composableBuilder(column: $table.model, builder: (column) => column);
+
+  GeneratedColumn<int> get dim =>
+      $composableBuilder(column: $table.dim, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get vec =>
+      $composableBuilder(column: $table.vec, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  $$NotesTableAnnotationComposer get noteId {
+    final $$NotesTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.noteId,
+      referencedTable: $db.notes,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$NotesTableAnnotationComposer(
+            $db: $db,
+            $table: $db.notes,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$NoteVectorsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $NoteVectorsTable,
+          NoteVector,
+          $$NoteVectorsTableFilterComposer,
+          $$NoteVectorsTableOrderingComposer,
+          $$NoteVectorsTableAnnotationComposer,
+          $$NoteVectorsTableCreateCompanionBuilder,
+          $$NoteVectorsTableUpdateCompanionBuilder,
+          (NoteVector, $$NoteVectorsTableReferences),
+          NoteVector,
+          PrefetchHooks Function({bool noteId})
+        > {
+  $$NoteVectorsTableTableManager(_$AppDatabase db, $NoteVectorsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$NoteVectorsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$NoteVectorsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$NoteVectorsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> noteId = const Value.absent(),
+                Value<int> idx = const Value.absent(),
+                Value<int> contentHash = const Value.absent(),
+                Value<String> model = const Value.absent(),
+                Value<int> dim = const Value.absent(),
+                Value<Uint8List> vec = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => NoteVectorsCompanion(
+                noteId: noteId,
+                idx: idx,
+                contentHash: contentHash,
+                model: model,
+                dim: dim,
+                vec: vec,
+                createdAt: createdAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String noteId,
+                required int idx,
+                required int contentHash,
+                required String model,
+                required int dim,
+                required Uint8List vec,
+                required DateTime createdAt,
+                Value<int> rowid = const Value.absent(),
+              }) => NoteVectorsCompanion.insert(
+                noteId: noteId,
+                idx: idx,
+                contentHash: contentHash,
+                model: model,
+                dim: dim,
+                vec: vec,
+                createdAt: createdAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$NoteVectorsTable, NoteVector>(table),
+                  $$NoteVectorsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({noteId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (noteId) {
+                      state =
+                          state.withJoin(
+                                currentTable: table,
+                                currentColumn: table.noteId,
+                                referencedTable: $$NoteVectorsTableReferences
+                                    ._noteIdTable(db),
+                                referencedColumn: $$NoteVectorsTableReferences
+                                    ._noteIdTable(db)
+                                    .id,
+                              )
+                              as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$NoteVectorsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $NoteVectorsTable,
+      NoteVector,
+      $$NoteVectorsTableFilterComposer,
+      $$NoteVectorsTableOrderingComposer,
+      $$NoteVectorsTableAnnotationComposer,
+      $$NoteVectorsTableCreateCompanionBuilder,
+      $$NoteVectorsTableUpdateCompanionBuilder,
+      (NoteVector, $$NoteVectorsTableReferences),
+      NoteVector,
+      PrefetchHooks Function({bool noteId})
+    >;
 typedef $$AiFunctionsTableCreateCompanionBuilder =
     AiFunctionsCompanion Function({
       required String name,
@@ -7510,6 +8461,8 @@ class $AppDatabaseManager {
       $$FeedReserveTableTableManager(_db, _db.feedReserve);
   $$NoteChunksTableTableManager get noteChunks =>
       $$NoteChunksTableTableManager(_db, _db.noteChunks);
+  $$NoteVectorsTableTableManager get noteVectors =>
+      $$NoteVectorsTableTableManager(_db, _db.noteVectors);
   $$AiFunctionsTableTableManager get aiFunctions =>
       $$AiFunctionsTableTableManager(_db, _db.aiFunctions);
 }

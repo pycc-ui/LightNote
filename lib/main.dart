@@ -18,6 +18,7 @@ import 'core/theme/app_theme.dart';
 import 'core/widgets/log_bar.dart';
 import 'features/ai/data/deepseek_client.dart';
 import 'features/ai/domain/ai_chat_repository.dart';
+import 'features/ai/data/rag_index_schedule.dart';
 import 'features/ai/domain/ai_repository.dart';
 import 'features/note/data/feed_repository.dart';
 import 'features/note/data/notebook_repository.dart';
@@ -260,6 +261,13 @@ class _StartupGateState extends State<_StartupGate> {
       notebooks: context.read<NotebookRepository>(),
       prefs: context.read<PreferencesService>(),
     );
+
+    // 语义检索的索引从这里开始生效（在这之前 `RagIndexSchedule.instance`
+    // 是 null，保存笔记那条路径什么都不会做 —— 测试里正是这个状态）。
+    //
+    // 放在启动而不是"第一次检索前"：补索引是纯 CPU 的慢活（74ms/片），
+    // 等用户开口了才开始补，第一条消息就赶不上。启动后后台慢慢补更合适。
+    RagIndexSchedule.start(db).kickBackfill();
   }
 
   @override

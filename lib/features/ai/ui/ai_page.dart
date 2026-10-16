@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -5,6 +7,7 @@ import '../../../core/db/app_database.dart';
 import '../../../core/theme/dimens.dart';
 import '../../../core/widgets/log_bar.dart';
 import '../../../core/widgets/markdown_view.dart';
+import '../data/rag_index_schedule.dart';
 import '../domain/ai_chat_repository.dart';
 import '../domain/ai_model.dart';
 import '../domain/ask_resolver.dart';
@@ -39,23 +42,66 @@ class _AiPageState extends State<AiPage> {
   /// 思考强度：low / medium / high
   String _effort = 'medium';
 
+  /// 这次 `_send()` 还在跑（**只管页面自己发起的这一次**）。
+  ///
+  /// ⚠️ 它**不能**用来回答"AI 是不是还在生成" —— 见下面 [_busy]。
   bool _sending = false;
+
+  /// 跟着仓库的"在不在跑"重建。
+  ///
+  /// 界面必须订阅它：一轮跑完时数据库那边**不会**写任何一行（`in_flight`
+  /// 是在事务里清掉的，但清掉这个动作本身不保证触发重建），不订阅的话
+  /// 转圈会一直挂着。
+  StreamSubscription<void>? _runningSub;
 
   @override
   void initState() {
     super.initState();
+    _runningSub = context
+        .read<AiChatRepository>()
+        .runningChanges
+        .listen((_) {
+      if (mounted) setState(() {});
+    });
     _bootstrap();
   }
 
   @override
   void dispose() {
+    _runningSub?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
+  /// **AI 现在是不是还在生成 —— 以仓库为准，不以页面为准。**
+  ///
+  /// 这里是这次那个 bug 的修复点。旧写法是 `busy: _sending`，而 `_sending` 属于
+  /// 页面 State：用户退出 AI 页时 State 销毁、`_sending` 归 false，**可那一轮还在
+  /// 正常跑**；再进来是个新 State，于是"消息上有 `in_flight` 戳 + 看起来没在生成"
+  /// → 误报「App 被系统中断，要不要继续」，而点「继续」还会在同一条消息上再起一轮。
+  ///
+  /// 所以两个来源要合起来看：
+  ///   · `_sending`：这次 `_send()` 还在路上（用户刚点发送、第一轮还没开始写库）
+  ///   · `isRunning`：仓库里真有一轮在跑（**跨页面重建也有效**）
+  bool get _busy {
+    final convId = _conversationId;
+    if (convId == null) return _sending;
+    return _sending || context.read<AiChatRepository>().isRunning(convId);
+  }
+
   Future<void> _bootstrap() async {
     final repo = context.read<AiChatRepository>();
+
+    // 进 AI 页顺手补一批索引（fire-and-forget，**不等它**）。
+    //
+    // 启动时已经补过一批了（见 lib/main.dart），这里再来一批的理由是：
+    // 那个补丁每次启动只推 [RagLimits.indexNotesPerRun] 篇，笔记多的时候
+    // 要好几轮才补完；而"用户真的来用 AI 了"正是值得多补一点的时机。
+    // 补不完也没关系 —— 索引不全是"少召回几条"，不是错误。
+    //
+    // 测试里 `instance` 是 null（没人调 start），所以这里一行都不执行。
+    RagIndexSchedule.instance?.kickBackfill();
 
     // 注意：示例数据（SeedData）**不在这里**写了。
     // 它已经挪到启动阶段（见 lib/app/seed_bootstrap.dart），
@@ -228,7 +274,7 @@ class _AiPageState extends State<AiPage> {
                         controller: _scrollController,
                         // 「正在生成」时最后那条不该显示成"未完成"——
                         // 它只是还没写完（气泡里已经有转圈了）。
-                        busy: _sending,
+                        busy: _busy,
                         onContinue: _continueInterrupted,
                         onDismiss: _dismissInterrupted,
                       );
@@ -246,7 +292,7 @@ class _AiPageState extends State<AiPage> {
             controller: _inputController,
             modelLabel: AiModel.label(_model),
             effort: _effort,
-            sending: _sending,
+            sending: _busy,
             onPickModel: _pickModel,
             onPickEffort: _pickEffort,
             onSend: _send,
@@ -651,7 +697,9 @@ class _AiPageState extends State<AiPage> {
 
   Future<void> _send() async {
     final text = _inputController.text.trim();
-    if (text.isEmpty || _sending) return;
+    // `_busy` 而不是 `_sending`：后台还有一轮在跑时也不该再发（仓库里那道闸会拒，
+    // 但界面先拦住才不会弹一个"发送失败"）
+    if (text.isEmpty || _busy) return;
     setState(() => _sending = true);
     _inputController.clear();
 

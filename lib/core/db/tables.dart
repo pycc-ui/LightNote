@@ -347,3 +347,51 @@ class AiFunctions extends Table {
   @override
   Set<Column> get primaryKey => {name};
 }
+
+/// 笔记切片的**向量**（RAG 语义检索用）。
+///
+/// ## 为什么单独一张表，而不是往 `note_chunks` 加一列
+///
+/// 三条理由，每条都对应一种会出错的改法：
+///
+/// 1. **向量的身份是"文本 + 模型"**，不是"第几片"。换嵌入模型（或改切片
+///    算法）后，旧向量必须整体作废。挂在 `note_chunks` 上就没有地方记"这是
+///    哪个模型算的"，只能靠"升版本时全表清空"这种一刀切。
+/// 2. **失效判据天然是 `content_hash`**（和 `note_chunks` 同一套自愈思路）：
+///    检索时按 hash 对齐，对不上的向量**自动被忽略**，不用等谁去清理。
+///    `NoteChunkRepository` 重切时也不必通知这边。
+/// 3. **不碰 `note_chunks` 的写入路径**：切片流程（搜索、卡片流都在用）一个
+///    字段都不动，RAG 加坏了也影响不到它。
+///
+/// 载荷直接存 **Float32 小端字节**（`dim * 4` 字节），不引原生扩展：
+/// 检索时全量读进来在 Dart 里算余弦。实测 2 万条 512 维 = **11ms/次**，
+/// 笔记 App 这个量级远够用，而 `sqlite-vec` 在 Android 上要自己 FFI 加载
+/// 扩展（`package:sqlite3` 没有公开 API），风险不成比例。
+class NoteVectors extends Table {
+  /// 属于哪篇笔记。删笔记时级联清掉。
+  TextColumn get noteId =>
+      text().references(Notes, #id, onDelete: KeyAction.cascade)();
+
+  /// 对应 `note_chunks.idx`。
+  IntColumn get idx => integer()();
+
+  /// 算这条向量时，那一片的正文 hash。
+  ///
+  /// **和 `note_chunks.content_hash` 相等才算有效** —— 正文改了就自动失配，
+  /// 不需要任何一方主动删除（见类注释第 2 条）。
+  IntColumn get contentHash => integer()();
+
+  /// 嵌入模型标识（如 `bge-small-zh-v1.5-int8`）。换模型 = 旧行全部不匹配。
+  TextColumn get model => text()();
+
+  /// 维度。读的时候要校验，防止模型换了但字节长度对不上时读出垃圾。
+  IntColumn get dim => integer()();
+
+  /// Float32 小端字节，长度必须是 `dim * 4`。
+  BlobColumn get vec => blob()();
+
+  DateTimeColumn get createdAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {noteId, idx};
+}

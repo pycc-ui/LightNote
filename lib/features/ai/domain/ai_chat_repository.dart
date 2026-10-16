@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:drift/drift.dart';
@@ -10,6 +11,7 @@ import '../data/deepseek_client.dart';
 import '../data/deepseek_config.dart';
 import 'agent_loop.dart';
 import 'ai_model.dart';
+import 'note_retriever.dart';
 import 'ai_repository.dart';
 import 'ask_user.dart';
 import 'tool_executor.dart';
@@ -28,12 +30,76 @@ import 'result_applier.dart';
 /// 也不做全库上传。需要笔记内容时，由 AI 自己在 SQL 里用 search_notes / read_around
 /// 按需读取，读到的片段只在该轮的工具结果里回灌。
 class AiChatRepository {
-  AiChatRepository({required AppDatabase db, required AiRepository ai})
-      : _db = db,
-        _ai = ai;
+  /// [retrievalBlock]：**前置检索的注入钩子**，默认就是 [NoteRetriever] 那套。
+  ///
+  /// 做成可替换的只有一个理由：**测试**。真的检索要加载 23MB 模型、要原生库，
+  /// 而这里要验的是"素材拼进请求了没有、库里那条消息动没动、检索炸了会不会
+  /// 带崩整个 AI"—— 这些都不该依赖模型能不能加载。
+  ///
+  /// 传 null 就是"不检索"（返回 null = 这次不给素材）。
+  AiChatRepository({
+    required AppDatabase db,
+    required AiRepository ai,
+    Future<String?> Function(String query)? retrievalBlock,
+  })  : _db = db,
+        _ai = ai,
+        _retrieval = retrievalBlock;
 
   final AppDatabase _db;
   final AiRepository _ai;
+  final Future<String?> Function(String query)? _retrieval;
+
+  // ---------------------------------------------------------------------------
+  // 「现在有没有一轮在跑」—— **进程内的唯一真相**
+  //
+  // ## 为什么不能在界面里判断
+  //
+  // 界面上判断"是不是还在生成"曾经用的是页面自己的 `_sending` 标志，而它有个
+  // 硬伤：`send()` 的 Future **不绑在 widget 上**。用户退出 AI 页（路由 pop）
+  // 时 State 被销毁、`_sending` 归 false，**可那一轮还在正常跑**。再进页面就是
+  // 一个新 State → 看到消息上留着 `in_flight` 戳、又没有"正在生成" → 弹出
+  // 「App 被系统中断，要不要继续」。
+  //
+  // 两件事都错：任务根本没中断；而这时点「继续」会在同一条消息上**再起一轮**，
+  // 两轮并发写同一条回答。
+  //
+  // 所以"在不在跑"必须由**活着的那个对象**回答。仓库是 Provider 里的单例
+  //（`previous ?? AiChatRepository(...)`），生命周期就是进程，正合适。
+  //
+  // ## 和数据库里那个 `in_flight` 的分工
+  //
+  //   · 内存里在 → **正在生成**（消息上的 `in_flight` 只是"这一轮还没写完"）
+  //   · 内存里不在、库里却是 `in_flight` → 上次进程没了（被杀/崩了），**那才是中断**
+  //
+  // 两者合起来，文案「App 被系统中断」才成立；只看数据库是分不出这两种情况的。
+  // ---------------------------------------------------------------------------
+
+  /// conversationId → 那一轮的助手消息 id。
+  final _running = <String, String>{};
+
+  /// 「在不在跑」的变化通知：界面靠它重建（数据库那边**不会**为"跑完了"写一行，
+  /// 所以没有这个流的话，转圈会一直挂着）。
+  final _runningChanges = StreamController<void>.broadcast();
+
+  /// 这条会话现在有没有一轮在跑。
+  bool isRunning(String conversationId) => _running.containsKey(conversationId);
+
+  /// 正在跑的那条助手消息 id（没在跑就是 null）。
+  String? runningMessageId(String conversationId) => _running[conversationId];
+
+  /// 订阅它来跟着"在不在跑"重建。
+  Stream<void> get runningChanges => _runningChanges.stream;
+
+  void _markRunning(String conversationId, String assistantId) {
+    _running[conversationId] = assistantId;
+    if (!_runningChanges.isClosed) _runningChanges.add(null);
+  }
+
+  void _markIdle(String conversationId) {
+    if (_running.remove(conversationId) != null && !_runningChanges.isClosed) {
+      _runningChanges.add(null);
+    }
+  }
   final _uuid = const Uuid();
 
 
@@ -156,6 +222,15 @@ class AiChatRepository {
     required String thinkingEffort,
     required bool thinkingEnabled,
   }) async {
+    // 同一条会话**同时只能有一轮**。
+    //
+    // 这道闸防的是"界面判断错了"那种情况（比如旧版本会误报中断、用户点了
+    // 「继续」）：两轮并发写同一条回答，结果是文字交错、落库重复。
+    // 拦在这里而不是落完用户消息之后 —— 被拒的这次不该在库里留下半条记录。
+    if (isRunning(conversationId)) {
+      throw StateError('这条会话还有一轮没跑完（${_running[conversationId]}），等它结束再发');
+    }
+
     final now = DateTime.now().toUtc();
 
     // 1) 落用户消息
@@ -325,7 +400,77 @@ class AiChatRepository {
   /// system prompt 由这里按轮**重拼**（[rebuildPrompt]）：AI 这一轮调
   /// `mark_functions` 之后，下一轮就能看到刚加载的函数详情。
   /// [summary] 是"更早历史"的背景摘要（见 [_olderHistorySummary]）。
+  /// 给"这条用户消息"做一次前置检索，返回**要塞进请求的用户消息文本**。
+  ///
+  /// 返回 null 表示这次不给素材（没检索到、不够确定、或者任何一步失败）——
+  /// **这是常态**：按实测，没有答案的查询全都会走到这里。
+  ///
+  /// 为什么是"替换最后一条 user 消息"而不是"追加一条新消息"：
+  ///   · 追加一条 `system` 消息在中间？DeepSeek 那份协议里没保证接受；
+  ///   · 追加一条 `user` 消息？会出现连续两条 user，而且多一条就多一份计费；
+  ///   · **把原文和素材拼在同一条里**最省事，而且库里那条消息**一个字节都不改**
+  ///     （界面上看到的永远是用户自己写的话，素材只存在于请求里）。
+  Future<String?> _retrievalFor(List<AgentMessage> history) async {
+    if (history.isEmpty) return null;
+    final last = history.last;
+    if (last.role != 'user') return null;
+
+    // 幂等：挂起恢复时 history 是重新拼的，这里要保证不会叠第二遍
+    if (last.content.contains(kRetrievalMarker)) return last.content;
+
+    try {
+      final retrieve = _retrieval ?? NoteRetriever(_db).autoInjectBlock;
+      final block = await retrieve(last.content);
+      if (block == null || block.isEmpty) return null;
+      return '${last.content}\n\n$block';
+    } catch (_) {
+      // 见上面的注释：检索坏了不影响 AI 干活
+      return null;
+    }
+  }
+
+  /// 跑一轮，并**在这期间登记"这条会话在跑"**。
+  ///
+  /// 登记放在这个公共入口而不是两个调用点（`send` / `resume`）里：调用点以后
+  /// 还会加，漏一处的表现就是"那一轮跑着、界面却说被打断了"—— 正是这次的 bug。
   Future<void> _drive({
+    required String conversationId,
+    required String assistantId,
+    required String summary,
+    required List<AgentMessage> history,
+    required List<AiMessage> dbHistory,
+    required bool thinkingEnabled,
+    required String thinkingEffort,
+    required String model,
+    required bool append,
+    int asksSoFar = 0,
+    int roundsUsed = 0,
+    int? roundBudget,
+  }) async {
+    _markRunning(conversationId, assistantId);
+    try {
+      await _driveInner(
+        conversationId: conversationId,
+        assistantId: assistantId,
+        summary: summary,
+        history: history,
+        dbHistory: dbHistory,
+        thinkingEnabled: thinkingEnabled,
+        thinkingEffort: thinkingEffort,
+        model: model,
+        append: append,
+        asksSoFar: asksSoFar,
+        roundsUsed: roundsUsed,
+        roundBudget: roundBudget,
+      );
+    } finally {
+      // 无论成功、失败、挂起、抛异常，都要摘掉 ——
+      // 漏摘的表现是"这条会话从此发不出消息了"。
+      _markIdle(conversationId);
+    }
+  }
+
+  Future<void> _driveInner({
     required String conversationId,
     required String assistantId,
     required String summary,
@@ -355,6 +500,25 @@ class AiChatRepository {
     /// 写入"本次 run 已经产生的文本"（[base] 之后的部分）。
     Future<void> writeText(String text) =>
         _db.updateAiMessage(assistantId, _joined(base, text));
+
+    // ---- 前置检索：**每条用户消息只做一次**，就挂在这条消息末尾 ----
+    //
+    // 三个"为什么是这里"：
+    //   · 挂在 `_drive` 而不是两个入口各自做 —— 新消息与挂起恢复都从这里过，
+    //     写两遍迟早分叉；
+    //   · 挂在**用户消息的末尾**而不是 system 头 —— 前缀缓存是逐块比对的，
+    //     头一动整段上下文都要按全价重算（30k token 时 3~27 分）；
+    //   · 只做一次而不是每轮都做 —— 它是对"用户这句话"的检索，不是对"模型
+    //     当前想到哪"的检索，每轮重算既没意义又白花时间。
+    //
+    // ⚠️ 失败一律吞掉：**检索是锦上添花，不能让整个 AI 用不了**。
+    // 模型加载失败（比如这台设备上的原生库有问题）、库坏了、索引是空的，
+    // 都只是"这次没有素材"，AI 手里那些工具照旧。
+    final injected = await _retrievalFor(history);
+    if (injected != null) {
+      history.removeLast();
+      history.add(AgentMessage.user(injected));
+    }
 
     // AI 的操作面是**整个库**：一条 SQL 就能读遍或改遍所有笔记。
     // 没有工作区、也没有确认层 —— 约束由 UDF 与 SqlGuard 把关（见 tool_executor.dart）。
@@ -680,9 +844,14 @@ class AiChatRepository {
 
   /// 「正在生成」的中断标记（`ai_messages.interrupt_reason`）。
   ///
-  /// 每轮开始前写上、成功/挂起时清掉。于是**冷启动还看到它**只有一种解释：
-  /// 上次生成被系统杀掉或 App 崩了 —— 那是我们唯一能观测到"进程没了"的办法
-  /// （`foreground_killed` 那种事没有任何回调会告诉我们）。
+  /// 每轮开始前写上、成功/挂起时清掉。
+  ///
+  /// ⚠️ **它单独一个字段说明不了"中断"**：正在生成的那一轮也是这个值。
+  /// 判断要配 [isRunning] 一起看（内存里在跑 = 正在生成；内存里不在 = 上次进程
+  /// 没了）。这个分工写在 [isRunning] 的注释里，改这块前先读那段。
+  ///
+  /// 冷启动还看到它，才是"上次被系统杀掉或 App 崩了"—— 那是我们唯一能观测到
+  /// "进程没了"的办法（`foreground_killed` 那种事没有任何回调会告诉我们）。
   static const inFlightReason = 'in_flight';
 
   /// 失败但**没有错误码**时用的兜底原因（例如轮数用尽）。

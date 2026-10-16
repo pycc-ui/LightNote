@@ -52,7 +52,7 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///   14 ai_messages 新增 interrupt_reason（这条回答为什么没写完：网络断了 /
 ///      被系统杀了 / 轮数用尽……）。内容本来就一直在落库，这一列只回答
 ///      "写完了没有"，界面据此显示「未完成 + 继续」。
-const kCurrentSchemaVersion = 14;
+const kCurrentSchemaVersion = 15;
 
 /// App 私有目录下的子目录名。
 const kPrivateFolderName = 'LightNote';
