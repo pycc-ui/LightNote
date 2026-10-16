@@ -35,6 +35,13 @@ library;
 import '../../../core/util/app_params.dart';
 import 'note_chunk.dart';
 
+/// 标题路径的分隔符（`工作 / 项目A / 风险`）。
+///
+/// **只在这里定义一次**：切片时用它拼路径（`_splitByHeadings`），界面要
+/// 「只取这一节自己的标题」时用它拆。两边各写各的字符串，改一处就会让
+/// 父级前缀又冒出来（目录里出现「工作 / 项目A / 风险」这种行）。
+const kChunkHeadingSep = ' / ';
+
 /// 切片器本体。
 class NoteChunker {
   NoteChunker._();
@@ -140,7 +147,7 @@ class NoteChunker {
       final full = [
         for (var lv = 1; lv <= h.level; lv++)
           if (path[lv].isNotEmpty) path[lv],
-      ].join(' / ');
+      ].join(kChunkHeadingSep);
 
       final next = i + 1 < heads.length ? heads[i + 1].start : to;
       final cs = _afterLine(c, h.lineEnd, next);

@@ -850,18 +850,35 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   /// "目录里的一行" 与 "能滚到的那一片" 天然是同一个东西，不需要两套定位。
   ///
   /// 同一标题被拆成多片时只留第一片 —— 否则目录里会出现三行一模一样的标题。
+  ///
+  /// 去重按**完整路径**比，不是按显示出来的那截：不同父级下的同名小节
+  ///（两个「风险」）路径不同，属于两节，不能被当成重复。
   List<({int index, String heading, int level})> _sections() {
     final pieces = _piecesOf(_contentController.text);
     final out = <({int index, String heading, int level})>[];
-    String? last;
+    String? lastFull;
     for (final p in pieces) {
-      final heading = p.heading.trim();
+      final full = p.heading.trim();
       // 空标题是"开头那段没有小标题的正文"，不进目录
-      if (heading.isEmpty || heading == last) continue;
-      last = heading;
-      out.add((index: p.index, heading: heading, level: p.level));
+      if (full.isEmpty) continue;
+      // 同一节被切成多片时，它们的 heading 一模一样且**连着出现**
+      if (full == lastFull) continue;
+      lastFull = full;
+      out.add((index: p.index, heading: _ownTitle(full), level: p.level));
     }
     return out;
+  }
+
+  /// 目录里只显示**这一节自己的标题**，不要父级前缀。
+  ///
+  /// `NoteChunk.heading` 是**完整路径**（`工作 / 项目A / 风险`）—— 那是给 AI 与
+  /// 搜索页当上下文用的（"这一片落在哪个话题里"）。但目录本身已经是**带缩进的
+  /// 层级列表**：从属关系由缩进表达，再带一遍父标题只是噪音 ——
+  /// 「工作 / 项目A / 风险」和「工作 / 项目A / 结论」两行看着几乎一样，
+  /// 反而认不出哪一行是哪一节。
+  static String _ownTitle(String fullPath) {
+    final i = fullPath.lastIndexOf(kChunkHeadingSep);
+    return i < 0 ? fullPath : fullPath.substring(i + kChunkHeadingSep.length);
   }
 
   /// 弹出目录，点一条**滚到那一节**。
