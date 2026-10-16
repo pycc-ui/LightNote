@@ -6,7 +6,6 @@ import 'package:uuid/uuid.dart';
 
 import '../util/ai_limits.dart';
 import '../util/text_utils.dart';
-import 'ai_functions.dart';
 
 // ============================================================================
 // AI 操作数据库的实现层
@@ -68,10 +67,10 @@ void installAiUdfs(Database db) {
 /// 全部函数：名字 → 实现。名字**必须与 ai_functions.dart 的清单一致**。
 const _functions = <String, ScalarFunction>{
   'list_notebooks': _listNotebooks,
+  'outline_notes': _outlineNotes,
   'list_notes': _listNotes,
   'list_unfiled': _listUnfiled,
-  'stat_note': _statNote,
-  'read_preview': _readPreview,
+  'read_note_batch': _readNoteBatch,
   'read_around': _readAround,
   'find_in_note': _findInNote,
   'search_notes': _searchNotes,
@@ -91,7 +90,6 @@ const _functions = <String, ScalarFunction>{
   'move_notes_batch': _moveNotesBatch,
   'delete_notebook': _deleteNotebook,
   'delete_notes_batch': _deleteNotesBatch,
-  'mark_functions': _markFunctions,
   'finish': _finish,
 };
 
@@ -338,8 +336,18 @@ String _likePattern(String keyword) {
 
 /// 写正文前的硬上限检查。超了**拒绝**、不截断：静默截断等于悄悄吃掉用户的字，
 /// 而模型还会以为写成功了（上限与 App 的「拒绝保存」是同一个 100KB）。
-String? _checkSize(String content) {
-  if (AiLimits.byteLength(content) <= AiLimits.noteHardBytes) return null;
+/// 正文尺寸校验。[existing] 是**改已有笔记时**的旧正文（新建传 null）。
+///
+/// 规则是「**只管增长**」：`新字节数 ≤ max(旧字节数, 硬上限)` 就放行。
+///
+/// 为什么不是简单的一刀切：硬上限从 100KB 收到 50KB 之后，**老库里已经有**
+/// 按旧上限写下的笔记。一刀切会把用户卡死 —— 打开那篇 80KB 的、改一个字都存不了，
+/// 唯一的出路是编辑器里那个"裁剪到软上限"，而那是**删内容且不可撤销**。
+/// 于是规则定为：老笔记不被锁死，但**也不能再变长**（上限管的是增长）。
+String? _checkSize(String content, {String? existing}) {
+  final now = AiLimits.byteLength(content);
+  if (now <= AiLimits.noteHardBytes) return null;
+  if (existing != null && now <= AiLimits.byteLength(existing)) return null;
   final kb = AiLimits.noteHardBytes ~/ 1024;
   return '正文超过 ${kb}KB 上限，已拒绝。'
       '请拆成多篇，或改用 update_notes_batch 只改需要的段落。';
@@ -367,7 +375,11 @@ String? _anchorError(String content, String anchor) {
 /// 正文 + 派生字段一条 UPDATE 写完（见文件头与 kAiTriggerStatements）。
 /// 返回错误文本；成功返回 null。
 String? _writeContent(String noteId, String content) {
-  final sizeErr = _checkSize(content);
+  // 改已有笔记：把旧正文带进去比较（老的超限笔记只要不变长就放行，见 _checkSize）
+  final old = _udfDb!
+      .select('SELECT content FROM notes WHERE id = ?', [noteId]);
+  final oldContent = old.isEmpty ? null : (old.first['content'] as String?);
+  final sizeErr = _checkSize(content, existing: oldContent);
   if (sizeErr != null) return sizeErr;
   _udfDb!.execute(
     'UPDATE notes SET content = ?, excerpt = ?, word_count = ?, updated_at = ? '
@@ -468,43 +480,257 @@ Object? _listUnfiled(SqliteArguments c) {
   return _ok(data, description: '列出「我的轻笔记」（${data.length} 篇）');
 }
 
-/// 元信息。**故意不给正文、不给行数**：正文要按需读（read_preview / read_around），
-/// 一次把几万字灌进上下文，是这个 App 最不想付的账。
-Object? _statNote(SqliteArguments c) {
-  if (_dbOf() == null) return _err(_noDb);
-  final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err('stat_note 需要 note_id。');
-  final row = _noteRow(id);
-  if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
-  final content = (row['content'] as String?) ?? '';
-  final data = {
-    'title': row['title'],
-    'notebook_id': row['notebook_id'],
-    'char_count': content.length,
-    'created_at': _iso(row['created_at']),
-    'updated_at': _iso(row['updated_at']),
-  };
-  return _ok(data, description: '查看笔记 $id 的元信息（${content.length} 字）');
-}
-
 /// 从第 offset 个字符起读 chars 个字符。
 ///
 /// chars 有硬上限（SqlLimits.maxReadChars）。但要知道它只是**函数这一层的**上限：
 /// AI 仍然可以直接 `SELECT content` 把整篇拿走。真正拦住「读全文」的是 prompt
 /// 与「读一次要烧一次上下文」的成本，不是这个 clamp —— 别把它当成安全边界。
-Object? _readPreview(SqliteArguments c) {
+/// `outline_notes(json)`：一次拿多篇的**目录 + 摘要**（不含正文）。
+///
+/// `json` = `["n1","n2"]` 或 `[{"id":"n1"}]`，上限 [SqlLimits.maxOutlineNotes] 篇。
+/// 返回 `[{id, title, notebook_id, chars, excerpt, created_at, updated_at,
+/// sections:[{level, heading, offset, chars}]}]`。
+///
+/// ## 三个刻意的设计
+///
+/// 1. **目录来自原文的 Markdown 标题（`#` 到 `######`），不是切片**。
+///    标题是原文自带的结构，模型看的就是它自己也能看懂的文档结构；因此本函数
+///    **不依赖 `NoteChunker`、也不读 `note_chunks` 表** —— 不会出现"表里的片是旧的、
+///    和现算的对不上"那种静默错读。两者目的本就不同：片是给搜索/卡片流分块的，
+///    目录是给人（和模型）看章节的，不该一致。
+/// 2. **只给 `offset` + `chars`，不给片号**。模型只需要"从第几个字符读多少"，
+///    偏移是文本自带的坐标；片号是我们发明的，它还永远算不出下一片在哪。
+/// 3. **`excerpt` 直接带回来**（`notes.excerpt` 列一直在维护）——
+///    选材时看它比读正文便宜几十倍。
+///
+/// ⚠️ 一节可能超过 `read_note_batch` 的单条上限 → 那时靠 `next_offset` 接着读。
+/// 没有标题的笔记 → `sections: []`，模型按 `chars` 直接读整篇。
+Object? _outlineNotes(SqliteArguments c) {
   if (_dbOf() == null) return _err(_noDb);
+
+  final raw = _str(c, 0);
+  if (raw == null || raw.trim().isEmpty) {
+    return _err('outline_notes 需要 JSON 数组，如 outline_notes(\'["n1","n2"]\')。'
+        'id 从 list_notes / recent_notes / search_notes 拿。');
+  }
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return _err('参数不是合法 JSON。SQL 里用单引号包数组、JSON 内层用双引号。');
+  }
+  if (decoded is! List || decoded.isEmpty) {
+    return _err('outline_notes 的参数必须是**非空**的 JSON 数组。');
+  }
+  if (decoded.length > SqlLimits.maxOutlineNotes) {
+    return _err('一次最多 ${SqlLimits.maxOutlineNotes} 篇，收到 ${decoded.length} 篇。');
+  }
+
+  final out = <Map<String, Object?>>[];
+  for (var i = 0; i < decoded.length; i++) {
+    final e = decoded[i];
+    final id = e is String ? e : (e is Map ? (_itemStr(e.cast<String, Object?>(), 'id') ?? '') : '');
+    final nid = id.trim();
+    if (nid.isEmpty) return _err('第 ${i + 1} 条缺 id。');
+    final row = _noteRow(nid);
+    if (row == null) {
+      out.add({'id': nid, 'error': '没有这篇笔记（或它已被删除）'});
+      continue;
+    }
+    final content = (row['content'] as String?) ?? '';
+    out.add({
+      'id': nid,
+      'title': (row['title'] as String?) ?? '',
+      'notebook_id': row['notebook_id'],
+      'chars': content.length,
+      'excerpt': (row['excerpt'] as String?) ?? '',
+      'created_at': _iso(row['created_at']),
+      'updated_at': _iso(row['updated_at']),
+      'sections': _headingsOf(content),
+    });
+  }
+  return _ok(out,
+      description: '读取 ${out.length} 篇笔记的目录与摘要');
+}
+
+/// 扫 Markdown 标题，给出「节」列表：`[{level, heading, offset, chars}]`。
+///
+/// 一"节"的范围 = **从一个标题到下一个同级或更高级标题**（子标题算在父节里）。
+/// 最后漏掉的那一节（没有下一标题）一直延到正文末尾。
+///
+/// 只认行首的 `#`（允许前置空格）：`# 标题` 是标题，`正文里的 # 号` 不是。
+/// 代码围栏（```）里的 `#` 也不算 —— 那是代码注释，不是标题。
+List<Map<String, Object?>> _headingsOf(String content) {
+  if (content.isEmpty) return const [];
+
+  // 先收集所有标题的位置与层级
+  final heads = <({int level, String text, int start})>[];
+  var inFence = false;
+  var pos = 0;
+  for (final line in content.split('\n')) {
+    final lineStart = pos;
+    pos += line.length + 1; // +1 = 换行
+    final trimmed = line.trimLeft();
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (!trimmed.startsWith('#')) continue;
+    var level = 0;
+    while (level < trimmed.length && trimmed[level] == '#') {
+      level++;
+    }
+    if (level > 6) continue; // `#######` 不是标题
+    final text = trimmed.substring(level).trim();
+    if (text.isEmpty) continue; // 光一个 `#` 不算标题
+    heads.add((level: level, text: text, start: lineStart));
+  }
+  if (heads.isEmpty) return const [];
+
+  // 每一节的结束位置 = 下一个"同级或更高级"标题的起点；最后一节到正文末尾
+  final out = <Map<String, Object?>>[];
+  for (var i = 0; i < heads.length; i++) {
+    final h = heads[i];
+    var end = content.length;
+    for (var j = i + 1; j < heads.length; j++) {
+      if (heads[j].level <= h.level) {
+        end = heads[j].start;
+        break;
+      }
+    }
+    final text = _slice(content, h.start, end);
+    out.add({
+      'level': h.level,
+      'heading': h.text,
+      'offset': h.start,
+      'chars': text.length,
+    });
+  }
+  return out;
+}
+
+/// `read_note_batch(note_id, offset, chars)` 或 `read_note_batch(json)`。
+///
+/// **一个函数两种形式，按参数个数分发**（注册时用的是 `AllowedArgumentCount.any()`）：
+///
+///   · 三参数 = 读**一篇**的一段（沿用原来 `read_preview` 的写法）
+///   · 一参数 = JSON 数组，读**一批**：`[{"id":"n1","offset":3120,"chars":700}, {"id":"n2"}]`
+///
+/// ## 为什么改名叫 `*_batch`
+///
+/// 命名要体现作用（与 `create_notes_batch` / `update_notes_batch` 同一约定：
+/// **批量函数也用于单次**）。原来的 `read_preview` 只能读一篇一段，
+/// 聚合类任务要读 7 篇就得 7+ 轮 —— 这是"整理 7 篇做不完"的直接原因。
+///
+/// ## 两条硬规矩
+///
+/// 1. **只认 offset，不认片号**。片是 App 派生的组织方式；让模型用片号读，
+///    它就得理解我们的切片算法，而且 `note_chunks` 表可能是旧的（懒回填），
+///    两套片号口径不同时会**静默读到别的内容**。
+/// 2. **截断要说清、并给出 `next_offset`**：模型不用自己算 `offset + chars`
+///    （那正是"让模型自己算 offset"的老毛病），拿着 next_offset 接着读就行。
+///
+/// 整批超上限 → **整批拒绝**（不截断），与写函数的 `maxBatchSize` 同一原则：
+/// 截断会让模型以为整批都读到了，然后基于半截素材下结论。
+Object? _readNoteBatch(SqliteArguments c) {
+  if (_dbOf() == null) return _err(_noDb);
+
+  // ---- 形式二：一参数 = 批量 ----
+  if (c.length == 1) {
+    final raw = _str(c, 0);
+    if (raw == null || raw.trim().isEmpty) {
+      return _err('read_note_batch 需要 JSON 数组，'
+          '如 read_note_batch(\'[{"id":"n1","offset":0,"chars":700}]\')；'
+          '读单篇也可以直接写 read_note_batch(\'n1\', 0, 200)。');
+    }
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } catch (_) {
+      return _err('参数不是合法 JSON。要么给三个参数（id, offset, chars），'
+          '要么给一个 JSON 数组。');
+    }
+    if (decoded is! List || decoded.isEmpty) {
+      return _err('批量形式要给**非空**的 JSON 数组。');
+    }
+    if (decoded.length > SqlLimits.maxBatchReadNotes) {
+      return _err('一次最多读 ${SqlLimits.maxBatchReadNotes} 条，'
+          '收到 ${decoded.length} 条。请分批读（先读最要紧的那几篇）。',
+          );
+    }
+
+    final out = <Map<String, Object?>>[];
+    var total = 0;
+    for (var i = 0; i < decoded.length; i++) {
+      final e = decoded[i];
+      if (e is! Map) return _err('第 ${i + 1} 条不是对象。');
+      final m = e.cast<String, Object?>();
+      final id = (_itemStr(m, 'id') ?? '').trim();
+      if (id.isEmpty) return _err('第 ${i + 1} 条缺 id。');
+      final row = _noteRow(id);
+      if (row == null) {
+        out.add({'id': id, 'error': '没有这篇笔记（或它已被删除）'});
+        continue;
+      }
+      final content = (row['content'] as String?) ?? '';
+      final offset = _intOf(m['offset'], 0).clamp(0, content.length);
+      final chars = _intOf(m['chars'], SqlLimits.maxBatchReadCharsPerNote)
+          .clamp(1, SqlLimits.maxBatchReadCharsPerNote);
+      final end = offset + chars > content.length ? content.length : offset + chars;
+      final text = _slice(content, offset, end);
+      final truncated = end < content.length;
+      total += text.length;
+      if (total > SqlLimits.maxBatchReadChars) {
+        return _err('这一批超过 ${SqlLimits.maxBatchReadChars} 字上限了。'
+            '请**分批读**：先挑最要紧的几篇，读完再读下一批。');
+      }
+      out.add({
+        'id': id,
+        'title': (row['title'] as String?) ?? '',
+        'offset': offset,
+        'chars': text.length,
+        'content': text,
+        if (truncated) 'truncated': true,
+        // 截断了就告诉它从哪接着读，别让它自己算
+        if (truncated) 'next_offset': end,
+      });
+    }
+    return _ok(out,
+        description: '读取 ${out.length} 篇笔记的正文'
+            '（共 ${out.where((e) => e['content'] != null).length} 篇有内容）');
+  }
+
+  // ---- 形式一：三参数 = 单篇的一段 ----
   final id = _str(c, 0);
-  if (id == null || id.isEmpty) return _err('read_preview 需要 note_id。');
+  if (id == null || id.isEmpty) return _err('read_note_batch 需要 note_id。');
   final row = _noteRow(id);
   if (row == null) return _err('没有 id = $id 的笔记（或它已被删除）。');
   final content = (row['content'] as String?) ?? '';
   final offset = _num(c, 1, 0, min: 0, max: content.length);
-  final chars = _num(c, 2, SqlLimits.defaultReadChars,
-      min: 1, max: SqlLimits.maxReadChars);
+  final chars = _num(c, 2, SqlLimits.maxBatchReadCharsPerNote,
+      min: 1, max: SqlLimits.maxBatchReadCharsPerNote);
   final end = offset + chars > content.length ? content.length : offset + chars;
-  final data = _slice(content, offset, end);
-  return _ok(data, description: '读取笔记 $id 的第 $offset-${offset + chars} 字符');
+  final text = _slice(content, offset, end);
+  final truncated = end < content.length;
+  return _ok({
+    'id': id,
+    'title': (row['title'] as String?) ?? '',
+    'offset': offset,
+    'chars': text.length,
+    'content': text,
+    if (truncated) 'truncated': true,
+    if (truncated) 'next_offset': end,
+  }, description: '读取笔记 $id 的第 $offset-$end 字符'
+      '${truncated ? '（还有后续，用 next_offset 接着读）' : ''}');
+}
+
+/// 从 JSON 值里取整数（缺省 / 不是数就用 [fallback]）。
+int _intOf(Object? v, int fallback) {
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? fallback;
+  return fallback;
 }
 
 /// 关键词前后各 chars 个字符。**按字符，不按行** ——
@@ -1182,112 +1408,6 @@ Object? _deleteNotebook(SqliteArguments c) {
 // 系统（1 个）
 // ============================================================================
 
-/// `mark_functions(json)`：把这次任务会反复用的函数**标记为常驻**。
-///
-/// AI 在需要某几个函数、但它们的详情不在 system prompt 的「已加载函数详情」里时
-/// 标记一次；App 侧每轮重拼 prompt 时读这个 key，把详情追加到**末尾**
-///（末尾是刻意的：前面整段命中缓存，只有新追加的一小段不命中）。
-///
-/// ## 三条规则，每条都有代价上的理由
-///
-/// 1. **只增不减**（不提供 unmark）：详情段在 prompt 末尾、命中缓存后约 1/50 计价，
-///    留着比去掉便宜；而且"以后万一又用到"时它已经在里面了，还少一个 AI 要做的决策。
-/// 2. **上限 [SqlLimits.maxPinnedFunctions]**：满了以后新的标记**装不下的部分
-///    在返回值里点名说出来**（description + data.dropped）。
-///    ⚠️ 这里与批量函数的"超了拒绝"不同：批量是**数据写入**，截断=静默漏做几篇笔记；
-///    标记只是 prompt 里的便利，没加载的函数照样能调（查一次目录即可），
-///    所以"装得下多少装多少 + 明说没装上谁"比整批拒绝更省一轮往返。
-/// 3. **未知函数名整批拒绝**：多半是拼错了。当场说清楚，好过让它以为标记成功、
-///    下一轮照着一个不存在的函数写 SQL 拿到 `no such function`。
-///
-/// 写的是 `app_kv` 的 [kAiPinnedFunctionsKey]，用 INSERT OR REPLACE ——
-/// `app_kv` 只有 (key, value) 两列，不存在"替换会丢别的列"的问题。
-Object? _markFunctions(SqliteArguments c) {
-  final db = _dbOf();
-  if (db == null) return _err(_noDb);
-
-  final raw = _str(c, 0);
-  if (raw == null || raw.trim().isEmpty) {
-    return _err('mark_functions 需要一个 JSON 数组字符串，'
-        '如 mark_functions(\'["search_notes","read_preview"]\')。函数名查 '
-        'SELECT name FROM ai_functions。');
-  }
-  final Object? decoded;
-  try {
-    decoded = jsonDecode(raw);
-  } catch (_) {
-    return _err('参数不是合法 JSON。SQL 里用单引号包数组、JSON 内层用双引号。');
-  }
-  if (decoded is! List || decoded.isEmpty) {
-    return _err('mark_functions 的参数必须是**非空**的 JSON 数组，'
-        '如 \'["search_notes","read_preview"]\'。');
-  }
-
-  final names = <String>[];
-  for (final e in decoded) {
-    if (e is! String || e.trim().isEmpty) return _err('数组里只能放函数名（字符串）。');
-    final name = e.trim();
-    if (!names.contains(name)) names.add(name);
-  }
-
-  final unknown = [for (final n in names) if (aiFunctionByName(n) == null) n];
-  if (unknown.isNotEmpty) {
-    return _err('没有这些函数：${unknown.join('、')}。'
-        '函数名要照 ai_functions 表里的 name 原样写'
-        '（SELECT name FROM ai_functions）。');
-  }
-
-  final pinned = _readPinnedFunctions(db);
-  final added = <String>[];
-  final dropped = <String>[];
-  for (final n in names) {
-    if (pinned.contains(n)) continue;
-    if (pinned.length + added.length >= SqlLimits.maxPinnedFunctions) {
-      dropped.add(n);
-    } else {
-      added.add(n);
-    }
-  }
-  if (added.isNotEmpty) {
-    db.execute(
-      'INSERT OR REPLACE INTO app_kv (key, value) VALUES (?, ?)',
-      [kAiPinnedFunctionsKey, jsonEncode([...pinned, ...added])],
-    );
-  }
-
-  final cap = SqlLimits.maxPinnedFunctions;
-  final total = pinned.length + added.length;
-  final String desc;
-  if (added.isEmpty) {
-    // 一个新函数都没进：要么本来就有，要么卡在上限上 —— 两种都要说清是哪种
-    desc = dropped.isEmpty
-        ? '这 ${names.length} 个函数已在「已加载函数详情」里（共 $total/$cap）'
-        : '已达上限 $total/$cap，没有新增；未加载：${dropped.join('、')}'
-            '——它们的详情不在 prompt 里，要用就先查 ai_functions 目录';
-  } else if (dropped.isEmpty) {
-    desc = '标记 ${added.length} 个常用函数（详情已加载，共 $total/$cap）';
-  } else {
-    desc = '标记 ${added.length} 个常用函数（共 $total/$cap）'
-        '；已达上限，未加载：${dropped.join('、')}'
-        '——它们的详情不在 prompt 里，要用就先查 ai_functions 目录';
-  }
-
-  return _ok({
-    'pinned': [...pinned, ...added],
-    'added': added,
-    if (dropped.isNotEmpty) 'dropped': dropped,
-  }, description: desc);
-}
-
-/// 读已标记的函数名（坏数据／已删函数由 [parsePinnedFunctions] 过滤掉）。
-List<String> _readPinnedFunctions(Database db) {
-  final rows = db.select(
-    'SELECT value FROM app_kv WHERE key = ?',
-    [kAiPinnedFunctionsKey],
-  );
-  if (rows.isEmpty) return const [];
-  return parsePinnedFunctions(rows.first['value'] as String?);
-}
 
 // ============================================================================
 // 信号（1 个）

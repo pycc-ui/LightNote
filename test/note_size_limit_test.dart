@@ -1,7 +1,7 @@
 // 笔记篇幅上限的分档与裁剪。
 //
-// 之所以值得单独测：阈值边界（正好 80KB 算哪一档）最容易写错，
-// 而写错的表现是"显示 100.0 KB 却还能保存"这种自相矛盾的提示。
+// 之所以值得单独测：阈值边界（正好 30KB 算哪一档）最容易写错，
+// 而写错的表现是"显示 50.0 KB 却还能保存"这种自相矛盾的提示。
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:lightnote/core/util/ai_limits.dart';
@@ -14,7 +14,7 @@ void main() {
   ///
   /// 先放 `bytes ~/ 3` 个汉字，再用 ASCII 补齐余数——
   /// 直接 `bytes ~/ 3` 会少 1~2 字节，边界测试就会偏出档位
-  /// （第一版这里写错过，正好 80KB 被判成了 ok）。
+  /// （第一版这里写错过，正好软上限被判成了 ok）。
   String cjk(int bytes) {
     final full = bytes ~/ 3;
     final rest = bytes - full * 3;
@@ -27,9 +27,9 @@ void main() {
     });
 
     test('阈值换算成 KB 与文案一致', () {
-      expect(AiLimits.noteSoftBytes ~/ 1024, 80);
-      expect(AiLimits.noteWarnBytes ~/ 1024, 90);
-      expect(AiLimits.noteHardBytes ~/ 1024, 100);
+      expect(AiLimits.noteSoftBytes ~/ 1024, 30);
+      expect(AiLimits.noteWarnBytes ~/ 1024, 40);
+      expect(AiLimits.noteHardBytes ~/ 1024, 50);
     });
   });
 
@@ -39,48 +39,48 @@ void main() {
       expect(noteSizeLevel(ascii(1000)), NoteSizeLevel.ok);
     });
 
-    test('刚不到 80KB 还是 ok', () {
+    test('刚不到软上限还是 ok', () {
       expect(noteSizeLevel(ascii(AiLimits.noteSoftBytes - 1)),
           NoteSizeLevel.ok);
     });
 
-    test('正好 80KB 进入 soft（边界是闭区间下界）', () {
+    test('正好软上限进入 soft（边界是闭区间下界）', () {
       expect(noteSizeLevel(ascii(AiLimits.noteSoftBytes)),
           NoteSizeLevel.soft);
     });
 
-    test('80KB~90KB 之间是 soft', () {
+    test('软上限~警告线之间是 soft', () {
       expect(noteSizeLevel(ascii(AiLimits.noteSoftBytes + 1000)),
           NoteSizeLevel.soft);
       expect(noteSizeLevel(ascii(AiLimits.noteWarnBytes - 1)),
           NoteSizeLevel.soft);
     });
 
-    test('正好 90KB 进入 warn', () {
+    test('正好警告线进入 warn', () {
       expect(noteSizeLevel(ascii(AiLimits.noteWarnBytes)),
           NoteSizeLevel.warn);
     });
 
-    test('90KB~100KB 之间是 warn（仍允许保存）', () {
+    test('40KB~50KB 之间是 warn（仍允许保存）', () {
       expect(noteSizeLevel(ascii(AiLimits.noteWarnBytes + 1000)),
           NoteSizeLevel.warn);
       expect(noteSizeLevel(ascii(AiLimits.noteHardBytes - 1)),
           NoteSizeLevel.warn);
     });
 
-    test('正好 100KB 进入 hard（拒绝保存）', () {
+    test('正好 50KB 进入 hard（拒绝保存）', () {
       expect(noteSizeLevel(ascii(AiLimits.noteHardBytes)),
           NoteSizeLevel.hard);
     });
 
-    test('超过 100KB 也是 hard', () {
+    test('超过 50KB 也是 hard', () {
       expect(noteSizeLevel(ascii(AiLimits.noteHardBytes * 2)),
           NoteSizeLevel.hard);
     });
 
     test('中文按字节算，不是按字符算', () {
-      // 30 万个汉字 = 90 万字节，远超硬上限。
-      // 如果实现按字符数算（30 万 < 100 K），会误判成 ok。
+      // 30 万个汉字 = 90 万字节，远超硬上限（50KB）。
+      // 如果实现按字符数算（30 万 < 50 K），会误判成 ok。
       expect(noteSizeLevel(cjk(900 * 1024)), NoteSizeLevel.hard);
     });
 
@@ -91,7 +91,7 @@ void main() {
       // 正好 80KB 的中文
       expect(noteSizeLevel(cjk(AiLimits.noteSoftBytes)),
           NoteSizeLevel.soft);
-      // 正好 100KB 的中文
+      // 正好 50KB 的中文
       expect(noteSizeLevel(cjk(AiLimits.noteHardBytes)),
           NoteSizeLevel.hard);
     });

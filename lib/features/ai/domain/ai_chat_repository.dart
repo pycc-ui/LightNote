@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../core/db/ai_functions.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/app_params.dart';
@@ -16,6 +15,7 @@ import 'ask_user.dart';
 import 'tool_executor.dart';
 import 'tool_types.dart';
 import 'prompts.dart';
+import 'result_applier.dart';
 
 /// AI 会话仓储：把《界面设计》里「AI 助手页」那一屏（模型 / 思考强度 / 指令）
 /// 接到真实 DeepSeek 调用上，并持久化会话历史。
@@ -360,17 +360,13 @@ class AiChatRepository {
     // 没有工作区、也没有确认层 —— 约束由 UDF 与 SqlGuard 把关（见 tool_executor.dart）。
     final executor = ToolExecutor(_db);
 
-    /// 每次请求前重拼 prompt：**已加载的函数详情会随 mark_functions 变**。
+    /// 每次请求前重拼 prompt（固定段 + 更早历史的摘要）。
     ///
-    /// 全文都从库里现读（不缓存到内存）：标记的唯一写者是 UDF `mark_functions`，
-    /// 它在同一条连接上直接写 `app_kv` —— 内存里再存一份就多一个可能不一致的副本。
-    /// 一次 SELECT 的成本可以忽略（每轮一次）。
-    Future<String> rebuildPrompt() async => AiPrompts.agentSystemFor(
-          summary: summary,
-          pinned: parsePinnedFunctions(
-            await _db.readSetting(kAiPinnedFunctionsKey),
-          ),
-        );
+    /// 函数文档现在**全量常驻固定段**（不再有"标记后才加载"那套），
+    /// 所以重拼只需要带上摘要 —— prompt 的前缀因此**整轮、整会话都不变**，
+    /// 前缀缓存能一直命中。
+    Future<String> rebuildPrompt() async =>
+        AiPrompts.agentSystemFor(summary: summary);
 
     final loop = AgentLoop(
       round: ({
@@ -385,6 +381,9 @@ class AiChatRepository {
         model: model,
         thinking: thinkingEnabled,
         reasoningEffort: thinkingEffort,
+        // **必须显式设**：不设就走服务端默认（聊天模型 4096），模型想写一篇长笔记
+        // 会被硬切断 —— 而切断的表现是 JSON 不完整 → 解析失败 → 整轮白跑。
+        maxTokens: AgentLimits.maxOutputTokens,
       ),
       executor: executor,
     );
@@ -399,6 +398,118 @@ class AiChatRepository {
     await _db.setMessageInterrupt(assistantId, inFlightReason);
 
     final buffer = StringBuffer();
+    await _consume(
+        loop: loop,
+        history: history,
+        dbHistory: dbHistory,
+        asksSoFar: asksSoFar,
+        roundsUsed: roundsUsed,
+        roundBudget: roundBudget,
+        rebuildPrompt: rebuildPrompt,
+        assistantId: assistantId,
+        base: base,
+        writeText: writeText,
+        ops: ops,
+        model: model,
+        thinkingEnabled: thinkingEnabled,
+        buffer: buffer,
+      );
+  }
+
+  /// 产出落库失败时，最多再修几轮。
+  ///
+  /// 封顶的理由与 `askUser` 一样：模型可能每次都"修"成另一种错，
+  /// 而没有上限就是一直烧钱。两轮足够覆盖"正文太长 / 锚点不唯一"这类可自纠的错。
+  static const maxRepairRounds = 2;
+
+  /// 回答里有没有"事情已经做了"的**声明**（完成体，或对未来时态的承诺）。
+  ///
+  /// 只用来抓"说了但没给产出块"这一种情况 —— 所以模式取得很窄，两条原则：
+  ///   · **必须是完成体/承诺**（`已写好` / `已落库` / `都会放进`），不收裸的"写过"，
+  ///     否则"你写过关于 X 的笔记"这种**描述用户过去行为**的正常回答会被误判；
+  ///   · **宁漏勿误**：多花一轮去问"你到底落库了没有"是有成本的，
+  ///     而漏掉一次只是回到"用户以为做好了"的老状态（提示词规则 11 才是主要防线）。
+  static final _completionClaim = RegExp(
+    // 完成体：已 + 动词
+    r'已(写好|写成|写入|保存|落库|新建|创建|生成|整理成|放进|存入|添加|修改|删除|为你写|为你建'
+    // 「已把…（怎么处理了）」：中间夹宾语，但**限长、不跨句**，免得误抓一整段
+    r'|把[^。！？\n]{0,12}(整理成|落库|新建|创建|写好|写入|保存|放进|存入))'
+    // 承诺（实测抓到的那句是这一种："三篇都会放进…"）
+    r'|会放(进|入)|都会存(进|入)|已经为你',
+  );
+
+  static bool claimsCompletionForTest(String text) =>
+      _completionClaim.hasMatch(text);
+
+  /// 跑一轮**修复**：只收集它的最终回答，不逐段写库。
+  ///
+  /// 为什么不像主循环那样流式落库：修复轮的回答要**替换**原回答的产出块，
+  /// 逐段写会把原回答冲掉（`writeText` 是替换式写入）。所以这里先攒起来，
+  /// 由调用方合并后再一次性写。
+  Future<String> _repairOnce({
+    required AgentLoop loop,
+    required Future<String> Function()? rebuildPrompt,
+    required List<AiMessage> dbHistory,
+    required List<AgentMessage> history,
+    required int roundBudget,
+  }) async {
+    final buf = StringBuffer();
+    await for (final e in loop.run(
+      // 修复轮也要**每轮重拼 prompt**（与主循环一致：轮数提醒挂在消息末尾）
+      systemPrompt: await _safeRebuild(rebuildPrompt),
+      rebuildPrompt: rebuildPrompt,
+      history: history,
+      dbHistory: dbHistory,
+      roundBudget: roundBudget,
+    )) {
+      switch (e) {
+        case AgentText(:final delta):
+          buf.write(delta);
+        case AgentFinished(:final text):
+          return text.trim().isEmpty ? buf.toString() : text;
+        // 修复轮里出任何别的岔子（提问 / 失败 / 轮数用尽）就放弃修复，
+        // 把已经落成的部分如实报给用户，不要继续纠缠。
+        case AgentAwaitingUser():
+        case AgentFailed():
+          return '';
+        case AgentToolStarted():
+        case AgentToolDone():
+          break;
+      }
+    }
+    return buf.toString();
+  }
+
+  /// 重拼一次 prompt；重拼失败不该打断修复（顶多少看到几条详情）。
+  static Future<String> _safeRebuild(Future<String> Function()? rebuild) async {
+    if (rebuild == null) return '';
+    try {
+      return await rebuild();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 消费 [AgentLoop] 的事件流，把每条事件落成库里的写入。
+  ///
+  /// 拆成独立方法是为了让 [_drive] 的"准备工作"（算续写起点、拼 prompt、
+  /// 盖 in_flight 戳）与"消费事件"两段各自读得清楚。
+  Future<void> _consume({
+    required AgentLoop loop,
+    required List<AgentMessage> history,
+    required List<AiMessage> dbHistory,
+    required int asksSoFar,
+    required int roundsUsed,
+    required int? roundBudget,
+    required Future<String> Function() rebuildPrompt,
+    required String assistantId,
+    required String base,
+    required Future<void> Function(String text) writeText,
+    required List<String> ops,
+    required String model,
+    required bool thinkingEnabled,
+    required StringBuffer buffer,
+  }) async {
     await for (final event in loop.run(
       systemPrompt: await rebuildPrompt(),
       rebuildPrompt: rebuildPrompt,
@@ -418,8 +529,81 @@ class AiChatRepository {
           await writeText(buffer.toString());
 
         case AgentFinished(:final text, :final usage):
-          await writeText('$text${_opsBlock(ops)}');
-          await _db.setMessageInterrupt(assistantId, null);
+          // ---- A 类任务的产出：解析 json 块 → 逐条落库 ----
+          //
+          // B 类问答没有 json 块 → `hadPayload == false` → 这里什么都不做。
+          final applier = AiResultApplier(_db);
+          var applied = await applier.apply(text);
+          var display = text;
+
+          // ⚠️ **"只说不做"**：实测抓到过 —— 模型写一段"三篇都会放进我的轻笔记"、
+          // 然后直接 finish，**一个 json 块都没给**，结果库里一篇没有，而用户以为做好了。
+          // 这比"报错"更糟（它是静默的）。所以这里检测一次并把话挑明，让它补上。
+          for (var attempt = 0;
+              attempt < maxRepairRounds &&
+                  !applied.hadPayload &&
+                  claimsCompletionForTest(text);
+              attempt++) {
+            final nudged = await _repairOnce(
+              loop: loop,
+              rebuildPrompt: rebuildPrompt,
+              dbHistory: dbHistory,
+              history: [
+                ...history,
+                AgentMessage.assistant(display),
+                AgentMessage.user(
+                  '你的回答里说"已经新建 / 已经整理成几篇"，但**没有给出 json 产出块** —— '
+                  '按约定，没有 json 块就等于**什么都没有落库**。'
+                  '请现在把要落库的内容整理成 json 代码块给出（格式见系统提示第四节）；'
+                  '如果你其实不需要落库，就直接说明。',
+                ),
+              ],
+              roundBudget: roundsUsed + 2,
+            );
+            if (nudged.trim().isEmpty) break;
+            display = nudged;
+            final again = await applier.apply(nudged);
+            applied = applied.merge(again);
+            if (again.hadPayload) break;
+          }
+
+          // 校验失败 → 最多再给 2 次修复机会。
+          // 回灌里**带上已落库的 id**，否则模型会把建好的再建一遍（用户看到重复笔记）。
+          for (var attempt = 0;
+              attempt < maxRepairRounds && applied.failed.isNotEmpty;
+              attempt++) {
+            final repaired = await _repairOnce(
+              loop: loop,
+              rebuildPrompt: rebuildPrompt,
+              dbHistory: dbHistory,
+              history: [
+                ...history,
+                AgentMessage.assistant(display),
+                AgentMessage.user(applied.repairMessage()),
+              ],
+              roundBudget: roundsUsed + 2,
+            );
+            if (repaired.trim().isEmpty) break;
+            final again = await applier.apply(repaired);
+            applied = applied.merge(again);
+            display = repaired;
+            if (again.failed.isEmpty) break;
+          }
+
+          // 展示时**去掉 json 块**（那是管道，不是给用户读的），换成一句话的落库摘要。
+          final body = AiResultApplier.stripPayload(display);
+          final receipt = applied.hasWork ? '\n\n---\n*${applied.summary}*' : '';
+
+          // 「写最终正文」与「清 in_flight」**必须同一个事务**。
+          //
+          // 分两次写的话，中间被杀就会留下"正文完整、却标着未完成"的假中断 ——
+          // 用户看到一条写完的回答下面挂着「上次生成中断（App 被系统中断）」，
+          // 而他再点「继续」会让模型把同一件事再做一遍。
+          // 事务保证这两个状态**不会只落地一半**。
+          await _db.transaction(() async {
+            await writeText('$body$receipt${_opsBlock(ops)}');
+            await _db.setMessageInterrupt(assistantId, null);
+          });
           await _log(usage,
               model: model, thinkingEnabled: thinkingEnabled, success: true);
 
@@ -503,6 +687,27 @@ class AiChatRepository {
 
   /// 失败但**没有错误码**时用的兜底原因（例如轮数用尽）。
   static const interruptUnknownReason = 'interrupted';
+
+  /// 中断原因（错误码）→ **给人看的一句话**。
+  ///
+  /// 放在这里而不是界面里：这些码是上面几条路径写进库的（[inFlightReason]、
+  /// [interruptUnknownReason] 以及客户端给的 `AiError.code`），
+  /// 文案跟着它们走，才不会出现"加了一个码、界面显示『没写完』"。
+  ///
+  /// 认不出来就笼统说"没写完" —— 宁可含糊，也别编一个原因。
+  static String interruptLabel(String? code) => switch (code) {
+        'network' => '网络断开',
+        'timeout' => '等待超时',
+        'rate_limited' => '被限流',
+        'server_error' => '服务端错误',
+        'unauthorized' => 'API Key 无效',
+        'insufficient_balance' => '余额不足',
+        'cancelled' => '已取消',
+        'rounds' => '轮数到上限',
+        'in_flight' => 'App 被系统中断',
+        'interrupted' => '没写完',
+        _ => '没写完',
+      };
 
   /// 清掉某条消息的中断标记（界面上点「知道了」）。
   Future<void> clearInterrupt(String messageId) =>

@@ -7,6 +7,8 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart' show CancelToken;
+// drift 的 Value（构造 Companion）与 flutter_test 的 matcher 无冲突，直接引。
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -23,8 +25,11 @@ import 'package:lightnote/features/ai/domain/tool_types.dart';
 class FakeClient extends DeepSeekClient {
   FakeClient(this.script, {this.stream});
 
-  /// 第 n 轮返回什么（n 从 0 起）—— 单事件、最简单的那种假模型
-  final AiEvent Function(int round, List<AgentMessage> messages) script;
+  /// 第 n 轮返回什么（n 从 0 起）—— 单事件、最简单的那种假模型。
+  ///
+  /// **可替换**：同一个测试里换脚本比重新 boot 一个库安全得多
+  ///（重复 `AppDatabase.forTesting` 会留一个没关的实例）。
+  AiEvent Function(int round, List<AgentMessage> messages) script;
 
   /// 第 n 轮返回**一串**事件（真的分片流式）。给了它就不用 [script]。
   ///
@@ -34,6 +39,10 @@ class FakeClient extends DeepSeekClient {
   final Stream<AiEvent> Function(int round, List<AgentMessage> messages)? stream;
 
   final List<List<AgentMessage>> seen = [];
+
+  /// 每轮收到的 system prompt（轮数预算提醒就追加在它末尾）。
+  final List<String> systems = [];
+
   int _round = 0;
 
   @override
@@ -51,6 +60,7 @@ class FakeClient extends DeepSeekClient {
     CancelToken? cancelToken,
   }) {
     seen.add(List<AgentMessage>.from(messages));
+    systems.add(systemPrompt);
     final round = _round++;
     return stream?.call(round, messages) ?? Stream.value(script(round, messages));
   }
@@ -133,6 +143,120 @@ void main() {
       expect(pending.messages, isNotEmpty);
       expect(pending.messages.any((m) => m.role == 'user'), isTrue);
       expect(pending.messages.last.toolCalls.single.name, 'askUser');
+    });
+  });
+
+  group('★ 轮数预算：回答 = 继续（+15 轮），已用轮数跨挂起累计', () {
+    /// 直接落一条挂起记录（模拟"循环在第 14 轮挂起"那一刻的状态）。
+    Future<void> seedPending({required int rounds, required int budget}) async {
+      final pending = PendingAsk(
+        toolCallId: 'ask_1',
+        request: const AskRequest(question: '还要继续吗？', type: AskType.confirm),
+        messages: [
+          AgentMessage.user('把整个库重写一遍'),
+          AgentMessage.assistant('', toolCalls: [
+            const ToolCall(id: 'ask_1', name: 'askUser', arguments: '{}'),
+          ]),
+        ],
+        asks: 1,
+        rounds: rounds,
+        budget: budget,
+      );
+      await db.insertAiMessage(AiMessagesCompanion.insert(
+        id: 'suspended',
+        conversationId: convId,
+        role: 'assistant',
+        content: const Value(AiChatRepository.awaitingPlaceholder),
+        pendingAction: Value(pending.encode()),
+        createdAt: DateTime.now().toUtc(),
+      ));
+    }
+
+    test('★ 预算 = 挂起时的预算 + 15，已用轮数也继续算', () async {
+      // 回答之后每一轮都提工具，直到预算用尽
+      client.script = (round, messages) => const AiDone(toolCalls: [
+            ToolCall(id: 'c', name: 'sql', arguments: '{"query":"SELECT 1"}'),
+          ]);
+      await seedPending(rounds: 14, budget: 16);
+
+      final resumed = await chat.answerAsk(
+        conversationId: convId,
+        result: AskResult.confirm(true),
+        thinkingEffort: 'low',
+        thinkingEnabled: false,
+      );
+      expect(resumed, isNotNull);
+
+      // 预算 16 + 15 = 31，已用 14 → 还能跑 17 轮
+      expect(client.systems, hasLength(17),
+          reason: '预算没接上的话（每次重新给满）这里会是别的数；'
+              '已用轮数没带回来的话会是 31');
+      // 提醒只在"还剩 ≤2 轮"时出现 → 看最后两轮
+      // 提醒挂在**消息末尾**（不碰 system 头部，保住前缀缓存）
+      final tail = client.seen.last.last.content;
+      expect(tail, contains('已经用了 30 轮'),
+          reason: '已用轮数是连挂起前一起算的（14 + 16）');
+      expect(tail, contains('最多 31 轮'),
+          reason: '16 + 15 = 31（用户回答就算同意继续）');
+      expect(client.systems.every((s) => !s.contains('轮数提醒')), isTrue,
+          reason: 'system prompt 不该被提醒污染');
+
+      // 用尽之后仍然收尾，并且留痕
+      final rows = await db.watchMessages(convId).first;
+      expect(rows.lastWhere((m) => m.role == 'assistant').interruptReason, 'rounds');
+    });
+
+    test('用户答"不用了"也不必特殊处理：预算只是"允许"，模型会自己收尾', () async {
+      client.script = (round, messages) => const AiDone(fullText: '那我不做了。');
+      await seedPending(rounds: 14, budget: 16);
+
+      await chat.answerAsk(
+        conversationId: convId,
+        result: AskResult.confirm(false),
+        thinkingEffort: 'low',
+        thinkingEnabled: false,
+      );
+
+      expect(client.seen, hasLength(1), reason: '模型直接给结论就结束，不花满预算');
+      final rows = await db.watchMessages(convId).first;
+      expect(rows.lastWhere((m) => m.role == 'assistant').content,
+          contains('那我不做了'));
+    });
+
+    test('老挂起记录（没有 rounds / budget 字段）→ 兜底成"默认额度"', () async {
+      // v14 之前的记录：这两个字段不存在
+      const legacy = '{"kind":"askUser","toolCallId":"ask_1",'
+          '"request":{"question":"继续吗？","type":"confirm","limit":10},'
+          '"messages":[],"asks":1}';
+      final parsed = PendingAsk.tryParse(legacy);
+      expect(parsed, isNotNull);
+      expect(parsed!.rounds, 0, reason: '0 = 不知道，由调用方兜底');
+      expect(parsed.budget, 0);
+
+      client.script = (round, messages) => const AiDone(fullText: '做完了。');
+      await db.insertAiMessage(AiMessagesCompanion.insert(
+        id: 'legacy',
+        conversationId: convId,
+        role: 'assistant',
+        content: const Value(AiChatRepository.awaitingPlaceholder),
+        pendingAction: const Value(legacy),
+        createdAt: DateTime.now().toUtc(),
+      ));
+
+      final resumed = await chat.answerAsk(
+        conversationId: convId,
+        result: AskResult.confirm(true),
+        thinkingEffort: 'low',
+        thinkingEnabled: false,
+      );
+
+      expect(resumed, isNotNull, reason: '老记录不能把会话卡死');
+      expect(client.seen, hasLength(1), reason: '兜底成默认额度后照常接着跑');
+
+      final rows = await db.watchMessages(convId).first;
+      final assistant = rows.lastWhere((m) => m.role == 'assistant');
+      expect(assistant.content, contains('做完了'));
+      expect(assistant.pendingAction, isNull, reason: '回答完要把挂起清掉');
     });
   });
 

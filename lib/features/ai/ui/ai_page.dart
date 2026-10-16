@@ -859,24 +859,10 @@ class _InterruptedBar extends StatelessWidget {
   final void Function(String reasonLabel) onContinue;
   final VoidCallback onDismiss;
 
-  /// 错误码 → 人话。认不出来就笼统说"没写完" —— 宁可含糊，也别编一个原因。
-  static String labelOf(String? code) => switch (code) {
-        'network' => '网络断开',
-        'timeout' => '等待超时',
-        'rate_limited' => '被限流',
-        'server_error' => '服务端错误',
-        'unauthorized' => 'API Key 无效',
-        'insufficient_balance' => '余额不足',
-        'cancelled' => '已取消',
-        'rounds' => '轮数到上限',
-        'in_flight' => 'App 被系统中断',
-        _ => '没写完',
-      };
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final label = labelOf(reason);
+    final label = AiChatRepository.interruptLabel(reason);
     return Padding(
       padding: const EdgeInsets.only(left: AppSpacing.xs, top: AppSpacing.xs),
       child: Row(

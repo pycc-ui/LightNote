@@ -58,7 +58,6 @@ dependencies:
   # Windows 保持原来的保存对话框不动。分平台的分支就在
   # lib/core/backup/file_dialogs.dart 的 pickExportTarget / shareArchive 里。
   share_plus: ^12.0.2
-
 dev_dependencies:
   flutter_test:
     sdk: flutter

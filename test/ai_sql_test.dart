@@ -9,8 +9,10 @@
 //
 // v3：所有函数统一返回 `{ok, description, data}`（失败 `{ok:false, error}`），
 // 结果取 `data`；写操作有批量版的只留批量（单次也走它，数组放一个元素）。
-// v4：多了 mark_functions —— 它写的是 app_kv（"哪几个函数的详情常驻"），
-// 所以这里也建一张最小的 app_kv。
+// v6：函数文档全量进 System Prompt 之后，`mark_functions` 与 `stat_note` 删掉了
+//（前者的机制多余、后者的字段并进了 outline_notes），`read_preview` 改名并扩能成
+// `read_note_batch`（能一次读一批、返回 next_offset），新增 `outline_notes`。
+// 25 个函数：11 读 + 3 建 + 8 改 + 2 删 + finish。
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -132,7 +134,7 @@ void main() {
         "SELECT update_notes_batch('[{\"id\":\"n1\"}]')",
         // **读**函数可以嵌在带 FROM 的查询里 —— 这正是推荐写法
         'SELECT id, read_preview(id, 0, 200) AS p FROM notes WHERE deleted_at IS NULL',
-        'SELECT n.id, stat_note(n.id) AS meta FROM notes n',
+        'SELECT n.id, read_note_batch(n.id, 0, 4) AS head FROM notes n',
         // 参数（字符串字面量）里出现 from / join 是正常正文，剥掉字面量后不该命中
         "SELECT update_notes_batch('[{\"id\":\"n1\",\"title\":\"from join 测试\"}]')",
         'WITH x AS (SELECT 1 AS a) SELECT * FROM x',
@@ -177,9 +179,17 @@ void main() {
         // 批量函数还要再乘以批量条数，危害更大
         "SELECT update_notes_batch('[{\"id\":\"n1\"}]') FROM notes n "
             'JOIN notebooks b ON b.id = n.notebook_id',
-        // system 类（mark_functions）同样不能嵌 —— 它在 kAiKvFunctions 里，
-        // 只查 kAiWriteFunctions 会漏掉它
-        "SELECT mark_functions('[\"search_notes\"]') FROM notes",
+        // 读函数可以嵌（正例见上），但 outline_notes 是读函数里最"重"的那个，
+        // 它本身**不**受限制 —— 受限制的是下面这些非读函数
+        "SELECT finish('done') FROM notes",
+        // meta 类（finish）也一样：kAiNonReadFunctions 是按 category 算的，
+        // 不是"写函数名单"——漏掉它就会放行一句必然按行执行的收尾信号
+        "SELECT finish('done') FROM notes",
+        // create 类：一次调用建一批，按行调会建出 N 倍的笔记
+        "SELECT create_notes_batch('[{\"title\":\"A\"}]') FROM notes",
+        // 用 CTE 绕：ids 是查出来的没错，但写函数仍然被按行调用
+        'WITH picked AS (SELECT id FROM notes WHERE deleted_at IS NULL) '
+            "SELECT update_notes_batch('[{\"id\":\"n1\"}]')",
       ];
       for (final sql in bad) {
         final r = SqlGuard.check(sql);
@@ -218,17 +228,25 @@ void main() {
       expect((unfiled.single as Map)['id'], 'n2');
     });
 
-    test('stat_note 不给正文', () {
-      final d = data("SELECT stat_note('n1')") as Map;
+    test('outline_notes 给元信息 + 目录，**不给正文**', () {
+      final d = (data("SELECT outline_notes('[\"n1\"]')") as List).first as Map;
       expect(d['title'], '项目A');
       expect(d['notebook_id'], 'nb1');
-      expect(d['char_count'], body.length);
-      expect(d.containsKey('content'), isFalse);
+      expect(d['chars'], body.length);
+      expect(d.containsKey('content'), isFalse, reason: '目录不含正文');
     });
 
-    test('read_preview 从 offset 起', () {
-      expect(data("SELECT read_preview('n1', 0, 3)"), body.substring(0, 3));
-      expect(data("SELECT read_preview('n1', 2, 3)"), body.substring(2, 5));
+    test('read_note_batch 单篇形式：从 offset 起，并带上位置', () {
+      final j = json("SELECT read_note_batch('n1', 0, 3)");
+      final d = j['data'] as Map;
+      expect(d['content'], body.substring(0, 3));
+      expect(d['offset'], 0);
+      expect(d['chars'], 3);
+      expect(d['truncated'], true, reason: '正文比 3 字长 → 要标出被截断');
+      expect(d['next_offset'], 3, reason: '给出接着读的位置，别让模型自己算');
+      // 再读一段：offset 直接来自上一轮的 next_offset
+      final j2 = json("SELECT read_note_batch('n1', 3, 2)");
+      expect((j2['data'] as Map)['content'], body.substring(3, 5));
     });
 
     test('read_around 是前后各 N 个字符（不是按行）', () {
@@ -261,12 +279,15 @@ void main() {
       expect((rows.single as Map)['snippet'], isNotEmpty);
     });
 
-    test('search_in_note 的 offset 能直接喂给 read_preview', () {
+    test('search_in_note 的 offset 能直接喂给 read_note_batch', () {
       final hits = data("SELECT search_in_note('n1', '风险', 10)") as List;
       expect(hits.length, 2);
       final off = (hits.first as Map)['offset'] as int;
       expect(body.substring(off, off + 2), '风险');
-      expect((data("SELECT read_preview('n1', $off, 6)") as String).startsWith('风险'),
+      expect(
+          ((json("SELECT read_note_batch('n1', $off, 6)")['data'] as Map)['content']
+                  as String)
+              .startsWith('风险'),
           isTrue);
     });
 
@@ -278,13 +299,108 @@ void main() {
 
     test('函数能嵌在 SQL 里，一次调用拿多列', () {
       final rows = db.select(
-        'SELECT id, title, read_preview(id, 0, 4) AS head, stat_note(id) AS meta '
+        'SELECT id, title, read_note_batch(id, 0, 4) AS head '
         'FROM notes WHERE deleted_at IS NULL ORDER BY id',
       );
       expect(rows.length, 2);
       // 嵌在列里时，该列仍是 UDF 返回的 JSON 文本 → 解出来看 data
-      expect(jsonDecode(rows.first['head'] as String)['data'], body.substring(0, 4));
-      expect(jsonDecode(rows.first['meta'] as String)['data']['title'], '项目A');
+      expect(jsonDecode(rows.first['head'] as String)['data']['content'],
+          body.substring(0, 4));
+      // 注：`outline_notes` 只收 JSON 数组，没法按行嵌（`outline_notes(id)` 会报错）——
+      // 这不是限制，因为它本来就是"一次看一批"的函数，不该按行调。
+    });
+  });
+
+  group('UDF：目录与批量读（v6 新增/改名）', () {
+    test('outline_notes 给的是**原文标题目录**（不是切片）', () {
+      db.execute("UPDATE notes SET content = ? WHERE id = 'n1'", [
+        '# 甲\n\n甲的内容。\n\n## 甲一\n\n甲一的正文。\n\n# 乙\n\n乙的正文。'
+      ]);
+      final d = data("SELECT outline_notes('[\"n1\"]')") as List;
+      final one = d.first as Map;
+      expect(one['id'], 'n1');
+      expect(one['chars'], isA<int>());
+      expect(one['excerpt'], isA<String>(), reason: '选材用的摘要要一起带回来');
+      // stat_note 被删了，它的字段必须在这里全覆盖
+      for (final k in ['title', 'notebook_id', 'chars', 'created_at', 'updated_at']) {
+        expect(one.containsKey(k), isTrue, reason: '缺字段 $k');
+      }
+      final secs = (one['sections'] as List).cast<Map>();
+      expect(secs.map((e) => e['heading']).toList(), ['甲', '甲一', '乙']);
+      expect(secs.map((e) => e['level']).toList(), [1, 2, 1]);
+      // offset/chars 是"这一节的字符范围"：甲一 的范围到"乙"之前
+      final first = secs[0];
+      expect(first['offset'], 0);
+      final jiaYi = secs[1];
+      expect((jiaYi['offset'] as int) > (first['offset'] as int), isTrue);
+      // 最后一节延到正文末尾
+      final last = secs[2];
+      final content = db.select("SELECT content FROM notes WHERE id = 'n1'").single['content'] as String;
+      expect((last['offset'] as int) + (last['chars'] as int), content.length);
+    });
+
+    test('outline_notes：没有标题的笔记 → sections 为空（按 chars 直接读整篇）', () {
+      final d = data("SELECT outline_notes('[\"n2\"]')") as List;
+      final one = d.first as Map;
+      expect(one['sections'], isEmpty);
+      expect(one['chars'], '随手记的一句话'.length);
+    });
+
+    test('outline_notes：坏输入与超上限都给可读的错', () {
+      expect(json('SELECT outline_notes(\'[]\')')['ok'], false);
+      expect(json("SELECT outline_notes('not json')")['ok'], false);
+      expect(json("SELECT outline_notes('[\"n1\"]')")['ok'], true);
+    });
+
+    test('★ read_note_batch 批量形式：一次读多篇，带位置与 next_offset', () {
+      final payload = jsonEncode([
+        {'id': 'n1', 'offset': 0, 'chars': 4},
+        {'id': 'n2'},
+      ]);
+      final d = data('SELECT read_note_batch(?)', [payload]) as List;
+      expect(d, hasLength(2));
+      final a = d[0] as Map;
+      final b = d[1] as Map;
+      expect(a['content'], body.substring(0, 4));
+      expect(a['truncated'], true);
+      expect(a['next_offset'], 4);
+      expect(b['content'], '随手记的一句话');
+      expect(b.containsKey('truncated'), isFalse, reason: '读完了就不该有截断标记');
+    });
+
+    test('read_note_batch：不存在的 id → 那一条给错误，其余照常', () {
+      final payload = jsonEncode([
+        {'id': '不存在'},
+        {'id': 'n1', 'chars': 3},
+      ]);
+      final d = data('SELECT read_note_batch(?)', [payload]) as List;
+      expect((d[0] as Map)['error'], isNotNull);
+      expect((d[1] as Map)['content'], body.substring(0, 3));
+    });
+
+    test('read_note_batch：整批超上限 → **整批拒绝**（不截断）', () {
+      final many = jsonEncode([
+        for (var i = 0; i < SqlLimits.maxBatchReadNotes + 1; i++)
+          {'id': 'n1', 'chars': 1},
+      ]);
+      final j = json('SELECT read_note_batch(?)', [many]);
+      expect(j['ok'], false);
+      expect(j['error'], contains('最多'));
+
+      final tooLong = jsonEncode([
+        for (var i = 0; i < 4; i++)
+          {'id': 'n1', 'chars': SqlLimits.maxBatchReadCharsPerNote},
+      ]);
+      // 4 × 1500 = 6000 < 15000 → 这篇只有几十字，实际总量很小 → 应当成功
+      expect(json('SELECT read_note_batch(?)', [tooLong])['ok'], isTrue);
+    });
+
+    test('read_note_batch：单条超过上限 → 截断到上限并给 next_offset', () {
+      final long = List.filled(SqlLimits.maxBatchReadCharsPerNote + 500, '字').join();
+      db.execute("UPDATE notes SET content = ? WHERE id = 'n1'", [long]);
+      final d = (data("SELECT read_note_batch('n1', 0, 99999)") as Map);
+      expect(d['chars'], SqlLimits.maxBatchReadCharsPerNote);
+      expect(d['next_offset'], SqlLimits.maxBatchReadCharsPerNote);
     });
   });
 
@@ -415,16 +531,44 @@ void main() {
           reason: '空名字要拒绝，不能悄悄改成默认名');
     });
 
-    test('正文超过 100KB 要拒绝，而不是截断', () {
-      final huge = List.filled(101 * 1024, 'a').join();
+    test('正文超过硬上限要拒绝，而不是截断', () {
+      final kb = AiLimits.noteHardBytes ~/ 1024;
+      final huge = List.filled(AiLimits.noteHardBytes + 1024, 'a').join();
       final payload = jsonEncode([
         {'id': 'n1', 'content': huge}
       ]);
       final j = json('SELECT append_notes_batch(?)', [payload]);
       expect(j['ok'], false);
-      expect(j['error'], contains('100KB'));
+      expect(j['error'], contains('${kb}KB'));
       expect(db.select("SELECT content FROM notes WHERE id = 'n1'").single['content'],
           body, reason: '失败就不该动正文');
+    });
+
+    test('★ 老的超限笔记「只管增长」：不变长就放行，变长才拒', () {
+      // 模拟"按旧上限（100KB）写下的老笔记"：直接塞一篇超过新上限的正文
+      final old = List.filled(AiLimits.noteHardBytes + 5000, 'a').join();
+      db.execute("UPDATE notes SET content = ? WHERE id = 'n1'", [old]);
+
+      // 改一个字（长度不变）→ 放行
+      final same = '${List.filled(old.length - 1, 'a').join()}b';
+      final ok = json('SELECT update_notes_batch(?)', [
+        jsonEncode([
+          {'id': 'n1', 'old': old, 'new': same}
+        ])
+      ]);
+      expect(ok['ok'], isTrue,
+          reason: '老笔记不能被锁死：一刀切会让用户连改一个字都存不了');
+      expect(db.select("SELECT content FROM notes WHERE id = 'n1'").single['content'],
+          same);
+
+      // 再变长 → 拒绝
+      final longer = List.filled(old.length + 1000, 'a').join();
+      final bad = json('SELECT update_notes_batch(?)', [
+        jsonEncode([
+          {'id': 'n1', 'old': same, 'new': longer}
+        ])
+      ]);
+      expect(bad['ok'], isFalse, reason: '上限管的是增长');
     });
 
     test('duplicate_note 复制内容与归属，但不置顶、不带切片', () {
@@ -444,7 +588,11 @@ void main() {
       expect(row['deleted_at'], isNotNull);
       expect(row['content'], body);
       // 已删的笔记：读侧一律看不见，再删也要报错
-      expect(json("SELECT stat_note('n1')")['ok'], false);
+      expect(json("SELECT outline_notes('[\"n1\"]')")['ok'], true,
+          reason: '已删的笔记在目录里会带 error 字段，而不是整批失败');
+      expect(
+          ((data("SELECT outline_notes('[\"n1\"]')") as List).first as Map)['error'],
+          isNotNull);
       expect(json("SELECT delete_notes_batch('[\"n1\"]')")['ok'], false);
     });
 
@@ -459,130 +607,9 @@ void main() {
     });
   });
 
-  group('UDF：系统与信号（mark_functions / finish）', () {
-    /// app_kv 里现在存着哪几个名字（按同一个解析函数读回来）。
-    List<String> pinned() {
-      final rows = db.select('SELECT value FROM app_kv WHERE key = ?',
-          [kAiPinnedFunctionsKey]);
-      if (rows.isEmpty) return const [];
-      return parsePinnedFunctions(rows.first['value'] as String?);
-    }
-
-    test('标记后写进 app_kv，description 说清加载了几个', () {
-      final r = json("SELECT mark_functions('[\"search_notes\",\"read_preview\"]')");
-
-      expect(r['ok'], true);
-      expect(pinned(), ['search_notes', 'read_preview']);
-      expect(r['description'], contains('2'),
-          reason: 'description 要带实际条数（AI 靠它确认标记生效）');
-      expect((r['data'] as Map)['added'], ['search_notes', 'read_preview']);
-    });
-
-    test('finish 只是信号：不改任何数据，但带 finished 标记', () {
-      final r = json("SELECT finish('已把《项目A》的风险段落改好')");
-
-      expect(r['ok'], true);
-      expect(r['description'], '已把《项目A》的风险段落改好',
-          reason: 'description 会显示在操作记录里，也是继续生成时看到的那句');
-      expect((r['data'] as Map)['finished'], true,
-          reason: 'AgentLoop 认的就是这一格（见 tool_types.dart 的 ToolResult.raw）');
-
-      // 「什么都不改」是它的定义：笔记与 app_kv 都不该动
-      expect(db.select("SELECT content FROM notes WHERE id = 'n1'").single['content'],
-          body);
-      expect(db.select('SELECT COUNT(*) AS n FROM app_kv').single['n'], 0);
-    });
-
-    test('finish 不带 reason 也能用（reason 是可选的）', () {
-      final r = json('SELECT finish()');
-      expect(r['ok'], true);
-      expect((r['data'] as Map)['finished'], true);
-    });
-
-    test('只增不减：再标一个，之前的还在', () {
-      json("SELECT mark_functions('[\"search_notes\"]')");
-      json("SELECT mark_functions('[\"create_notes_batch\"]')");
-
-      expect(pinned(), ['search_notes', 'create_notes_batch'],
-          reason: '没有 unmark，后标记的追加在后面');
-    });
-
-    test('重复标记同一个 → 不重复，也不报错', () {
-      json("SELECT mark_functions('[\"search_notes\"]')");
-      final r = json("SELECT mark_functions('[\"search_notes\"]')");
-
-      expect(r['ok'], true);
-      expect(pinned(), ['search_notes']);
-      expect(r['description'], contains('已在'),
-          reason: '要说清「本来就有」，别让 AI 以为又加载了一遍');
-    });
-
-    test('未知函数名 → 整批拒绝，且一个字都不写', () {
-      final r = json(
-          "SELECT mark_functions('[\"search_notes\",\"search_note\"]')");
-
-      expect(r['ok'], false);
-      expect(r['error'], contains('search_note'));
-      expect(pinned(), isEmpty,
-          reason: '整批拒绝：不能"标一半"，那会让 AI 以为两个都加载了');
-    });
-
-    test('超过上限：装得下的装，没装上的点名说出来', () {
-      // 先占满前 11 个（读），再要 6 个 → 只能再进 [SqlLimits.maxPinnedFunctions] - 11 个
-      final reads = [
-        for (final f in kAiFunctions)
-          if (f.category == 'read') f.name,
-      ];
-      expect(reads, hasLength(11));
-      json("SELECT mark_functions('${jsonEncode(reads)}')");
-
-      const more = [
-        'create_notebook',
-        'duplicate_note',
-        'create_notes_batch',
-        'insert_after',
-        'insert_before',
-        'prepend_to_note',
-      ];
-      final r = json("SELECT mark_functions('${jsonEncode(more)}')");
-
-      final fit = SqlLimits.maxPinnedFunctions - reads.length;
-      expect(r['ok'], true);
-      expect(pinned(), hasLength(SqlLimits.maxPinnedFunctions));
-      expect((r['data'] as Map)['dropped'],
-          more.sublist(fit), reason: '装不下的要一个个点名');
-      expect(r['description'], contains('未加载'),
-          reason: 'AI 必须知道哪几个没加载，不然它会以为详情都在 prompt 里');
-    });
-
-    test('参数不是数组 / 空数组 / 坏 JSON → 可读的错', () {
-      for (final bad in ['null', "'{}'", "'[]'", "'not json'"]) {
-        final r = json('SELECT mark_functions($bad)');
-        expect(r['ok'], false, reason: 'mark_functions($bad) 应当被拒');
-        expect(r['error'], isNotEmpty);
-      }
-      expect(pinned(), isEmpty);
-    });
-
-    test('上限已满再标 → 说清「没有新增」，不谎报标记成功', () {
-      final all = [for (final f in kAiFunctions) f.name];
-      json("SELECT mark_functions("
-          "'${jsonEncode(all.take(SqlLimits.maxPinnedFunctions).toList())}')");
-      expect(pinned(), hasLength(SqlLimits.maxPinnedFunctions));
-
-      final extra = all[SqlLimits.maxPinnedFunctions];
-      final r = json("SELECT mark_functions('[\"$extra\"]')");
-
-      expect(r['ok'], true, reason: '不是错误，只是没装下');
-      expect((r['data'] as Map)['added'], isEmpty);
-      expect(r['description'], contains('已达上限'));
-      expect(r['description'], contains(extra));
-    });
-  });
-
   group('清单与注册必须对齐', () {
-    test('26 个函数名都能被 SQLite 找到', () {
-      expect(kAiFunctions.length, 26,
+    test('25 个函数名都能被 SQLite 找到', () {
+      expect(kAiFunctions.length, 25);
       var message = '';
       for (final f in kAiFunctions) {
         try {
@@ -597,14 +624,15 @@ void main() {
     });
 
     test('写函数名单与 category 对得上', () {
-      // 25 = 11 读 + 3 建 + 8 改 + 2 删 + 1 系统
+      // 25 = 11 读 + 3 建 + 8 改 + 2 删 + 1 信号
       expect(kAiWriteFunctions.length, 13, reason: '建 3 + 改 8 + 删 2');
       expect(kAiWriteFunctions.contains('update_notes_batch'), isTrue);
       expect(kAiWriteFunctions.contains('list_notes'), isFalse);
-      // 系统类的 mark_functions 只动 app_kv，不算「写笔记」
-      //（混进来的话执行器会白刷三张笔记表）
-      expect(kAiWriteFunctions.contains('mark_functions'), isFalse);
-      expect(kAiKvFunctions, {'mark_functions'});
+      // `finish` 什么都不改，不算「写笔记」（混进来的话每轮收尾都白刷三张表）
+      expect(kAiWriteFunctions.contains('finish'), isFalse);
+      // 但它仍然属于"非读函数"—— 按行调用同样要拦
+      expect(kAiNonReadFunctions.contains('finish'), isTrue);
+      expect(kAiNonReadFunctions.length, kAiFunctions.length - 11);
       // v3：被批量版覆盖的单次函数不该还在名单里
       expect(kAiWriteFunctions.contains('replace_unique'), isFalse);
       expect(kAiWriteFunctions.contains('create_note'), isFalse);

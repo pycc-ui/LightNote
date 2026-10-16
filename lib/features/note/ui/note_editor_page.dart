@@ -163,6 +163,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
 
     _titleController.text = note.title;
     _contentController.text = note.content;
+    // 记下"进来时多大"：硬上限只管增长，老的超限笔记不能被锁死（见 _flush）
+    _loadedBytes = utf8ByteLength(note.content);
     setState(() {
       _note = note;
       _fontScale = fontScale;
@@ -194,6 +196,13 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   // 内容始终在编辑器里，用户可以自己复制走。
   // ==========================================================================
 
+  /// **这篇笔记进编辑器时的字节数**（新建 = 0）。
+  ///
+  /// 硬上限的判定要用它：规则是「**只管增长**」—— 老库里可能有按旧上限（100KB）
+  /// 写下的笔记，一刀切会让用户连改一个字都存不了。所以只有
+  /// `当前字节数 > max(_loadedBytes, 硬上限)` 才拦（见 _flush 与 _checkSize）。
+  int _loadedBytes = 0;
+
   /// 当前正文的 UTF-8 字节数。
   ///
   /// 用字节而不是字符数：中文一个字 3 字节，按字符算会**低估三倍**，
@@ -219,7 +228,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('裁剪到 80 KB？'),
+        title: Text('裁剪到 ${AiLimits.noteSoftBytes ~/ 1024} KB？'),
         content: Text(
           '会删掉末尾约 ${_kb(dropped)} 的内容。\n\n'
           '**这个操作不能撤销**。如果末尾还有要留的东西，'
@@ -337,7 +346,12 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     //
     // 注意这里不抛错也不清空内容——用户的字还在编辑器里，
     // 只是没进数据库。保存状态会显示为失败，横幅里有裁剪入口。
-    if (_sizeLevel == NoteSizeLevel.hard) {
+    // 超过硬上限 → 不落盘。但**老的超限笔记只要不变长就放行**（只管增长，
+    // 否则用户被自己的数据卡死：改一个字都存不了）。
+    if (_sizeLevel == NoteSizeLevel.hard &&
+        _contentBytes > (_loadedBytes > AiLimits.noteHardBytes
+            ? _loadedBytes
+            : AiLimits.noteHardBytes)) {
       setState(() => _saveState = SaveState.failed);
       return;
     }
@@ -539,14 +553,15 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
           Icons.warning_amber_outlined,
           scheme.tertiary,
           '笔记偏长（${_kb(bytes)}）',
-          '建议拆成多篇。还能继续编辑，超过 100 KB 就无法保存了。',
+          '建议拆成多篇。还能继续编辑，超过 '
+              '${AiLimits.noteHardBytes ~/ 1024} KB 就无法保存了。',
         ),
       NoteSizeLevel.hard => (
           Icons.error_outline,
           scheme.error,
           '超出上限（${_kb(bytes)}），无法保存',
-          '上限 100 KB。内容还在编辑器里，请拆分成多篇，'
-              '或裁剪到 80 KB 后再保存。',
+          '上限 ${AiLimits.noteHardBytes ~/ 1024} KB。内容还在编辑器里，请拆分成多篇，'
+              '或裁剪到 ${AiLimits.noteSoftBytes ~/ 1024} KB 后再保存。',
         ),
       NoteSizeLevel.ok => (Icons.info_outline, scheme.onSurfaceVariant, '', ''),
     };

@@ -168,19 +168,13 @@ class ToolExecutor {
       return false;
     }
 
-    final updates = <TableUpdate>{
-      if (hit(kAiWriteFunctions)) ...const [
-        TableUpdate('notes'),
-        TableUpdate('notebooks'),
-        TableUpdate('note_chunks'),
-      ],
-      if (hit(kAiKvFunctions)) const TableUpdate('app_kv'),
-    };
-    if (updates.isEmpty) return false;
-    _db.notifyUpdates(updates);
-    // 只报「改了笔记」：`mark_functions` 也返回 true 的话，每轮都会往消息里
-    // 记一条「标记了几个函数」—— 那是噪音，而且与「改了哪些笔记」无关。
-    return hit(kAiWriteFunctions);
+    if (!hit(kAiWriteFunctions)) return false;
+    _db.notifyUpdates({
+      const TableUpdate('notes'),
+      const TableUpdate('notebooks'),
+      const TableUpdate('note_chunks'),
+    });
+    return true;
   }
 
   // ==========================================================================

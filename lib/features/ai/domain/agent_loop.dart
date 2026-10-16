@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../../core/db/ai_functions.dart';
 import '../../../core/db/app_database.dart';
 import '../../../core/db/models.dart';
 import '../../../core/util/app_params.dart';
@@ -209,12 +210,13 @@ class AgentLoop {
     for (var roundNo = 0; roundNo < budget - roundsUsed; roundNo++) {
       executor.beginTurn();
       final used = roundsUsed + roundNo;
-      // 快到上限时，把"还剩几轮"追加在 prompt **末尾**：
-      // 不碰协议、不碰消息，也不需要改 rebuildPrompt 的签名 ——
-      // 每轮本来就要重拼一次 prompt（mark_functions 的详情靠它生效）。
-      final prompt =
-          (await _promptFor(systemPrompt, rebuildPrompt)) +
-              _budgetNotice(used, budget);
+      final prompt = await _promptFor(systemPrompt, rebuildPrompt);
+      // 快到上限时的"还剩几轮"提醒：**挂在消息列表末尾**，不碰 system prompt。
+      //
+      // 为什么不能改 system 头部：前缀缓存是逐块比对的，头部一改，
+      // 后面**整段上下文**都要按全价重算一次（30k token 时约 3–27 分）。
+      // 挂在末尾则前缀不动，只有这一小条重新计费。
+      _setTrailingNotice(messages, _budgetNotice(used, budget));
 
       // ---- 一次请求 ----
       var text = '';
@@ -360,7 +362,9 @@ class AgentLoop {
   static String _budgetNotice(int used, int budget) {
     if (budget - used > 2) return '';
     final left = budget - used;
-    return '\n\n## 轮数提醒\n'
+    // 注意：**不再带前导换行** —— 它现在是一条独立消息（挂在消息列表末尾），
+    // 而不是拼进 system prompt 的尾巴。
+    return '## 轮数提醒\n'
         '已经用了 $used 轮，最多 $budget 轮（还剩 $left 轮）。\n'
         '- 任务还没做完：调 askUser 问用户要不要继续（**说清继续会再发生一次调用费用**）；'
         '用户同意后上限会 +${AgentLimits.roundExtension} 轮（最多 ${AgentLimits.maxRoundsHard} 轮）。\n'
@@ -394,14 +398,110 @@ class AgentLoop {
   ///   {"ok":true,"data":"⟪系统压缩：省略 2900 字⟫"}
   /// 保留 JSON 结构，AI 知道"发生了什么"，只是不记得具体内容。
   void _slimLastToolResults(List<AgentMessage> messages) {
-    for (var i = messages.length - 1; i >= 0; i--) {
+    // 先把 tool_call_id → 函数名 建好（要靠它判断这条结果是什么性质）
+    final nameOf = <String, String>{};
+    for (final m in messages) {
+      for (final c in m.toolCalls) {
+        nameOf[c.id] = c.name;
+      }
+    }
+
+    // ---- 第一遍：算"素材总量"，并从**最旧**的开始折到预算内 ----
+    //
+    // 只统计素材类；日志类（写函数 / finish）反正要折成一行，失败结果要保留。
+    var materialChars = 0;
+    final materialIdx = <int>[];
+    for (var i = 0; i < messages.length; i++) {
       final m = messages[i];
-      if (m.role != 'tool' || m.toolCallId == null) break;
+      if (m.role != 'tool' || m.toolCallId == null) continue;
+      if (_isFailedResult(m.content)) continue;
+      if (_isLogCall(nameOf[m.toolCallId])) continue;
+      materialChars += m.content.length;
+      materialIdx.add(i);
+    }
+
+    var over = materialChars - AgentLimits.materialBudgetChars;
+    final folded = <int>{};
+    for (final i in materialIdx) {
+      if (over <= 0) break;
+      folded.add(i);
+      over -= messages[i].content.length;
+    }
+
+    // ---- 第二遍：该折的折成"指针" ----
+    //
+    // 折成指针而不是墓碑：模型看得到"刚才读的是什么、怎么取回来"，
+    // 于是它不会盲目重查（`⟪系统压缩：省略 N 字⟫` 那种写法只能让它重来一遍）。
+    // 指针本身就是"超预算"的通知 —— 它明确说了折掉了哪一条、怎么拿回来。
+    for (var i = 0; i < messages.length; i++) {
+      final m = messages[i];
+      if (m.role != 'tool' || m.toolCallId == null) continue;
+      if (_isFailedResult(m.content)) continue; // 报错是纠正的唯一依据，保留
+      final isLog = _isLogCall(nameOf[m.toolCallId]);
+      if (!isLog && !folded.contains(i)) continue; // 素材且没超预算 → 原样留
       messages[i] = AgentMessage.tool(
         toolCallId: m.toolCallId!,
-        content: _compressToolResult(m.content),
+        content: _foldToPointer(m.content, nameOf[m.toolCallId]),
       );
     }
+  }
+
+  /// 这条结果是不是**失败**（`{ok:false}`）。失败的原因要原样保留给模型看。
+  static bool _isFailedResult(String content) {
+    if (!content.startsWith('{')) return false;
+    try {
+      final m = jsonDecode(content);
+      return m is Map && m['ok'] == false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 这条调用是不是"日志类"（写操作 / 收尾信号）—— 它的返回值只是确认，
+  /// 正文内容已经进了「本轮执行」那段，所以一律折成一行。
+  static bool _isLogCall(String? toolName) {
+    if (toolName == null) return false;
+    return kAiWriteFunctions.contains(toolName) || toolName == 'finish';
+  }
+
+  /// 把一条 tool 结果折成**一行指针**：说清"折叠的是什么、需要时怎么取回"。
+  ///
+  /// 幂等：已经是折叠形态的原样返回（每轮都会跑一遍，不能越折越花）。
+  static String _foldToPointer(String content, String? toolName) {
+    if (content.contains('⟪已折叠')) return content;
+    var desc = '';
+    try {
+      final m = jsonDecode(content);
+      if (m is Map && m['description'] is String) {
+        desc = (m['description'] as String).trim();
+      }
+    } catch (_) {}
+    final what = desc.isEmpty ? '上一轮的工具结果' : desc;
+    final how = toolName == null ? '用同样的查询' : '用 $toolName';
+    return jsonEncode({
+      'ok': true,
+      'description': what,
+      'data': '⟪已折叠：$what（需要时$how 取回）⟫',
+    });
+  }
+
+  /// 把"轮数提醒"作为**最后一条消息**挂上去（每轮替换，不累积）。
+  ///
+  /// 用消息末尾而不是 system 头部，是为了**保住前缀缓存** —— 见调用处的说明。
+  static void _setTrailingNotice(List<AgentMessage> messages, String notice) {
+    const mark = '## 轮数提醒';
+    final text = notice.trim();
+
+    // 先把上一轮挂的那条摘掉 —— **不能只检查"最后一条"**：
+    // 那一轮结束后，工具往来会追加到它后面，它就不再是末尾了（会越挂越多）。
+    messages.removeWhere(
+      (m) => m.role == 'system' && m.content.startsWith(mark),
+    );
+    if (text.isEmpty) return;
+
+    // 再挂到**最末尾**：变化的东西放最后，前面（固定段 / 历史 / 素材 / 工具引用）
+    // 全部保持原样 → 前缀缓存一直命中。
+    messages.add(AgentMessage.system(text));
   }
   
   /// 精简**最后一个** assistant(tool_calls) 的 arguments。
@@ -450,26 +550,6 @@ class AgentLoop {
       return args;
     }
   }
-  /// 压缩 tool result 的 content：
-  /// 解析 JSON，只压缩 `data` 字段，其他字段（ok / description 等）原样保留。
-  ///
-  /// 例：
-  ///   {"ok":true,"description":"查询了笔记库","data":[{...三千字...}]}
-  ///   →
-  ///   {"ok":true,"description":"查询了笔记库","data":"...省略 2900 字..."}
-  ///
-  /// 不是 JSON（UDF 直接返回文本）就整体用 _compressMiddle。
-  String _compressToolResult(String content) {
-    try {
-      final map = jsonDecode(content) as Map<String, dynamic>;
-      if (map.containsKey('data')) {
-        map['data'] = _compressMiddle(jsonEncode(map['data']));
-      }
-      return jsonEncode(map);
-    } catch (_) {
-      return _compressMiddle(content);
-    }
-  } 
   /// 保留开头和结尾各 [keep] 字符，中间压成标记。
   ///
   /// 为什么不做正则匹配"单引号字符串"：SQL / JSON / 纯文本结构各异，

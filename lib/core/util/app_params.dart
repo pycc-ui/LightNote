@@ -53,13 +53,19 @@ abstract final class AiLimits {
   // ---- 笔记正文（软上限 + 硬保护）----
 
   /// 软上限：超过就轻提示"注意编辑流畅度"
-  static const noteSoftBytes = 80 * 1024;
+  static const noteSoftBytes = 30 * 1024;
 
   /// 强警告线：超过就建议拆分，但仍允许保存
-  static const noteWarnBytes = 90 * 1024;
+  static const noteWarnBytes = 40 * 1024;
 
-  /// 硬上限：超过就拒绝保存
-  static const noteHardBytes = 100 * 1024;
+  /// 硬上限：超过就拒绝保存。
+  ///
+  /// ⚠️ **只管"增长"，不管"存在"**：老库里可能有按旧上限（100KB）写下的笔记，
+  /// 一刀切会把用户卡死（改一个字都存不了，唯一的出路是"裁剪到软上限"——
+  /// 那是删内容且不可撤销）。所以判定是
+  /// `新字节数 ≤ max(原字节数, noteHardBytes)` 才放行，
+  /// 老笔记不被锁死，但也不能再变长（见 note_editor_page.dart 与 ai_udfs.dart）。
+  static const noteHardBytes = 50 * 1024;
 
   /// 单行短字段的上限（字）：笔记标题、笔记库名、会话标题、卡片标题……
   /// 超出截断（不是拒绝）：这类字段会进 prompt，几万字的"标题"能撑爆一次请求。
@@ -173,7 +179,10 @@ abstract final class SearchLimits {
 abstract final class SqlLimits {
   // ---- 读 ----
 
-  /// read_preview / read_around 单次返回的字符数上限。
+  /// read_around 单次返回的字符数上限。
+  ///
+  /// `read_note_batch` 不共用它：那个函数读的是"整节/整篇"，另有
+  /// [maxBatchReadCharsPerNote]；这个 500 字上限只约束"取关键词周围一小段"。
   static const maxReadChars = 500;
 
   /// 不传 chars 时的默认值。
@@ -203,14 +212,22 @@ abstract final class SqlLimits {
   /// 整批都做了，实际悄悄漏掉几条 —— 这种"看起来成功"的错最难发现。
   static const maxBatchSize = 10;
 
-  // ---- 动态标记（mark_functions）----
+  // ---- 批量读 / 目录 ----
 
-  /// 最多常驻几个函数的详情。**只增不减**，所以这是"永远装得下"的硬顶：
-  /// 满了之后新的标记不再加载（mark_functions 会在返回值里点名说出来）。
+  /// `read_note_batch` 单条最多读多少字。
   ///
-  /// 定 15 的依据：详情每条约 70 token，15 条约 1000 token，且加在 system prompt
-  /// **末尾** —— 命中缓存后只按约 1/50 计价，比每轮查目录便宜得多。
-  static const maxPinnedFunctions = 15;
+  /// 1500 而不是"整篇"：一节（按 Markdown 标题切）通常几百字，超过 1500 的是
+  /// 罕见的长节 —— 那种情况返回 `next_offset`，让模型接着读，而不是一次灌一大段。
+  static const maxBatchReadCharsPerNote = 1500;
+
+  /// `read_note_batch` 一次最多读多少字 / 多少条。超了**整批拒绝**（不截断）：
+  /// 与写函数的 maxBatchSize 同一原则 —— 截断会让模型以为整批都读到了。
+  static const maxBatchReadChars = 15000;
+  static const maxBatchReadNotes = 20;
+
+  /// `outline_notes` 一次最多给多少篇的目录。
+  /// 回的是目录不是正文，所以可以比 maxBatchReadNotes 大得多。
+  static const maxOutlineNotes = 50;
 
   // ---- 回灌给模型的结果 ----
 
@@ -251,6 +268,24 @@ abstract final class AgentLimits {
   /// 一轮用户输入里 `askUser` 最多问几次（跨恢复累计）。
   static const maxAsksPerTurn = 5;
 
+
+  /// **本轮素材的字符预算**（读回来的正文 + 检索注入的片段）。
+  ///
+  /// 超了就从**最旧**的开始折叠（折成一行"指针"，见 agent_loop.dart），
+  /// 而不是像以前那样"除最近一轮外全压"。
+  ///
+  /// 为什么定 30000：按 1 元/百万 token（flash 低谷）算，3 万中文字 ≈ 2.2 万 token
+  /// ≈ 2.2 分 —— 一次复杂任务能接受的量级；而它换来的是"模型不会因为忘了
+  /// 刚读的东西而重读"（重读一轮要 0.4–2.7 分，且白烧一轮的思考）。
+  static const materialBudgetChars = 30000;
+
+  /// agent 单轮请求的输出上限（含思维链）。
+  ///
+  /// **必须显式设**：不设的话走服务端默认（聊天模型 4096），模型想写一篇长笔记
+  /// 会被硬切断 —— 而切断的表现是 JSON 不完整 → 解析失败 → 整轮白跑。
+  /// 16384 够写一篇两三千字的笔记，也给思维链留了余量；
+  /// 要生成 50KB 的长文时改用**分节**（批 3），每轮只要写一节。
+  static const maxOutputTokens = 16384;
 
   /// 自动带的历史**轮数**（一轮 = 一问一答）。
   static const maxHistoryRounds = 5;

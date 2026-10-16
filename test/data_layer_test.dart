@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lightnote/core/db/ai_functions.dart';
 import 'package:lightnote/core/db/app_database.dart';
 import 'package:lightnote/core/db/models.dart';
 import 'package:lightnote/core/util/ai_limits.dart';
@@ -112,56 +113,88 @@ void main() {
     });
   });
 
-  group('已加载函数详情（动态标记的展示面）', () {
-    test('标记过的函数会渲染出签名 / 说明 / 例子', () {
-      final out = AiPrompts.pinnedDetails(['search_notes']);
+  group('固定段（v6：函数文档全量常驻）', () {
+    test('★ 25 个函数的文档全在固定段里（不再靠 mark_functions 动态加载）', () {
+      final sys = AiPrompts.agentSystem;
 
-      expect(out, contains('## 已加载函数详情'));
-      expect(out, contains('search_notes(keyword, limit)'));
-      expect(out, contains('全库搜标题'));
-      expect(out, contains('例：SELECT search_notes('));
+      // 每个函数的签名、说明、例子都必须在里面
+      for (final f in kAiFunctions) {
+        expect(sys, contains(f.signature), reason: '${f.name} 的签名不在 prompt 里');
+        final head = f.description.length > 16
+            ? f.description.substring(0, 16)
+            : f.description;
+        expect(sys, contains(head), reason: '${f.name} 的说明不在 prompt 里');
+        if (f.example != null) {
+          expect(sys, contains(f.example!), reason: '${f.name} 的例子不在 prompt 里');
+        }
+      }
+      // 文档由 kAiFunctions 生成 → 数量必然对齐
+      expect(sys, contains('### 读'));
+      expect(sys, contains('### 改'));
+      expect(sys, contains('### 信号'));
     });
 
-    test('多个函数各占一节，顺序与传入一致', () {
-      final out = AiPrompts.pinnedDetails(['read_preview', 'search_notes']);
-
-      expect(out.indexOf('read_preview(note_id'), lessThan(out.indexOf('search_notes(')));
+    test('★ 表结构写在固定段里（AI 不用再探 sqlite_master）', () {
+      final sys = AiPrompts.agentSystem;
+      for (final col in ['deleted_at', 'is_inbox', 'notebook_id', 'excerpt', 'content']) {
+        expect(sys, contains(col), reason: '表结构缺列 $col');
+      }
+      expect(sys, contains('## 一、数据库结构'));
     });
 
-    test('空 / 名字全都失效 → 空串（不留一个空标题）', () {
-      expect(AiPrompts.pinnedDetails(const []), '');
-      expect(AiPrompts.pinnedDetails(const ['不存在的函数']), '');
-      expect(AiPrompts.agentSystemFor(pinned: const ['不存在的函数']),
-          AiPrompts.agentSystem,
-          reason: '失效名字不该在 prompt 里留下任何痕迹');
+    test('★ 两类工作路径写清了：A 类要一次读多篇整篇，B 类才一段段读', () {
+      final sys = AiPrompts.agentSystem;
+      expect(sys, contains('A 类'));
+      expect(sys, contains('B 类'));
+      expect(sys, contains('outline_notes'));
+      expect(sys, contains('read_note_batch'));
+      expect(sys, contains('一次读回要用的正文'),
+          reason: '这条是"整理 7 篇做不完（要 42 轮）"的正解');
+      expect(sys, isNot(contains('不要整篇读正文')),
+          reason: '旧规则 5 对聚合任务是反向指引，必须删掉');
     });
 
-    test('★ 拼接顺序：固定段 → 摘要 → 详情段（前缀稳定才命中缓存）', () {
-      final out = AiPrompts.agentSystemFor(
-        summary: '用户想整理会议记录。',
-        pinned: const ['search_notes'],
-      );
-
-      expect(out.startsWith(AiPrompts.agentSystem), isTrue, reason: '固定段必须在最前');
-      final atSummary = out.indexOf('用户想整理会议记录。');
-      final atDetails = out.indexOf('## 已加载函数详情');
-      expect(atSummary, greaterThan(0));
-      expect(atDetails, greaterThan(atSummary),
-          reason: '详情段在最后：它只增不改，前面的部分才一直命中缓存');
+    test('★ A 类产出只走 json 代码块（别让两条通道并存）', () {
+      final sys = AiPrompts.agentSystem;
+      expect(sys, contains('一律走这个 json 代码块'));
+      expect(sys, contains('不要用 create_notes_batch'));
+      expect(sys, contains('写函数留给 B 类'),
+          reason: '实测两条路并存时模型会随机挑一条：SQL 那条受 2 万字符限制、还多一轮');
     });
 
-    test('详情段只增不改：追加一个函数，原来的那一段逐字不动', () {
-      final before = AiPrompts.agentSystemFor(pinned: const ['search_notes']);
-      final after = AiPrompts.agentSystemFor(
-          pinned: const ['search_notes', 'read_preview']);
+    test('摘要拼在固定段之后（前缀不变 → 命中缓存）', () {
+      final out = AiPrompts.agentSystemFor(summary: '用户想整理会议记录。');
 
-      expect(after.startsWith(before), isTrue,
-          reason: '新标记只追加在末尾，之前的内容必须一个字都不变');
+      expect(out.startsWith(AiPrompts.agentSystem), isTrue,
+          reason: '固定段必须在最前，一字不动');
+      expect(out, endsWith('用户想整理会议记录。'));
     });
 
-    test('prompt 里必须写明「不要每次会话都重查目录」', () {
-      expect(AiPrompts.agentSystem, contains('mark_functions'));
-      expect(AiPrompts.agentSystem, contains('不要每次会话都重查目录'));
+    test('没有摘要时原样返回固定段（不留多余空行）', () {
+      expect(AiPrompts.agentSystemFor(), AiPrompts.agentSystem);
+      expect(AiPrompts.agentSystemFor(summary: '  '), AiPrompts.agentSystem);
+    });
+
+    test('★ 固定段**整轮整会话都不变**（前缀缓存的全部前提）', () {
+      // 连调两次必须逐字相同：任何"每轮重算带进随机/时间"的东西都会毁掉缓存
+      expect(AiPrompts.agentSystem, AiPrompts.agentSystem);
+      expect(AiPrompts.agentSystem.length, greaterThan(3000),
+          reason: '固定段现在含 25 段函数文档，不该只有原来那点');
+    });
+
+    test('★ prompt 里必须写明「非读函数不能带 FROM/JOIN」+ 正反例', () {
+      final sys = AiPrompts.agentSystem;
+
+      // 光靠 SqlGuard 拒绝也拦得住数据事故，但那要白烧一轮请求才发现。
+      // 提示词里写清楚，AI 才可能一次写对（同一条规则见 sql_guard.dart）。
+      expect(sys, contains('FROM / JOIN'), reason: '要说清是哪种查询');
+      expect(sys, contains('✗'), reason: '要给反例，否则模型容易只读懂字面意思');
+      expect(sys, contains('✓'), reason: '要给正确写法');
+      expect(sys, contains('先用读函数查 id'), reason: '要告诉它正确的做法');
+      for (final name in ['update_notes_batch', 'delete_notes_batch', 'finish']) {
+        expect(sys, contains(name),
+            reason: '$name 也属于被禁的那一类（非读函数）');
+      }
     });
   });
 

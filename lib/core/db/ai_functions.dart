@@ -16,7 +16,6 @@
 //（对齐逻辑见 AppDatabase 的 ensureAiFunctions）。
 library;
 
-import 'dart:convert';
 
 import '../util/app_params.dart';
 
@@ -50,9 +49,15 @@ class AiFunctionSpec {
 ///
 /// v4（=3）：加了 `mark_functions`（第 25 个）。
 /// v5（=4）：加了 `finish`（第 26 个，信号类）—— 让「任务做完了」变成机器可读的一件事。
-const kAiFunctionsVersion = 4;
+/// v6（=5）：**函数文档全量进 System Prompt** 之后的一次大整理 ——
+///   · 加 `outline_notes`（标题目录，聚合任务靠它选材）
+///   · `read_preview` 改名并扩能成 `read_note_batch`（能一次读一批，返回 next_offset）
+///   · 删 `stat_note`（字段并入 `outline_notes`）
+///   · 删 `mark_functions`（详情常驻之后它彻底多余了）
+///   → 26 − 2 + 1 = **25 个**
+const kAiFunctionsVersion = 5;
 
-/// 26 个函数。顺序按「读 → 建 → 改 → 删 → 系统 → 信号」排，与《AI 操作数据库设计》一致。
+/// 25 个函数。顺序按「读 → 建 → 改 → 删 → 信号」排，与《AI 操作数据库设计》一致。
 ///
 /// v3 的重要变化：**有批量版的单次函数全部砍掉**（create_note / append_to_note /
 /// replace_unique / delete_unique / move_note / delete_note）——单次也走批量函数
@@ -87,18 +92,27 @@ const kAiFunctions = <AiFunctionSpec>[
     example: 'SELECT list_unfiled();',
   ),
   AiFunctionSpec(
-    name: 'stat_note',
+    name: 'outline_notes',
     category: 'read',
-    signature: 'stat_note(note_id)',
-    description: '一篇笔记的元信息。data={title, notebook_id, char_count, created_at, updated_at}。**不含正文**：要内容用 read_around / read_preview。',
-    example: "SELECT stat_note('n1');",
+    signature: 'outline_notes(json)',
+    description: '一次拿多篇的**目录 + 摘要**（不含正文）：用来选材，以及决定「读哪一篇的哪一节」。'
+        'json=["n1","n2"]，上限 50 篇。data=[{id, title, notebook_id, chars, excerpt, '
+        'created_at, updated_at, sections:[{level, heading, offset, chars}]}]——'
+        'sections 是**原文的标题目录**（按 Markdown 的 # 层级切），offset/chars 是这一节的字符范围。'
+        '**要看内容就把这里的 offset 抄给 read_note_batch**；一节超过 1500 字会被截断，'
+        '按返回的 next_offset 接着读。',
+    example: 'SELECT outline_notes(\'["n1","n2"]\');',
   ),
   AiFunctionSpec(
-    name: 'read_preview',
+    name: 'read_note_batch',
     category: 'read',
-    signature: 'read_preview(note_id, offset, chars)',
-    description: '从第 offset 个字符起读 chars 个字符（offset 默认 0、chars 默认 200，上限 500）。data 是这段文本。**读不到全文**：要特定段落先 find_in_note / search_in_note 定位。',
-    example: "SELECT read_preview('n1', 0, 300);",
+    signature: 'read_note_batch(json)',
+    description: '读笔记正文（**单次也用它**）。两种形式：read_note_batch(\'n1\', 0, 200) 读一篇的一段；'
+        'read_note_batch(\'[{"id":"n1","offset":3120,"chars":700},{"id":"n2"}]\') 读一批。'
+        '不传 offset/chars = 从开头读整篇（单条上限 1500 字）。'
+        'data=[{id, title, offset, chars, content, truncated, next_offset?}]：'
+        '**被截断时会给出 next_offset，接着从那里读**。整批上限 15000 字 / 20 条，超了整批拒绝。',
+    example: "SELECT read_note_batch('[{\"id\":\"n1\",\"offset\":3120,\"chars\":700}]');",
   ),
   AiFunctionSpec(
     name: 'read_around',
@@ -162,7 +176,7 @@ const kAiFunctions = <AiFunctionSpec>[
     name: 'create_notes_batch',
     category: 'create',
     signature: 'create_notes_batch(json)',
-    description: '批量新建笔记。json=[{title, content, notebook_id?}]，≤10 条。**单次也用它**（数组放一个元素）。notebook_id 省略/null = 进「我的轻笔记」。正文超 100KB 会拒绝。整批事务：任一条失败全部回滚。data={note_ids}。',
+    description: '批量新建笔记。json=[{title, content, notebook_id?}]，≤10 条。**单次也用它**（数组放一个元素）。notebook_id 省略/null = 进「我的轻笔记」。正文超 ${AiLimits.noteHardBytes ~/ 1024}KB 会拒绝（**上限管增长不管存在**：改已有笔记时只要不变长就放行）。整批事务：任一条失败全部回滚。data={note_ids}。',
     example:
         "SELECT create_notes_batch('[{\"title\":\"复盘要点\",\"content\":\"正文…\"}]');",
   ),
@@ -247,19 +261,6 @@ const kAiFunctions = <AiFunctionSpec>[
     example: "SELECT delete_notes_batch('[\"n1\",\"n2\"]');",
   ),
 
-  // -------------------------------------------------------------- 系统（1）
-  AiFunctionSpec(
-    name: 'mark_functions',
-    category: 'system',
-    signature: 'mark_functions(json)',
-    description: '把这次任务**会反复用**的函数标记为常驻：它们的详情（签名 / 说明 / 例子）'
-        '立刻拼进 System Prompt 末尾，本轮下一轮起、以及之后所有会话都直接可用，'
-        '不用再查 ai_functions。json=["search_notes","read_preview"]。'
-        '只增不减（没有取消标记），最多 ${SqlLimits.maxPinnedFunctions} 个。'
-        '需要的函数已经在「已加载函数详情」里时**不要重复标记**。',
-    example: "SELECT mark_functions('[\"search_notes\",\"read_preview\"]');",
-  ),
-
   // -------------------------------------------------------------- 信号（1）
   AiFunctionSpec(
     name: 'finish',
@@ -279,68 +280,26 @@ const kAiFunctions = <AiFunctionSpec>[
 /// 用处：执行器据此决定「这次 SQL 之后要不要让界面重新查一遍」；
 /// 测试与文档核对清单时也用它。
 ///
-/// ⚠️ `system` 类不算写笔记（`mark_functions` 只动 app_kv，见 [kAiKvFunctions]）——
-/// 混进来会让"读是 11 个，其余都是写"这个不变量失去意义。
+/// 用**正向白名单**而不是"排除 read"：非读的类别会越来越多
+///（`system` 只动 app_kv、`meta` 什么都不动），写死排除项的话，
+/// 每加一个类别都会悄悄把它算成"写了笔记"—— 表现是每次调它都白刷一遍列表。
 final kAiWriteFunctions = <String>{
   for (final f in kAiFunctions)
-    if (f.category != 'read' && f.category != 'system') f.name,
+    if (const {'create', 'modify', 'delete'}.contains(f.category)) f.name,
 };
 
-/// 只改 `app_kv`（不动笔记）的函数名。执行器据此通知对应的表变了。
-final kAiKvFunctions = <String>{
-  for (final f in kAiFunctions)
-    if (f.category == 'system') f.name,
-};
-
-/// **所有非 read 函数**（写笔记的 + 只动 app_kv 的）。
+/// **所有非 read 函数**。
 ///
-/// 第三个集合的理由：上面两个集合回答的是「这次改动该通知哪几张表」，
+/// `kAiWriteFunctions` 回答的是「这次改动该通知哪几张表」，
 /// 而 `SqlGuard` 要回答的是另一个问题 —— 「这个函数能不能嵌在带 FROM 的查询里」。
-/// 答案对**所有**非 read 函数都一样：不能。所以别拿上面两个集合去凑
-///（`mark_functions` 在 system 里，只取 `kAiWriteFunctions` 会漏掉它），
+/// 答案对**所有**非 read 函数都一样：不能。所以别拿 `kAiWriteFunctions` 去凑
+///（`finish` 在 meta 里、什么都不改，但它同样不能按行调用）。
 /// 也别在 Guard 里抄一份函数名清单 —— 抄了就会和这张表分叉，
 /// 而分叉的表现是「新加的写函数可以按行调用」，没人会发现。
 final kAiNonReadFunctions = <String>{
   for (final f in kAiFunctions)
     if (f.category != 'read') f.name,
 };
-
-// ============================================================================
-// 「已加载函数」——AI 用 mark_functions 标记的那几个
-// ============================================================================
-
-/// `app_kv` 里存已标记函数名的 key（JSON 数组字符串）。
-///
-/// **唯一的写者是 UDF `mark_functions`**（见 ai_udfs.dart）：它和写笔记走同一条
-/// 原始连接，所以 app_kv 就是唯一真相，App 侧只读、不另存一份状态。
-/// （这也是这里不放 `appendPinnedFunctions` 的原因：多一个写者就多一份可能不一致的副本。）
-const kAiPinnedFunctionsKey = 'ai_pinned_functions';
-
-/// 解析 [kAiPinnedFunctionsKey] 的值。
-///
-/// 两道过滤，都是为了让**坏数据不至于毁掉整个 prompt**：
-///   · 非数组 / 坏 JSON → 当空；
-///   · 名字已经不在清单里（函数被删或改名）→ 丢掉 —— 否则详情段渲染不出内容，
-///     而计数还占着那 15 个名额。
-/// 顺序与去重都保持，重复标记不该让同一个函数出现两次。
-List<String> parsePinnedFunctions(String? raw) {
-  if (raw == null || raw.trim().isEmpty) return const [];
-  try {
-    final decoded = jsonDecode(raw);
-    if (decoded is! List) return const [];
-    final out = <String>[];
-    for (final e in decoded) {
-      if (e is! String) continue;
-      final name = e.trim();
-      if (name.isEmpty || out.contains(name)) continue;
-      if (aiFunctionByName(name) == null) continue;
-      out.add(name);
-    }
-    return out;
-  } catch (_) {
-    return const [];
-  }
-}
 
 /// 按名字查一条。找不到返回 null。
 AiFunctionSpec? aiFunctionByName(String name) {

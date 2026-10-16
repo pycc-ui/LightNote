@@ -542,8 +542,8 @@ void main() {
         .customSelect('SELECT COUNT(*) AS n FROM ai_functions')
         .getSingle();
     expect(count.read<int>('n'), kAiFunctions.length);
-    expect(kAiFunctions.length, 26,
-        reason: '26 个函数是 v5 设计里定死的数'
+    expect(kAiFunctions.length, 25,
+        reason: '25 个函数是 v6 设计里定死的数'
             '（11 读 + 3 建 + 8 改 + 2 删 + 1 系统 + 1 信号）；'
             '改这张表要同步改文档与测试');
 

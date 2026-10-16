@@ -2376,6 +2376,17 @@ class $AiMessagesTable extends AiMessages
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _interruptReasonMeta = const VerificationMeta(
+    'interruptReason',
+  );
+  @override
+  late final GeneratedColumn<String> interruptReason = GeneratedColumn<String>(
+    'interrupt_reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -2394,6 +2405,7 @@ class $AiMessagesTable extends AiMessages
     role,
     content,
     pendingAction,
+    interruptReason,
     createdAt,
   ];
   @override
@@ -2447,6 +2459,15 @@ class $AiMessagesTable extends AiMessages
         ),
       );
     }
+    if (data.containsKey('interrupt_reason')) {
+      context.handle(
+        _interruptReasonMeta,
+        interruptReason.isAcceptableOrUnknown(
+          data['interrupt_reason']!,
+          _interruptReasonMeta,
+        ),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -2484,6 +2505,10 @@ class $AiMessagesTable extends AiMessages
         DriftSqlType.string,
         data['${effectivePrefix}pending_action'],
       ),
+      interruptReason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}interrupt_reason'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -2507,7 +2532,22 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
 
   /// 用于「操作前预览变更」：AI 提议的写操作以 JSON 形式暂存，
   /// 用户确认后才执行。null 表示纯聊天消息。
+  ///
+  /// v13 起它只承载一种东西：`askUser` 的**持久化挂起**（见 ask_user.dart）。
   final String? pendingAction;
+
+  /// 这条回答**为什么没写完**（v14 新增）。null = 正常写完 / 还在写。
+  ///
+  /// 取值直接用 DeepSeek 客户端的错误码（`network` / `timeout` / `rate_limited` /
+  /// `cancelled` / …）外加两个自制值：
+  ///   · `in_flight`：**正在生成**。写在每一轮开始前、成功时清掉 ——
+  ///     所以下次**冷启动**还看到它，就说明上次是被系统杀掉的（这是唯一
+  ///     能观测到"进程被杀"的办法，`foreground_killed` 那种事观测不到）；
+  ///   · `rounds`：轮数预算用尽被强行结束。
+  ///
+  /// 内容本身**一直都在**（每个 chunk 都落库了）—— 这一列只回答"写完了没有"，
+  /// 界面据此显示「未完成 + 继续」。
+  final String? interruptReason;
 
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
   /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。
@@ -2518,6 +2558,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     required this.role,
     required this.content,
     this.pendingAction,
+    this.interruptReason,
     required this.createdAt,
   });
   @override
@@ -2529,6 +2570,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     map['content'] = Variable<String>(content);
     if (!nullToAbsent || pendingAction != null) {
       map['pending_action'] = Variable<String>(pendingAction);
+    }
+    if (!nullToAbsent || interruptReason != null) {
+      map['interrupt_reason'] = Variable<String>(interruptReason);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
     return map;
@@ -2543,6 +2587,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       pendingAction: pendingAction == null && nullToAbsent
           ? const Value.absent()
           : Value(pendingAction),
+      interruptReason: interruptReason == null && nullToAbsent
+          ? const Value.absent()
+          : Value(interruptReason),
       createdAt: Value(createdAt),
     );
   }
@@ -2558,6 +2605,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       role: serializer.fromJson<String>(json['role']),
       content: serializer.fromJson<String>(json['content']),
       pendingAction: serializer.fromJson<String?>(json['pendingAction']),
+      interruptReason: serializer.fromJson<String?>(json['interruptReason']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
     );
   }
@@ -2570,6 +2618,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       'role': serializer.toJson<String>(role),
       'content': serializer.toJson<String>(content),
       'pendingAction': serializer.toJson<String?>(pendingAction),
+      'interruptReason': serializer.toJson<String?>(interruptReason),
       'createdAt': serializer.toJson<DateTime>(createdAt),
     };
   }
@@ -2580,6 +2629,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     String? role,
     String? content,
     Value<String?> pendingAction = const Value.absent(),
+    Value<String?> interruptReason = const Value.absent(),
     DateTime? createdAt,
   }) => AiMessage(
     id: id ?? this.id,
@@ -2589,6 +2639,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     pendingAction: pendingAction.present
         ? pendingAction.value
         : this.pendingAction,
+    interruptReason: interruptReason.present
+        ? interruptReason.value
+        : this.interruptReason,
     createdAt: createdAt ?? this.createdAt,
   );
   AiMessage copyWithCompanion(AiMessagesCompanion data) {
@@ -2602,6 +2655,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       pendingAction: data.pendingAction.present
           ? data.pendingAction.value
           : this.pendingAction,
+      interruptReason: data.interruptReason.present
+          ? data.interruptReason.value
+          : this.interruptReason,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
     );
   }
@@ -2614,14 +2670,22 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
           ..write('role: $role, ')
           ..write('content: $content, ')
           ..write('pendingAction: $pendingAction, ')
+          ..write('interruptReason: $interruptReason, ')
           ..write('createdAt: $createdAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, conversationId, role, content, pendingAction, createdAt);
+  int get hashCode => Object.hash(
+    id,
+    conversationId,
+    role,
+    content,
+    pendingAction,
+    interruptReason,
+    createdAt,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -2631,6 +2695,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
           other.role == this.role &&
           other.content == this.content &&
           other.pendingAction == this.pendingAction &&
+          other.interruptReason == this.interruptReason &&
           other.createdAt == this.createdAt);
 }
 
@@ -2640,6 +2705,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
   final Value<String> role;
   final Value<String> content;
   final Value<String?> pendingAction;
+  final Value<String?> interruptReason;
   final Value<DateTime> createdAt;
   final Value<int> rowid;
   const AiMessagesCompanion({
@@ -2648,6 +2714,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     this.role = const Value.absent(),
     this.content = const Value.absent(),
     this.pendingAction = const Value.absent(),
+    this.interruptReason = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -2657,6 +2724,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     required String role,
     this.content = const Value.absent(),
     this.pendingAction = const Value.absent(),
+    this.interruptReason = const Value.absent(),
     required DateTime createdAt,
     this.rowid = const Value.absent(),
   }) : id = Value(id),
@@ -2669,6 +2737,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     Expression<String>? role,
     Expression<String>? content,
     Expression<String>? pendingAction,
+    Expression<String>? interruptReason,
     Expression<DateTime>? createdAt,
     Expression<int>? rowid,
   }) {
@@ -2678,6 +2747,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
       if (role != null) 'role': role,
       if (content != null) 'content': content,
       if (pendingAction != null) 'pending_action': pendingAction,
+      if (interruptReason != null) 'interrupt_reason': interruptReason,
       if (createdAt != null) 'created_at': createdAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -2689,6 +2759,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     Value<String>? role,
     Value<String>? content,
     Value<String?>? pendingAction,
+    Value<String?>? interruptReason,
     Value<DateTime>? createdAt,
     Value<int>? rowid,
   }) {
@@ -2698,6 +2769,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
       role: role ?? this.role,
       content: content ?? this.content,
       pendingAction: pendingAction ?? this.pendingAction,
+      interruptReason: interruptReason ?? this.interruptReason,
       createdAt: createdAt ?? this.createdAt,
       rowid: rowid ?? this.rowid,
     );
@@ -2721,6 +2793,9 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     if (pendingAction.present) {
       map['pending_action'] = Variable<String>(pendingAction.value);
     }
+    if (interruptReason.present) {
+      map['interrupt_reason'] = Variable<String>(interruptReason.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -2738,6 +2813,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
           ..write('role: $role, ')
           ..write('content: $content, ')
           ..write('pendingAction: $pendingAction, ')
+          ..write('interruptReason: $interruptReason, ')
           ..write('createdAt: $createdAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -6046,6 +6122,7 @@ typedef $$AiMessagesTableCreateCompanionBuilder =
       required String role,
       Value<String> content,
       Value<String?> pendingAction,
+      Value<String?> interruptReason,
       required DateTime createdAt,
       Value<int> rowid,
     });
@@ -6056,6 +6133,7 @@ typedef $$AiMessagesTableUpdateCompanionBuilder =
       Value<String> role,
       Value<String> content,
       Value<String?> pendingAction,
+      Value<String?> interruptReason,
       Value<DateTime> createdAt,
       Value<int> rowid,
     });
@@ -6109,6 +6187,11 @@ class $$AiMessagesTableFilterComposer
 
   ColumnFilters<String> get pendingAction => $composableBuilder(
     column: $table.pendingAction,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get interruptReason => $composableBuilder(
+    column: $table.interruptReason,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6170,6 +6253,11 @@ class $$AiMessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get interruptReason => $composableBuilder(
+    column: $table.interruptReason,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -6219,6 +6307,11 @@ class $$AiMessagesTableAnnotationComposer
 
   GeneratedColumn<String> get pendingAction => $composableBuilder(
     column: $table.pendingAction,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get interruptReason => $composableBuilder(
+    column: $table.interruptReason,
     builder: (column) => column,
   );
 
@@ -6282,6 +6375,7 @@ class $$AiMessagesTableTableManager
                 Value<String> role = const Value.absent(),
                 Value<String> content = const Value.absent(),
                 Value<String?> pendingAction = const Value.absent(),
+                Value<String?> interruptReason = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => AiMessagesCompanion(
@@ -6290,6 +6384,7 @@ class $$AiMessagesTableTableManager
                 role: role,
                 content: content,
                 pendingAction: pendingAction,
+                interruptReason: interruptReason,
                 createdAt: createdAt,
                 rowid: rowid,
               ),
@@ -6300,6 +6395,7 @@ class $$AiMessagesTableTableManager
                 required String role,
                 Value<String> content = const Value.absent(),
                 Value<String?> pendingAction = const Value.absent(),
+                Value<String?> interruptReason = const Value.absent(),
                 required DateTime createdAt,
                 Value<int> rowid = const Value.absent(),
               }) => AiMessagesCompanion.insert(
@@ -6308,6 +6404,7 @@ class $$AiMessagesTableTableManager
                 role: role,
                 content: content,
                 pendingAction: pendingAction,
+                interruptReason: interruptReason,
                 createdAt: createdAt,
                 rowid: rowid,
               ),
