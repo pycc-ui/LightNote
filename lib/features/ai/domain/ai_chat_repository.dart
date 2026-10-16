@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
@@ -10,6 +11,7 @@ import '../../../core/util/app_params.dart';
 import '../data/deepseek_client.dart';
 import '../data/deepseek_config.dart';
 import 'agent_loop.dart';
+import 'agent_progress.dart';
 import 'ai_model.dart';
 import 'note_retriever.dart';
 import 'ai_repository.dart';
@@ -77,8 +79,13 @@ class AiChatRepository {
   /// conversationId → 那一轮的助手消息 id。
   final _running = <String, String>{};
 
-  /// 「在不在跑」的变化通知：界面靠它重建（数据库那边**不会**为"跑完了"写一行，
-  /// 所以没有这个流的话，转圈会一直挂着）。
+  /// 「在不在跑」+「在做什么」的变化通知：界面靠它重建。
+  ///
+  /// 两件事共用一条流：它们永远是同一次重建里一起读的（`isRunning` 决定要不要
+  /// 显示任务栏，`progressFor` 决定显示什么），分成两条流只会让界面多订阅一次。
+  ///
+  /// 为什么必须有这么一条流：数据库那边**不会**为"跑完了"写一行，
+  /// 所以没有它的话，转圈和任务栏会一直挂在那儿。
   final _runningChanges = StreamController<void>.broadcast();
 
   /// 这条会话现在有没有一轮在跑。
@@ -92,14 +99,75 @@ class AiChatRepository {
 
   void _markRunning(String conversationId, String assistantId) {
     _running[conversationId] = assistantId;
-    if (!_runningChanges.isClosed) _runningChanges.add(null);
+    _progress[conversationId] = const AgentProgress(round: 0, budget: 0);
+    _notify();
   }
 
   void _markIdle(String conversationId) {
-    if (_running.remove(conversationId) != null && !_runningChanges.isClosed) {
-      _runningChanges.add(null);
-    }
+    _progress.remove(conversationId);
+    _cancelTokens.remove(conversationId);
+    if (_running.remove(conversationId) != null) _notify();
   }
+
+  void _notify() {
+    if (!_runningChanges.isClosed) _runningChanges.add(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 「此刻在做什么」（任务栏的数据源）
+  // ---------------------------------------------------------------------------
+
+  /// conversationId → 这一步的进度。**只在内存里**（进程没了它也没意义）。
+  final _progress = <String, AgentProgress>{};
+
+  /// 这条会话此刻的进度（没在跑就是 null）。界面那条任务栏读它。
+  AgentProgress? progressFor(String conversationId) => _progress[conversationId];
+
+  void _updateProgress(
+    String conversationId,
+    AgentProgress Function(AgentProgress) change,
+  ) {
+    _progress[conversationId] = change(
+      _progress[conversationId] ??
+          const AgentProgress(round: 0, budget: 0),
+    );
+    _notify();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 停止
+  // ---------------------------------------------------------------------------
+
+  /// conversationId → 这一轮的取消令牌。
+  final _cancelTokens = <String, CancelToken>{};
+
+  /// **停掉某条会话正在跑的那一轮。**
+  ///
+  /// 立刻生效：把这一轮的 HTTP 请求 cancel 掉 → 客户端给出 `cancelled` →
+  /// 循环把它当一次失败收尾。**已经生成的内容一个字都不删** ——
+  /// 那是真实产出，删掉才是真丢东西（和 DeepSeek 那个停止按钮一个观感：
+  /// 停住、内容留在那儿）。
+  ///
+  /// 和"后台被动终止"（进程被杀，下次冷启动才从 `in_flight` 残留看出来）
+  /// 是**两条不同的路径**，但界面上收敛成同一种呈现 —— 见 [isStopLike]。
+  void stop(String conversationId) {
+    _cancelTokens.remove(conversationId)?.cancel('用户点了停止');
+  }
+
+  /// 客户端给出的取消码。
+  static const cancelledCode = 'cancelled';
+
+  /// 这个中断原因算不算「**被停下来**」而不是「出错了」。
+  ///
+  /// 两类要分开显示，因为它们要用户做的事不一样：
+  ///   · 被停下来（手动停止 / App 被杀 / 轮数用尽 / 原因不明）→
+  ///     一句「已停止 · 继续」就够，不用解释；
+  ///   · 出错（网络断 / 被限流 / 余额不足 / Key 无效）→ **必须把原因说出来**，
+  ///     否则用户会一直盯着"已停止"重试，而问题根本不在那儿。
+  static bool isStopLike(String? code) => switch (code) {
+        'cancelled' || 'in_flight' || 'rounds' || 'interrupted' => true,
+        _ => false,
+      };
   final _uuid = const Uuid();
 
 
@@ -121,6 +189,13 @@ class AiChatRepository {
   // ---------------------------------------------------------------------------
   // 会话
   // ---------------------------------------------------------------------------
+
+  /// 置顶 / 取消置顶某条会话。
+  ///
+  /// **置顶就是钉在最上面**（和我们给笔记定的那套不同，理由写在
+  /// `AiConversations.pinned` 的注释里：会话没有手动顺序，不存在冲突）。
+  Future<void> setConversationPinned(String id, bool pinned) =>
+      _db.setConversationPinned(id, pinned);
 
   Stream<List<AiConversation>> watchConversations() =>
       _db.watchConversations();
@@ -537,18 +612,27 @@ class AiChatRepository {
         required String systemPrompt,
         required List<AgentMessage> messages,
         required List<ToolSpec> tools,
-      }) =>
-          _ai.client.streamAgent(
-        systemPrompt: systemPrompt,
-        messages: messages,
-        tools: tools,
-        model: model,
-        thinking: thinkingEnabled,
-        reasoningEffort: thinkingEffort,
-        // **必须显式设**：不设就走服务端默认（聊天模型 4096），模型想写一篇长笔记
-        // 会被硬切断 —— 而切断的表现是 JSON 不完整 → 解析失败 → 整轮白跑。
-        maxTokens: AgentLimits.maxOutputTokens,
-      ),
+      }) {
+        // 每轮一个新的令牌，登记在册 —— 「停止」按钮靠它把这一轮掐断。
+        //
+        // 每轮都换一个是必须的：上一轮的令牌已经用过了（dio 的 CancelToken
+        // 取消之后不能复用），拿旧的去 cancel 会什么都不发生，
+        // 表现就是"点了停止没反应"。
+        final token = CancelToken();
+        _cancelTokens[conversationId] = token;
+        return _ai.client.streamAgent(
+          systemPrompt: systemPrompt,
+          messages: messages,
+          tools: tools,
+          model: model,
+          thinking: thinkingEnabled,
+          reasoningEffort: thinkingEffort,
+          // **必须显式设**：不设就走服务端默认（聊天模型 4096），模型想写一篇长笔记
+          // 会被硬切断 —— 而切断的表现是 JSON 不完整 → 解析失败 → 整轮白跑。
+          maxTokens: AgentLimits.maxOutputTokens,
+          cancelToken: token,
+        );
+      },
       executor: executor,
     );
 
@@ -564,6 +648,7 @@ class AiChatRepository {
     final buffer = StringBuffer();
     await _consume(
         loop: loop,
+        conversationId: conversationId,
         history: history,
         dbHistory: dbHistory,
         asksSoFar: asksSoFar,
@@ -636,6 +721,13 @@ class AiChatRepository {
         case AgentAwaitingUser():
         case AgentFailed():
           return '';
+        case AgentThinking():
+          // 修复轮的思维链**不落库**：这一轮的正文本身也是先攒起来、
+          // 到最后才一起写进去的（见本方法开头），思维链跟着同样处理，
+          // 免得出现"思维链里说了一段、正文里没有"的错位。
+          break;
+
+        case AgentRoundStarted():
         case AgentToolStarted():
         case AgentToolDone():
           break;
@@ -660,6 +752,7 @@ class AiChatRepository {
   /// 盖 in_flight 戳）与"消费事件"两段各自读得清楚。
   Future<void> _consume({
     required AgentLoop loop,
+    required String conversationId,
     required List<AgentMessage> history,
     required List<AiMessage> dbHistory,
     required int asksSoFar,
@@ -674,6 +767,25 @@ class AiChatRepository {
     required bool thinkingEnabled,
     required StringBuffer buffer,
   }) async {
+    // ---- 思维链的缓冲与落库 ----
+    //
+    // 和正文一样是"累计文本 + 替换式写入"（界面上才会一段段长出来）。
+    // 但**加了节流**：思维链动辄几万字，每个分片都把完整前缀写一遍是 O(n²)
+    // 的字节量（正文那条路本来就是这么写的，一直没出事是因为它短）。
+    final thinking = StringBuffer();
+    var thinkingFlushed = 0;
+    // 已经在思维链里标过第几轮（把不同轮的思维链分段，看起来才是"一段一段想"）
+    var thinkingRound = -1;
+
+    Future<void> flushThinking({bool force = false}) async {
+      if (thinking.isEmpty) return;
+      if (!force && thinking.length - thinkingFlushed < _thinkingFlushChars) {
+        return;
+      }
+      thinkingFlushed = thinking.length;
+      await _db.setMessageReasoning(assistantId, thinking.toString());
+    }
+
     await for (final event in loop.run(
       systemPrompt: await rebuildPrompt(),
       rebuildPrompt: rebuildPrompt,
@@ -686,11 +798,34 @@ class AiChatRepository {
       roundBudget: roundBudget,
     )) {
       switch (event) {
+        case AgentRoundStarted(:final used, :final budget):
+          _updateProgress(
+            conversationId,
+            (p) => p.copyWith(round: used, budget: budget, clearCurrent: true),
+          );
+          // 思维链按轮分段：新一轮开头插一个「第 N 轮」标题（第一轮也插）
+          if (thinkingRound != used) {
+            if (thinking.isNotEmpty) thinking.write('\n\n---\n\n');
+            thinking.write('第 ${used + 1} 轮\n');
+            thinkingRound = used;
+          }
+
+        case AgentThinking(:final delta):
+          thinking.write(delta);
+          await flushThinking();
+
         case AgentText(:final delta):
+          // ⚠️ `buffer` 收的是**原样文本**（一个字节都不能少）：结尾要靠它解析
+          // 产出块并落库，切过的文本解析不出来。
           buffer.write(delta);
           // ⚠️ 写的是**累计文本**（`buffer.toString()`），不是 `delta` ——
           // 因为 `writeText` 是"替换式"写入，字幕才会一段段长出来而不是拼接。
-          await writeText(buffer.toString());
+          //
+          // ⚠️ 而且**必须把产出块切掉再写**：那块 json 里装的是整篇笔记正文，
+          // 只在结尾 strip 的话，模型写笔记的十几秒里用户就看着一大坨原始 JSON
+          //（含笔记全文）在对话里滚出来。见 `stripForStreaming`。
+          await writeText(
+              AiResultApplier.stripForStreaming(buffer.toString()));
 
         case AgentFinished(:final text, :final usage):
           // ---- A 类任务的产出：解析 json 块 → 逐条落库 ----
@@ -811,10 +946,17 @@ class AiChatRepository {
           });
 
         case AgentFailed(:final message, :final usage, :final code):
-          await writeText(
-            (buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message') +
-                _opsBlock(ops),
-          );
+          // 「停止」**不是错误**：不往回答里塞 ⚠️，正文保持原样
+          //（已经生成的一个字都不删）。原因由界面用一个小标记表达
+          //（「已停止 · 继续」），而不是把"已取消"当成一句错误念给用户听。
+          if (code == cancelledCode) {
+            await writeText('${buffer.toString()}${_opsBlock(ops)}');
+          } else {
+            await writeText(
+              (buffer.isEmpty ? '⚠️ $message' : '${buffer.toString()}\n\n⚠️ $message') +
+                  _opsBlock(ops),
+            );
+          }
           // 记下"为什么没写完"：界面据此显示「未完成 + 继续」。
           // 没有错误码的失败（例如轮数用尽）也要留痕 —— 否则用户看到的
           // 是一条正常的回答加上一句⚠️，而按钮不会出现。
@@ -828,12 +970,34 @@ class AiChatRepository {
           if (mutated && description != null && description.trim().isNotEmpty) {
             ops.add(description.trim());
           }
+          // 任务栏那一步收尾：有 UDF 给的一句话就用它（带具体对象，更好读），
+          // 没有就退回"刚才那条标签"（读函数也有，所以读也看得见）
+          _updateProgress(
+            conversationId,
+            (p) => p.withStep(
+              (description != null && description.trim().isNotEmpty)
+                  ? description.trim()
+                  : (p.current ?? '完成一步'),
+            ),
+          );
 
-        case AgentToolStarted():
-          break; // 工具活动不写进正文（进度由 UI 的 LogBar 承担）
+        case AgentToolStarted(:final name, :final arguments):
+          // 只更新任务栏，**不写正文** —— 工具活动是"过程"，不是回答。
+          _updateProgress(
+            conversationId,
+            (p) => p.copyWith(
+              current: ToolLabels.describe(name, arguments),
+            ),
+          );
       }
     }
+
+    // 收尾：把最后那点还没到节流阈值的思维链落下来
+    await flushThinking(force: true);
   }
+
+  /// 思维链每攒够这么多字符才落一次库（见 `_consume` 里的说明）。
+  static const _thinkingFlushChars = 200;
 
   /// 助手消息里"正在等用户回答"的占位内容。
   ///

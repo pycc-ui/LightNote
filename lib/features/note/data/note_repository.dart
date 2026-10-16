@@ -224,4 +224,23 @@ class NoteRepository {
   }
 
   Future<void> setPinned(String id, bool pinned) => _db.setPinned(id, pinned);
+
+  /// **按给定顺序重排**（拖动排序、以及"置顶 = 挪到最前"都用它）。
+  ///
+  /// [idsInOrder] 必须是**当前可见列表的完整顺序**：重编号是从 1 开始的密集
+  /// 编号（0 留给"没排过"，见 `AppDatabase.reorderNotes`），所以漏传的笔记
+  /// 会掉回"没排过"那一组、跑到最前面去。
+  Future<void> reorder(List<String> idsInOrder) =>
+      _db.reorderNotes(idsInOrder);
+
+  /// 把一批笔记里的某一篇**挪到最前**，其余保持原相对顺序。
+  ///
+  /// 置顶就是这么实现的：它只是"这次把它放到第一位"，不是"以后一直压着别人"。
+  Future<void> moveToFront(List<String> currentOrder, String id) {
+    final rest = [
+      for (final x in currentOrder)
+        if (x != id) x,
+    ];
+    return reorder([id, ...rest]);
+  }
 }

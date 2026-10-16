@@ -60,6 +60,20 @@ class Notes extends Table {
 
   BoolColumn get pinned => boolean().withDefault(const Constant(false))();
 
+  /// **手动拖出来的顺序**（v17 新增）。
+  ///
+  /// `0 = 没排过` —— 这是个刻意的约定，不是"排在第一个"：
+  ///   · 没排过的笔记全是 0，它们之间靠 `updated_at` 决定先后（改造前的行为）；
+  ///   · 用户在界面上拖动之后，参与排序的那批从 **1** 开始重编号
+  ///     （见 `AppDatabase.reorderNotes`）；
+  ///   · 于是**新建的笔记（0）永远落在已排过的那批前面**，
+  ///     不会插进用户手动排好的顺序中间。
+  ///
+  /// 排序只有两层：`sort_order → updated_at DESC`（见 `AppDatabase._noteListOrder`）。
+  /// **`pinned` 不参与排序** —— "置顶"在这个 App 里的意思是「把它挪到最前」
+  /// （一次性动作 + 一个标记），不是"永远压过别人"。理由写在那边的注释里。
+  IntColumn get sortOrder => integer().withDefault(const Constant(0))();
+
   IntColumn get wordCount => integer().withDefault(const Constant(0))();
 
   DateTimeColumn get lastAiAt => dateTime().nullable()();
@@ -119,6 +133,17 @@ class AiConversations extends Table {
   TextColumn get thinkingEffort => text().withDefault(const Constant('medium'))();
 
   TextColumn get title => text().withDefault(const Constant(''))();
+
+  /// **钉在最上面**（v18 新增）。
+  ///
+  /// ⚠️ 会话的置顶和笔记的置顶**不是同一个东西**，别照着那边改：
+  ///
+  /// · 笔记有"手动拖出来的顺序"，所以那边的置顶只能是"**挪到最前一次** + 标记"
+  ///   （否则会出现"拖上去又被顶回来"的吸附，见 `AppDatabase._noteListOrder`）；
+  /// · 会话列表本质是**按时间排**的（`updated_at` 一直在变），根本没有手动顺序
+  ///   这回事，所以不存在冲突 —— 这里就按字面意思来：**钉住，一直在最上面**
+  ///   （微信那种）。多条置顶时它们之间仍按最近聊过排。
+  BoolColumn get pinned => boolean().withDefault(const Constant(false))();
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
 
@@ -154,6 +179,27 @@ class AiMessages extends Table {
   /// 内容本身**一直都在**（每个 chunk 都落库了）—— 这一列只回答"写完了没有"，
   /// 界面据此显示「未完成 + 继续」。
   TextColumn get interruptReason => text().nullable()();
+
+  /// AI 的**思维链**（DeepSeek 的 `reasoning_content`，v16 新增）。
+  ///
+  /// ## 它和正文是两回事，别混
+  ///
+  /// · **不是正文**：不参与 `historyWindowOf`，下一轮请求也**不重发**它
+  ///  （DeepSeek 不需要把思维链发回去）。所以它只花一次输出钱；
+  /// · **不给模型看**：它纯粹是"用户想看看它在想什么"；
+  /// · 所以它单独一列，而不是拼进 `content` —— 拼进去就会被当成历史重发，
+  ///   每一轮都白烧一遍 token（思维链往往比正文还长）。
+  ///
+  /// ## 形状
+  ///
+  /// 一轮对话里可能有好几段（每次工具往返各一段）。按出现顺序拼在一起，
+  /// 段之间用 `\n\n---\n` 分隔，每段前面带一个「第 N 轮」标记
+  ///（见 `AiChatRepository._thinkingBlock`）。存的是**原始文本**，
+  /// 界面自己决定怎么折叠显示。
+  ///
+  /// 可能很长（几万字）—— 用户明确选了"存下来、事后也能回看"，
+  /// 换来的是翻回去还看得到它在想什么。
+  TextColumn get reasoning => text().nullable()();
 
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
   /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。

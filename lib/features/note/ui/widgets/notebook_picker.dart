@@ -275,6 +275,7 @@ class NoteListTile extends StatelessWidget {
     this.showNotebookHint = false,
     this.selectable = false,
     this.selected = false,
+    this.trailing,
     super.key,
   });
 
@@ -288,6 +289,10 @@ class NoteListTile extends StatelessWidget {
 
   /// 当前是否被选中（[selectable] 为 false 时无意义）
   final bool selected;
+
+  /// 行尾那块（可选）。目前只有"调整顺序"模式用它放**拖动手柄** ——
+  /// 手柄要显式可见，光靠"长按可以拖"没人猜得到。
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -384,6 +389,7 @@ class NoteListTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (trailing != null) trailing!,
           ],
         ),
       ),

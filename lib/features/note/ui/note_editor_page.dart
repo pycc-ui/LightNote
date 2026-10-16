@@ -77,6 +77,16 @@ class NoteEditorPage extends StatefulWidget {
 }
 
 class _NoteEditorPageState extends State<NoteEditorPage> {
+  /// 离底部远了 → 露「快速到底」（两种模式共用一套判据，见下面的 body）。
+  bool _showJumpToBottom = false;
+
+  /// 离底部超过这个距离才露按钮：小一点的话手指刚滚一下就闪出来。
+  static const _jumpThreshold = 240.0;
+
+  /// 阅读态的滚动控制器（只有阅读态需要：编辑态的滚动是输入框自己管的，
+  /// 那种情况下靠 `ScrollNotification` 拿位置就够了）。
+  final _readScroll = ScrollController();
+
   final _titleController = TextEditingController();
   final _contentController = TextEditingController();
   final _contentFocus = FocusNode();
@@ -138,6 +148,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     _titleController.dispose();
     _contentController.dispose();
     _contentFocus.dispose();
+    _readScroll.dispose();
     super.dispose();
   }
 
@@ -511,19 +522,52 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
                   ),
                 ],
         ),
-        // 阅读态右下角是「目录」入口（形状与笔记库页的「AI 助手」按钮一致）；
-        // 编辑态不给：那里右手边是输入框与格式工具栏，浮一个按钮上去会压住正文
-        floatingActionButton: _reading ? _tocButton() : null,
+        // 右下角浮着的两个动作（**两种模式都有**）：
+        //   · 目录：点开跳某一节
+        //   · 快速到底：只在离底部远了才露出来
+        //
+        // 编辑态以前不给，理由是"右手边是输入框与格式工具栏，浮上去会压住正文"。
+        // 现在给了 —— 长笔记在**编辑**的时候同样需要跳转到某一节（那正是最需要
+        // 导航的时候）。压住正文的问题这样解决：格式工具栏挪进
+        // `bottomNavigationBar`，Scaffold 自己会把 FAB 排在它上面（见下面）。
+        floatingActionButton: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            _tocButton(),
+            if (_showJumpToBottom) ...[
+              const SizedBox(height: AppSpacing.sm),
+              _jumpToBottomButton(),
+            ],
+          ],
+        ),
+        // 格式工具栏放在这里而不是 `body` 的 Column 末尾：
+        // `bottomNavigationBar` 占的位置 Scaffold 会**从 body 里扣掉**，
+        // 于是右下角那个 FAB 自动排在它上方，不用去猜工具栏有多高。
+        bottomNavigationBar: _reading ? null : _formatToolbar(theme),
         body: Column(
           children: [
             // 篇幅提示横幅：只在软上限以上才出现，所以正常写笔记看不见它。
             _sizeBanner(theme),
             Expanded(
-              child: _reading
-                  ? _withScrollTarget(_buildReading(theme))
-                  : _buildEditor(theme),
+              // 两种模式的滚动各管各的（阅读态是 SingleChildScrollView，
+              // 编辑态是输入框内部那个 scrollable），但**都会把
+              // ScrollNotification 冒上来** —— 所以"离底部多远"这一件事
+              // 只需要在这里判一次。
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (n) {
+                  final m = n.metrics;
+                  final show = m.maxScrollExtent - m.pixels > _jumpThreshold;
+                  if (show != _showJumpToBottom) {
+                    setState(() => _showJumpToBottom = show);
+                  }
+                  return false;
+                },
+                child: _reading
+                    ? _withScrollTarget(_buildReading(theme))
+                    : _buildEditor(theme),
+              ),
             ),
-            if (!_reading) _formatToolbar(theme),
           ],
         ),
       ),
@@ -668,6 +712,7 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     final pieces = _piecesOf(content);
 
     return SingleChildScrollView(
+      controller: _readScroll,
       // 底部留白要比别处多一格：右下角浮着「目录」FAB（40 高 + 16 边距），
       // 留 48 的话最后一行正文会被它压住。
       padding: const EdgeInsets.fromLTRB(
@@ -721,8 +766,11 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
   /// 又都不属于主流程（主流程是读、是新建），所以都不该占顶栏或底部一整行。
   /// 用户在这两处看到的是同一种东西，不用重新认。
   ///
-  /// 只在**阅读态**出现：编辑态右手边要留给输入与工具栏，一个浮起来的按钮
-  /// 会压在正文输入框上。
+  /// **两种模式都出现**（编辑态也给：长笔记在编辑的时候同样要能跳到某一节）。
+  ///
+  /// 以前只在阅读态给，理由是"编辑态右手边要留给输入与工具栏，浮起来会压住正文"。
+  /// 那个顾虑现在由布局解决：格式工具栏挪进了 `bottomNavigationBar`，
+  /// Scaffold 会把 FAB 排在它上方，压不到正文也压不到工具栏。
   ///
   /// 没有小标题时**照样显示** —— 点开是一句"怎么才有目录"的说明；
   /// 藏起来的话用户永远不会知道有这个功能（这与"点开是空列表"是两回事）。
@@ -735,6 +783,63 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
       onPressed: _showToc,
       child: const Icon(Icons.toc),
     );
+  }
+
+  /// 「快速到底」：右下角，只在离底部远了才出现（判据见 `body` 里那段）。
+  ///
+  /// 它和「目录」**形状一样**（小号 FAB）：两个都是"跳到别处去"的动作入口，
+  /// 用户不用重新认。
+  Widget _jumpToBottomButton() {
+    return FloatingActionButton.small(
+      // 同一条路由上每个 FAB 都要有自己的 heroTag，否则 Hero 动画直接抛异常
+      //（「目录」那个用 'toc'，与库里另外两个也不同）
+      heroTag: 'jumpBottom',
+      tooltip: '到底部',
+      onPressed: _jumpToBottom,
+      child: const Icon(Icons.arrow_downward),
+    );
+  }
+
+  /// 跳到末尾。
+  ///
+  /// 两种模式的做法不同，因为滚的东西不是同一个：
+  ///   · **阅读态**：直接滚到底（`_readScroll`）
+  ///   · **编辑态**：输入框内部的滚动够不着，改用"**把光标放到末尾**" ——
+  ///     输入框会自己滚到光标那儿。副作用是光标也跟过去了，但编辑态本来就是
+  ///     要接着写的，那正是想要的结果。
+  void _jumpToBottom() {
+    if (_reading) {
+      if (!_readScroll.hasClients) return;
+      _readScroll.animateTo(
+        _readScroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOut,
+      );
+      return;
+    }
+    final end = _contentController.text.length;
+    _contentController.selection =
+        TextSelection.collapsed(offset: end);
+    _contentFocus.requestFocus();
+  }
+
+  /// 跳到某一节（目录里点的）。
+  ///
+  /// 和 [_jumpToBottom] 同一套分派逻辑：阅读态走"滚到那一片"，编辑态走"挪光标"。
+  ///
+  /// ⚠️ 编辑态按**片自己的字符偏移**（`NoteChunk.start`）定位，不是重新解析一遍
+  /// Markdown —— 和目录是按片列出来的是同一个来源（见 [_sections]），
+  /// 所以"目录里那一行"与"跳过去的位置"必然对得上。
+  void _jumpToSection(int chunkIndex) {
+    if (_reading) {
+      setState(() => _pendingScrollChunk = chunkIndex);
+      return;
+    }
+    final pieces = _piecesOf(_contentController.text);
+    if (chunkIndex < 0 || chunkIndex >= pieces.length) return;
+    _contentController.selection =
+        TextSelection.collapsed(offset: pieces[chunkIndex].start);
+    _contentFocus.requestFocus();
   }
 
   /// 目录项：**每个小节的第一片**。
@@ -841,7 +946,8 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     );
 
     if (picked == null || !mounted) return;
-    setState(() => _pendingScrollChunk = picked);
+    // 两种模式都能跳（以前只有阅读态能用 —— 编辑长笔记时最需要它）
+    _jumpToSection(picked);
   }
 
   /// 取（并缓存）正文的分片。

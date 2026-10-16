@@ -40,6 +40,13 @@ class NotebookRepository {
     return (await _db.getNotebook(id))!;
   }
 
+  /// **按给定顺序重排笔记库**（拖动排序用）。
+  ///
+  /// [idsInOrder] 要是**当前可见列表的完整顺序** —— 重编号从 1 开始密集编号，
+  /// 漏传的库会掉回"没排过"那一组（`sort_order = 0`）跑到最前面。
+  Future<void> reorder(List<String> idsInOrder) =>
+      _db.reorderNotebooks(idsInOrder);
+
   Future<void> rename(String id, String name) async {
     if (name.trim().isEmpty) return;
     await _db.renameNotebook(id, _cleanName(name));

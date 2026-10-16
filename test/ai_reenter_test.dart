@@ -134,12 +134,26 @@ void main() {
     }
   }
 
-  /// 发送按钮（用 tooltip 找：**忙碌时图标会换成转圈**，
-  /// 按 `Icons.arrow_upward` 找会在"正忙"时找不到 —— 那正是要断言的场景）。
-  IconButton sendButton(WidgetTester tester) => tester.widget<IconButton>(
-        find.ancestor(
-          of: find.byTooltip('发送'),
-          matching: find.byType(IconButton),
+  /// 交替推两个时钟若干次（见 [driveUntilIdle] 里那段说明）。
+  ///
+  /// 用于"点完之后等界面/数据库跟上"这种场景：只 `pump` 推不动 drift 的真实
+  /// 异步写，只 `runAsync` 又推不动 widget。
+  Future<void> pumpReal(WidgetTester tester, {int times = 20}) async {
+    for (var i = 0; i < times; i++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 2)));
+      await tester.pump(const Duration(milliseconds: 2));
+    }
+  }
+
+  /// 输入框右边那颗按钮 —— **发送和停止是同一颗**（生成中变成「停止」）。
+  ///
+  /// 按 tooltip 找而不是按图标：图标在两种状态下不一样
+  ///（`arrow_upward` ↔ `stop_rounded`），按图标找会在"正忙"时找不到，
+  /// 而那正是要断言的场景。
+  IconButton actionButton(WidgetTester tester) => tester.widget<IconButton>(
+        find.byWidgetPredicate(
+          (w) => w is IconButton && (w.tooltip == '发送' || w.tooltip == '停止'),
         ),
       );
 
@@ -201,9 +215,11 @@ void main() {
     // 而且这一轮确实在跑（不是"恰好跑完了所以没提示"）
     expect(chat.isRunning(convId), isTrue);
 
-    // 界面该知道"还在生成"：发送按钮禁用（后台在跑时不该再发一条）
-    expect(sendButton(tester).onPressed, isNull,
-        reason: '后台还有一轮在跑，发送应当禁用');
+    // 界面该知道"还在生成"：那颗按钮**变成「停止」且可点**
+    //（跟 DeepSeek 一样：等的同时给用户一个停下来的手段）
+    expect(actionButton(tester).tooltip, '停止');
+    expect(actionButton(tester).onPressed, isNotNull,
+        reason: '停止按钮必须可点，否则用户没有中断的手段');
 
     await client.finish();
     await driveUntilIdle(tester, convId);
@@ -236,6 +252,48 @@ void main() {
     await teardownTree(tester);
   });
 
+  testWidgets('★★ 点「继续」之后横幅也要消失（和「知道了」一个效果）', (tester) async {
+    // 造一条"上次没写完"的回答
+    final conv = await chat.createConversation();
+    await db.insertAiMessage(AiMessagesCompanion.insert(
+      id: 'assistant-1',
+      conversationId: conv.id,
+      role: 'assistant',
+      content: const Value('写到一半的内容'),
+      createdAt: DateTime.now().toUtc(),
+    ));
+    await db.setMessageInterrupt('assistant-1', AiChatRepository.inFlightReason);
+    await db.touchConversation(conv.id, title: '上次那条');
+
+    chat.currentConversationId = conv.id;
+    await tester.pumpWidget(host());
+    await settle(tester);
+    expect(find.textContaining('上次生成中断'), findsOneWidget);
+
+    // 点「继续」
+    await tester.tap(find.text('继续'));
+    await pumpReal(tester);
+
+    expect(find.textContaining('上次生成中断'), findsNothing,
+        reason: '点了「继续」就不该再把横幅挂着——用户已经看到并决定了，'
+            '不该逼他再点一次「知道了」');
+
+    final row = (await db.watchMessages(conv.id).first)
+        .firstWhere((r) => r.id == 'assistant-1');
+    expect(row.interruptReason, isNull, reason: '标记要真的清掉，不只是界面不画');
+    expect(row.content, '写到一半的内容',
+        reason: '内容**不能动**：那是真实产出，删掉才是真丢东西');
+
+    // 而且"继续"这件事真的做了：发出去一条接着做的指令
+    final rows = await db.watchMessages(conv.id).first;
+    expect(rows.any((r) => r.role == 'user' && r.content.contains('（继续）')), isTrue,
+        reason: '「继续」和「知道了」的区别就在这儿：它还顺手把活接下去');
+
+    await client.finish();
+    await driveUntilIdle(tester, conv.id);
+    await teardownTree(tester);
+  });
+
   testWidgets('跑完之后不再显示"正在生成"（不会因为漏摘登记而永远转圈）',
       (tester) async {
     final (convId, _) = await sendAndHang(tester);
@@ -247,8 +305,9 @@ void main() {
     await settle(tester);
 
     expect(chat.isRunning(convId), isFalse);
-    // 跑完了 → 发送按钮恢复可用
-    expect(sendButton(tester).onPressed, isNotNull,
+    // 跑完了 → 那颗按钮变回「发送」
+    expect(actionButton(tester).tooltip, '发送');
+    expect(actionButton(tester).onPressed, isNotNull,
         reason: '跑完之后应当能再发消息');
     await teardownTree(tester);
   });

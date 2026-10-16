@@ -8,6 +8,7 @@ import '../../../core/theme/dimens.dart';
 import '../../../core/widgets/log_bar.dart';
 import '../../../core/widgets/markdown_view.dart';
 import '../data/rag_index_schedule.dart';
+import '../domain/agent_progress.dart';
 import '../domain/ai_chat_repository.dart';
 import '../domain/ai_model.dart';
 import '../domain/ask_resolver.dart';
@@ -47,6 +48,9 @@ class _AiPageState extends State<AiPage> {
   /// ⚠️ 它**不能**用来回答"AI 是不是还在生成" —— 见下面 [_busy]。
   bool _sending = false;
 
+  /// 列表离底部远了 → 显示「回到最新」按钮。
+  bool _showJumpToBottom = false;
+
   /// 跟着仓库的"在不在跑"重建。
   ///
   /// 界面必须订阅它：一轮跑完时数据库那边**不会**写任何一行（`in_flight`
@@ -63,11 +67,42 @@ class _AiPageState extends State<AiPage> {
         .listen((_) {
       if (mounted) setState(() {});
     });
+    _scrollController.addListener(_onScroll);
     _bootstrap();
+  }
+
+  /// 离底部超过这个距离就露「回到最新」（小一点会在手指刚滚时就闪出来）。
+  static const _jumpThreshold = 240.0;
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final show = pos.maxScrollExtent - pos.pixels > _jumpThreshold;
+    if (show != _showJumpToBottom) setState(() => _showJumpToBottom = show);
+  }
+
+  void _jumpToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+    );
+  }
+
+  /// 「停止」：把这一轮掐断。
+  ///
+  /// **已生成的内容一个字都不删** —— 那是真实产出（和 DeepSeek 那个停止按钮
+  /// 一个观感：停住、内容留在那儿，可以接着让它继续）。
+  void _stop() {
+    final convId = _conversationId;
+    if (convId == null) return;
+    context.read<AiChatRepository>().stop(convId);
   }
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _runningSub?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
@@ -242,6 +277,9 @@ class _AiPageState extends State<AiPage> {
   Widget build(BuildContext context) {
     final repo = context.read<AiChatRepository>();
     final theme = Theme.of(context);
+    // 任务栏的数据源：**只在真的有 run 在跑时**才非空（跑完就清掉了）
+    final progress =
+        _conversationId == null ? null : repo.progressFor(_conversationId!);
 
     return Scaffold(
       appBar: AppBar(
@@ -262,24 +300,51 @@ class _AiPageState extends State<AiPage> {
       body: Column(
         children: [
           Expanded(
-            child: _conversationId == null
-                ? const _LogoView()
-                : StreamBuilder<List<AiMessage>>(
-                    stream: repo.watchMessages(_conversationId!),
-                    builder: (context, snapshot) {
-                      final messages = snapshot.data ?? const <AiMessage>[];
-                      if (messages.isEmpty) return const _LogoView();
-                      return _MessageList(
-                        messages: messages,
-                        controller: _scrollController,
-                        // 「正在生成」时最后那条不该显示成"未完成"——
-                        // 它只是还没写完（气泡里已经有转圈了）。
-                        busy: _busy,
-                        onContinue: _continueInterrupted,
-                        onDismiss: _dismissInterrupted,
-                      );
-                    },
+            // 「回到最新」按钮**放在这一层**，不是 Scaffold 的 FAB 槽。
+            //
+            // ⚠️ 这不是风格选择，是踩过的坑：FAB 槽是相对 **Scaffold body 的底部**
+            // 定位的，而输入框就在 body 的最下面 —— 键盘一弹出来 body 被压缩，
+            // 那个按钮正好落到发送按钮上（两个叠在一起，谁也点不准）。
+            //
+            // 放进列表这一层就永远待在"输入框上方、列表右下角"，
+            // 键盘开不开都不会越界。
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: _conversationId == null
+                      ? const _LogoView()
+                      : StreamBuilder<List<AiMessage>>(
+                          stream: repo.watchMessages(_conversationId!),
+                          builder: (context, snapshot) {
+                            final messages =
+                                snapshot.data ?? const <AiMessage>[];
+                            if (messages.isEmpty) return const _LogoView();
+                            return _MessageList(
+                              messages: messages,
+                              controller: _scrollController,
+                              // 「正在生成」时最后那条不该显示成"未完成"——
+                              // 它只是还没写完（气泡里已经有转圈了）。
+                              busy: _busy,
+                              onContinue: _continueInterrupted,
+                              onDismiss: _dismissInterrupted,
+                            );
+                          },
+                        ),
+                ),
+                if (_showJumpToBottom)
+                  Positioned(
+                    right: AppSpacing.md,
+                    bottom: AppSpacing.md,
+                    child: FloatingActionButton.small(
+                      // 同一条路由上每个 FAB 都要有自己的 heroTag
+                      heroTag: 'aiJumpBottom',
+                      tooltip: '回到最新',
+                      onPressed: _jumpToBottom,
+                      child: const Icon(Icons.arrow_downward),
+                    ),
                   ),
+              ],
+            ),
           ),
           // 「AI 在等你回答」——重启 App 之后也要看得到，
           // 否则用户不知道要回答什么，对话就永远停在那儿
@@ -288,6 +353,11 @@ class _AiPageState extends State<AiPage> {
               question: _pendingAsk!.request.question,
               onTap: () => _answerPendingIfAny(_conversationId!),
             ),
+          // ---- 任务栏：AI 现在在干什么 ----
+          //
+          // 放在输入框**上面**：用户的眼睛在输入框和最后一条回答之间，
+          // 这里既不会盖住正文，也不用抬眼看。
+          if (progress != null) _TaskBar(progress: progress),
           _Composer(
             controller: _inputController,
             modelLabel: AiModel.label(_model),
@@ -296,6 +366,7 @@ class _AiPageState extends State<AiPage> {
             onPickModel: _pickModel,
             onPickEffort: _pickEffort,
             onSend: _send,
+            onStop: _stop,
           ),
           SizedBox(height: MediaQuery.of(context).padding.bottom > 0 ? 0 : 0),
         ],
@@ -438,21 +509,60 @@ class _AiPageState extends State<AiPage> {
                                   onChanged: (_) => toggle(c.id),
                                 )
                               : const Icon(Icons.chat_bubble_outline),
-                          title: Text(
-                            c.title.trim().isEmpty ? '新会话' : c.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          title: Row(
+                            children: [
+                              // 标记和笔记列表里那个图钉是同一个观感：
+                              // 一眼看出"这条是钉住的"
+                              if (c.pinned)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 6),
+                                  child: Icon(
+                                    Icons.push_pin,
+                                    size: 14,
+                                    color: Theme.of(ctx).colorScheme.primary,
+                                  ),
+                                ),
+                              Expanded(
+                                child: Text(
+                                  c.title.trim().isEmpty ? '新会话' : c.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
                           ),
                           subtitle: Text(c.thinkingEffort),
-                          // 多选态**不给**单条删除按钮：那时"删"是底部那个批量动作，
+                          // 多选态**不给**这两个按钮：那时"删"是底部那个批量动作，
                           // 同时摆两个删除入口最容易误点
                           trailing: selecting
                               ? null
-                              : IconButton(
-                                  tooltip: '删除这条会话',
-                                  icon: const Icon(Icons.delete_outline, size: 20),
-                                  onPressed: () =>
-                                      _deleteConversations(ctx, repo, [c.id]),
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // 置顶：文案跟着状态变 —— 只写「置顶」的话，
+                                    // 已置顶的那条点下去用户不知道是顶一次还是取消
+                                    IconButton(
+                                      tooltip: c.pinned ? '取消置顶' : '置顶',
+                                      icon: Icon(
+                                        c.pinned
+                                            ? Icons.push_pin
+                                            : Icons.push_pin_outlined,
+                                        size: 20,
+                                        color: c.pinned
+                                            ? Theme.of(ctx).colorScheme.primary
+                                            : null,
+                                      ),
+                                      onPressed: () => repo.setConversationPinned(
+                                          c.id, !c.pinned),
+                                    ),
+                                    IconButton(
+                                      tooltip: '删除这条会话',
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 20),
+                                      onPressed: () => _deleteConversations(
+                                          ctx, repo, [c.id]),
+                                    ),
+                                  ],
                                 ),
                           onTap: selecting
                               ? () => toggle(c.id)
@@ -680,7 +790,18 @@ class _AiPageState extends State<AiPage> {
   /// ⚠️ 强调「不要重复做」：工具往来**不落库**，模型只看得见自己写过的那段文字，
   /// 以及消息末尾那段「本轮执行记录」—— 后者正是为了这件事才写进去的
   ///（见 AiChatRepository 的 _opsBlock）。
-  Future<void> _continueInterrupted(String reasonLabel) async {
+  /// ⚠️ **先清掉那条消息的中断标记，再接着做**。
+  ///
+  /// 用户点了「继续」就说明他已经看到、并且决定了要接着做 —— 没有理由再把横幅
+  /// 挂在那儿要他点第二次「知道了」。所以**「继续」和「知道了」在"消掉这条提示"
+  /// 上是同一个效果**，区别只是前者顺手把活干下去。
+  ///
+  /// 清戳**不丢任何信息**：那段"本轮执行记录"是写在**消息正文末尾**的
+  ///（见 `AiChatRepository._opsBlock`），"不要重复做"靠的是它，不是这个标记。
+  Future<void> _continueInterrupted(String messageId, String reasonLabel) async {
+    await _dismissInterrupted(messageId);
+    if (!mounted) return;
+
     _inputController.text = '（继续）上次的回答被中断了（$reasonLabel），请接着上面的内容继续。'
         '**已经执行过的操作不要重复做**（上一条消息末尾有执行记录）。';
     await _send();
@@ -804,7 +925,8 @@ class _MessageList extends StatelessWidget {
   final bool busy;
 
   /// 「继续」：接着上次被打断的那一轮往下做。
-  final void Function(String reasonLabel) onContinue;
+  /// 和 [onDismiss] 一样要带 messageId：点「继续」也要把**那一条**的提示消掉。
+  final Future<void> Function(String messageId, String reasonLabel) onContinue;
 
   /// 「知道了」：把这条的中断标记清掉（不再提示）。
   final Future<void> Function(String messageId) onDismiss;
@@ -813,7 +935,14 @@ class _MessageList extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView.builder(
       controller: controller,
-      padding: const EdgeInsets.all(AppSpacing.md),
+      // 底部多留一格：右下角浮着「回到最新」那个小按钮（40 高 + 16 边距），
+      // 不然它会把最后一条回答的末尾压住 —— 而那正是用户最想看的地方。
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.md,
+        AppSpacing.md,
+        AppSpacing.md + 48,
+      ),
       itemCount: messages.length,
       itemBuilder: (context, i) {
         final m = messages[i];
@@ -872,19 +1001,34 @@ class _MessageList extends StatelessWidget {
           ),
         );
 
-        if (!interrupted) return bubble;
-        return Column(
+        // ---- 思考过程：挂在气泡**上方**，默认折叠 ----
+        //
+        // 放上方而不是下方：它是"这条回答是怎么想出来的"，
+        // 读的顺序本来就是先想后答。
+        final thinking = (!isUser && (m.reasoning?.trim().isNotEmpty ?? false))
+            ? _ThinkingBlock(text: m.reasoning!)
+            : null;
+
+        Widget withThinking(Widget child) => thinking == null
+            ? child
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [thinking, child],
+              );
+
+        if (!interrupted) return withThinking(bubble);
+        return withThinking(Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             bubble,
             _InterruptedBar(
               reason: m.interruptReason,
-              onContinue: onContinue,
+              onContinue: (label) => onContinue(m.id, label),
               onDismiss: () => onDismiss(m.id),
             ),
             const SizedBox(height: AppSpacing.sm),
           ],
-        );
+        ));
       },
     );
   }
@@ -893,9 +1037,14 @@ class _MessageList extends StatelessWidget {
 /// 「这条回答没写完」的提示条。
 ///
 /// 内容**并没有丢**（每个 chunk 都落库了）—— 所以这里不是"重试"，而是"接着做"。
-/// 两种情况下会出现：
-///   · 网络 / 超时 / 限流导致这一轮失败（`interrupt_reason` 是错误码）；
-///   · App 被系统杀掉或崩了：下次冷启动时残留的 `in_flight` 就是这个意思。
+/// 三种情况下会出现，**界面上只分两类**（见 `AiChatRepository.isStopLike`）：
+///   · 用户自己点了「停止」→ 已停止；
+///   · App 被系统杀掉或崩了（下次冷启动时残留的 `in_flight`）→ 已停止；
+///   · 网络 / 超时 / 限流 / 余额不足导致这一轮失败 → **把原因说出来**。
+///
+/// 前两种为什么不解释原因：用户自己停的他知道为什么、进程被杀他说了不算，
+/// 说一句「App 被系统中断」只会让人以为出了故障。第三种不一样 ——
+/// 他得知道是网络还是余额，否则会一直点「继续」。
 class _InterruptedBar extends StatelessWidget {
   const _InterruptedBar({
     required this.reason,
@@ -911,6 +1060,7 @@ class _InterruptedBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final label = AiChatRepository.interruptLabel(reason);
+    final stopLike = AiChatRepository.isStopLike(reason);
     return Padding(
       padding: const EdgeInsets.only(left: AppSpacing.xs, top: AppSpacing.xs),
       child: Row(
@@ -921,7 +1071,11 @@ class _InterruptedBar extends StatelessWidget {
           const SizedBox(width: AppSpacing.xs),
           Flexible(
             child: Text(
-              '上次生成中断（$label）',
+              // 两类分开说（见 `AiChatRepository.isStopLike`）：
+              //   · 被停下来（手动停止 / App 被杀 / 轮数用尽）→ 不用解释，一句够
+              //   · 出错（网络断 / 被限流 / 余额不足…）→ **原因必须说出来**，
+              //     否则用户会一直点「继续」重试，而问题根本不在那儿
+              stopLike ? '已停止' : '⚠️ $label',
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -993,6 +1147,204 @@ class _PendingAskBanner extends StatelessWidget {
     );
   }
 }
+/// **任务栏**：「AI 现在在干什么」。
+///
+/// 数据来自 `AiChatRepository.progressFor` —— 那是**内存里**的进度，所以这条
+/// 只在真的有一轮在跑时出现，跑完自己就没了（不需要谁去关它）。
+///
+/// 两态：
+///   · 折叠（**默认**）：`◌ 正在读正文（3 篇）      第 2/15 轮 ▾`
+///   · 展开：上面再加一段已经做完的步骤
+///
+/// 为什么默认折叠：一次长任务的步骤能有十几条，全摊开会把输入框顶上去；
+/// 而用户 90% 的时候只想知道两件事 —— "它还在动吗"、"在干嘛"。
+///
+/// 为什么显示步骤是**人话**而不是函数名：AI 干活全是写 SQL 调那些函数
+/// （`read_note_batch` 之类），把函数名摆给用户看等于什么都没说。
+/// 翻译在 `ToolLabels` 里。
+class _TaskBar extends StatefulWidget {
+  const _TaskBar({required this.progress});
+
+  final AgentProgress progress;
+
+  @override
+  State<_TaskBar> createState() => _TaskBarState();
+}
+
+class _TaskBarState extends State<_TaskBar> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final p = widget.progress;
+    final doing = p.current ?? '正在思考…';
+    final hasSteps = p.steps.isNotEmpty;
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: InkWell(
+        onTap: hasSteps ? () => setState(() => _expanded = !_expanded) : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.xs,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.6),
+                  ),
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      doing,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  Text(
+                    '第 ${p.round + 1}/${p.budget} 轮',
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                  if (hasSteps)
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 18,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                ],
+              ),
+              if (_expanded && hasSteps)
+                Padding(
+                  padding: const EdgeInsets.only(top: AppSpacing.xs),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final step in p.steps)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.check,
+                                size: 13,
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: AppSpacing.xs),
+                              Expanded(
+                                child: Text(
+                                  step,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// **思考过程**折叠块（**默认折叠**）。
+///
+/// 思维链往往比正文还长，默认展开会把回答挤到屏幕外。所以只露一行标题
+/// （带字数），想看再点开。
+///
+/// 生成过程中点开过的话，它是**实时长出来**的：内容每攒够一段就落一次库
+/// （见 `AiChatRepository` 里的 `_thinkingFlushChars`），界面跟着数据库刷新。
+class _ThinkingBlock extends StatefulWidget {
+  const _ThinkingBlock({required this.text});
+
+  final String text;
+
+  @override
+  State<_ThinkingBlock> createState() => _ThinkingBlockState();
+}
+
+class _ThinkingBlockState extends State<_ThinkingBlock> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final body = widget.text.trim();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.psychology_outlined,
+                    size: 15,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: AppSpacing.xs),
+                  Text(
+                    '思考过程（${body.length} 字）',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(top: AppSpacing.xs),
+              padding: const EdgeInsets.all(AppSpacing.sm),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: Text(
+                body,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  height: 1.55,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
@@ -1002,6 +1354,7 @@ class _Composer extends StatelessWidget {
     required this.onPickModel,
     required this.onPickEffort,
     required this.onSend,
+    required this.onStop,
   });
 
   final TextEditingController controller;
@@ -1011,6 +1364,9 @@ class _Composer extends StatelessWidget {
   final VoidCallback onPickModel;
   final VoidCallback onPickEffort;
   final VoidCallback onSend;
+
+  /// 生成中时那颗按钮变成「停止」（见下面按钮那段）。
+  final VoidCallback onStop;
 
   @override
   Widget build(BuildContext context) {
@@ -1101,16 +1457,14 @@ class _Composer extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
+              // 生成中 → 这颗变成**停止**（可点，不是禁用状态）。
+              //
+              // 以前这里是"转圈 + 禁用"：既没告诉用户在等什么，也不给他
+              // 停下来的手段。DeepSeek 那颗是停止按钮，跟它对齐。
               IconButton.filled(
-                tooltip: '发送',
-                onPressed: sending ? null : onSend,
-                icon: sending
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.arrow_upward),
+                tooltip: sending ? '停止' : '发送',
+                onPressed: sending ? onStop : onSend,
+                icon: Icon(sending ? Icons.stop_rounded : Icons.arrow_upward),
               ),
             ],
           ),

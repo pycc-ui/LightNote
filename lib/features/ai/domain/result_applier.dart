@@ -170,6 +170,84 @@ class AiResultApplier {
     return answer.trim();
   }
 
+  /// **流式显示用**：把**还没写完**的产出块也切掉。
+  ///
+  /// ## 为什么非要有这一个（这是个真实 bug）
+  ///
+  /// 产出块里装的是**整篇笔记正文**。而流式那条路是"每个分片都把累计文本重写
+  /// 一遍"，[stripPayload] 却只在**整轮跑完**时才生效 —— 中间那十几秒里，用户
+  /// 就看着一大坨原始 JSON（含笔记全文）在对话气泡里滚出来。写笔记的时候把笔记
+  /// 正文渲染进对话，这是不能接受的。
+  ///
+  /// [stripPayload] 干不了这件事：它要求围栏**已经闭合**（` ```…``` `）。这里
+  /// 要的恰恰是相反的 —— 一个**没写完**的块也要立刻从显示里拿掉：
+  ///
+  /// ```
+  /// 我已经整理好了：      →   我已经整理好了：
+  /// ```json                    （下面这些一律不显示）
+  /// {"notes": [{"title"…
+  /// ```
+  ///
+  /// ## 认三种起始形态（都取**最早**出现的那处）
+  ///
+  /// | | 形态 | 为什么要认 |
+  /// |---|---|---|
+  /// | 1 | ` ```json `（闭合与否都算） | 正常情况 |
+  /// | 2 | **正在长出来**的围栏：`` ` ``/```` `` ````/```` ``` ````/` ```j `/` ```js `/` ```json ` | 分片是逐字到的，`json` 后到 |
+  /// | 3 | 没围栏、直接 `{"notes"`（或 updates / deletes）开头的载荷 | 模型偶尔省略围栏 |
+  ///
+  /// 形态 2 **只认 `j` 打头的**（不认光秃秃的三反引号）：否则一段正常的代码块
+  /// 写到结尾时会被当成"正在长出来的产出块"切掉。
+  /// 代价是产出块到来时会有三个字符的反引号闪一下（约几十毫秒），可以接受。
+  ///
+  /// 形态 3 会连带吃掉**它上一行那个光秃秃的围栏**（` ``` ` 后面直接跟对象的那种
+  /// 写法，[extractPayload] 也认）。
+  static String stripForStreaming(String partial) {
+    final at = _payloadStart(partial);
+    return at == null ? partial : partial.substring(0, at).trimRight();
+  }
+
+  /// 产出块在 [text] 里的起始下标（没有就返回 null）。取所有形态里**最早**的。
+  static int? _payloadStart(String text) {
+    final starts = <int>[];
+
+    // 形态 1：```json（可能还没闭合）
+    for (final m in RegExp(r'(?:^|\n)[ \t]*```[ \t]*json',
+            caseSensitive: false, multiLine: true)
+        .allMatches(text)) {
+      starts.add(m.start);
+    }
+
+    // 形态 2：结尾正在长出来的围栏（**必须一直延伸到文本结尾**，
+    // 否则会把"代码块写在中间、后面还有正文"那种正常内容切掉）
+    for (final m in RegExp(r'(?:^|\n)[ \t]*`{1,3}[ \t]*j(?:s(?:o(?:n)?)?)?[ \t]*$',
+            caseSensitive: false, multiLine: true)
+        .allMatches(text)) {
+      if (text.substring(m.end).trim().isEmpty) starts.add(m.start);
+    }
+
+    // 形态 3：行首直接是载荷对象（{"notes" / {"updates" / {"deletes"）
+    for (final m in RegExp(
+            r'(?:^|\n)[ \t]*\{[ \t]*"(?:notes|updates|deletes)"',
+            caseSensitive: false,
+            multiLine: true)
+        .allMatches(text)) {
+      starts.add(m.start);
+      // 它上一行如果是"光秃秃的围栏"，一起吃掉
+      final before = text.substring(0, m.start);
+      final fence = RegExp(r'(?:^|\n)[ \t]*```[ \t]*(?:json)?[ \t]*$',
+              caseSensitive: false, multiLine: true)
+          .firstMatch(before);
+      if (fence != null && before.substring(fence.end).trim().isEmpty) {
+        starts.add(fence.start);
+      }
+    }
+
+    if (starts.isEmpty) return null;
+    starts.sort();
+    return starts.first;
+  }
+
   /// 从回答里抽 json 产出块。**只认最后一段** ```json 围栏。
   ///
   /// 为什么要"最后一段"：模型常先写解释、再给产出；也可能中途贴一小段示意 JSON。

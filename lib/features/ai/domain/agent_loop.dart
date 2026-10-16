@@ -34,10 +34,39 @@ class AgentText extends AgentEvent {
   final String delta;
 }
 
-/// 开始执行某个工具（UI 可以显示"正在执行命令…"）
+/// 模型这一轮吐出的**思维链**增量。
+///
+/// 和 [AgentText] 分开是必须的：思维链**不进正文**（不落进 `ai_messages.content`，
+/// 也不参与下一轮的历史），它只是给用户看的"它在想什么"。
+/// 以前这个事件根本不存在 —— `AiReasoning` 在下面被直接丢掉了（`break;`）。
+class AgentThinking extends AgentEvent {
+  const AgentThinking(this.delta);
+  final String delta;
+}
+
+/// 新一轮开始了（给"任务栏"显示「第 N/M 轮」用）。
+class AgentRoundStarted extends AgentEvent {
+  const AgentRoundStarted(this.used, this.budget);
+
+  /// 这一轮是第几轮（0 起，**跨挂起累计**）。
+  final int used;
+
+  /// 这次的预算上界（用户点过"继续"之后会变大）。
+  final int budget;
+}
+
+/// 开始执行某个工具（UI 里那条"任务栏"靠它显示"正在做什么"）。
 class AgentToolStarted extends AgentEvent {
-  const AgentToolStarted(this.name);
+  const AgentToolStarted(this.name, {this.arguments = ''});
+
   final String name;
+
+  /// 模型给的参数 **JSON 原文**（如 `{"sql": "SELECT read_note_batch(…)"}`）。
+  ///
+  /// 为什么要把参数也带上：AI 干活几乎全是走 `sql` 这一个工具（那些函数是嵌在
+  /// SQL 里的），光有 `name` 永远是 `'sql'`，界面等于什么都没法显示。
+  /// 有了 SQL 原文才认得出"它在读正文 / 在改笔记"（见 `ToolLabels`）。
+  final String arguments;
 }
 
 /// 某个工具执行完了
@@ -210,6 +239,8 @@ class AgentLoop {
     for (var roundNo = 0; roundNo < budget - roundsUsed; roundNo++) {
       executor.beginTurn();
       final used = roundsUsed + roundNo;
+      // 给界面一个"现在是第几轮"的信号（任务栏显示「第 N/M 轮」）
+      yield AgentRoundStarted(used, budget);
       final prompt = await _promptFor(systemPrompt, rebuildPrompt);
       // 快到上限时的"还剩几轮"提醒：**挂在消息列表末尾**，不碰 system prompt。
       //
@@ -233,7 +264,10 @@ class AgentLoop {
             text += e.text;
             yield AgentText(e.text);
           case AiReasoning():
-            break; // 思维链不展示
+            // 思维链**展示**（可折叠，默认折叠）。以前这里是 `break;` 丢掉的，
+            // 于是用户只看到"转圈"、看不到它在想什么。
+            // 注意它只往上抛、不进 [text] —— 正文和历史都不该有它。
+            yield AgentThinking(e.text);
           case AiDone():
             usage = usage.merge(e);
             // 流式累加才是真相；`fullText` 兜住"一个 chunk 都没收到"的极端情况
@@ -305,7 +339,7 @@ class AgentLoop {
           return;
         }
 
-        yield AgentToolStarted(call.name);
+        yield AgentToolStarted(call.name, arguments: call.arguments);
         final result = await executor.execute(
           call.name,
           ToolExecutor.parseArgs(call.arguments),

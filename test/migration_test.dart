@@ -515,7 +515,7 @@ void main() {
     // ⚠️ 这一句是**故意的硬编码**：加迁移时它必须跟着改。
     // 上面那句是"等于常量"（永远成立、抓不到忘改版本号）；
     // 这句才有用 —— 它逼你在改 `kCurrentSchemaVersion` 时确认这里。
-    expect(kCurrentSchemaVersion, 15);
+    expect(kCurrentSchemaVersion, 18);
   });
 
   test('v13：ai_capabilities 换成 ai_functions，并灌入函数清单', () async {

@@ -338,6 +338,37 @@ class AppDatabase extends _$AppDatabase {
           if (from < 15) {
             await m.createTable(noteVectors);
           }
+          // ---- 15 -> 16：ai_messages 加 reasoning（思维链，给用户看）----
+          //
+          // 只加一列、**不回填**：老消息没有思维链（以前那个事件被直接丢掉了），
+          // 事后也补不出来。列可空，界面上没有就不显示那个折叠块。
+          if (from < 16) {
+            await customStatement(
+              'ALTER TABLE ai_messages ADD COLUMN reasoning TEXT NULL',
+            );
+          }
+
+          // ---- 16 -> 17：notes 加 sort_order（手动拖出来的顺序）----
+          //
+          // 加列时给 `NOT NULL DEFAULT 0`：0 = 没排过，于是**老库的笔记全是 0**，
+          // 它们之间仍按 `updated_at` 排 —— 也就是升级前后顺序完全一样，
+          // 用户不会发现列表被重排了。
+          if (from < 17) {
+            await customStatement(
+              'ALTER TABLE notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0',
+            );
+          }
+
+          // ---- 17 -> 18：ai_conversations 加 pinned（会话置顶）----
+          //
+          // 默认 0，老会话全都不置顶 —— 顺序和升级前一样（`updated_at DESC`）。
+          if (from < 18) {
+            await customStatement(
+              'ALTER TABLE ai_conversations '
+              'ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0',
+            );
+          }
+
           // 升级路径的索引统一在这里补。
           //
           // 放在**整个 onUpgrade 的末尾**是关键：迁移回调里 `m.createTable`
@@ -571,13 +602,58 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// 笔记库详情页：该笔记库内的笔记
+  /// 笔记列表的排序规则：**手动顺序 → 最近更新**。
+  ///
+  /// ## 为什么只有一层顺序（置顶**不是**独立的一层）
+  ///
+  /// 「置顶」在这个 App 里的意思是「**把它挪到最前**」—— 一次性动作 + 一个标记，
+  /// 不是"钉住它、以后永远压过别人"。
+  ///
+  /// 做成两个排序层（`pinned DESC` 再 `sort_order`）看着更"强"，实际上会引入
+  /// 一个没法调和的矛盾：用户在界面上拖了一篇到最前面，可它上面还挡着置顶的
+  /// 那几篇 —— 于是要么"拖上去又被顶回来"（吸附），要么把置顶的从排序列表里
+  /// 藏掉（用户以为丢了）。**一个列表只该有一个顺序来源。**
+  ///
+  ///   · `sort_order ASC`：手动顺序。**0 = 没排过**，它们之间由下一层决定；
+  ///     用户拖过之后那批从 **1** 开始编号（见 [reorderNotes]）；
+  ///   · `updated_at DESC`：兜底（也是改造前唯一的规则）。
+  ///
+  /// 新建的笔记 `sort_order = 0` → 落在"没排过"那一组，靠 `updated_at` 排到
+  /// 最前 ✓（新笔记在最上面，符合直觉）。**代价**：它会把置顶过的笔记挤下去
+  /// 一位 —— 这是"置顶 = 挪到最前一次"这个语义的自然结果，用户已经认了。
+  static final _noteListOrder = <OrderingTerm Function(Notes)>[
+    (t) => OrderingTerm(expression: t.sortOrder),
+    (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
+  ];
+
+  /// 按给定的 id 顺序**重编号**这些笔记的 `sort_order`（从 1 开始）。
+  ///
+  /// 从 1 开始、把 0 留给"没排过"：这样新建的笔记（0）永远落在已排过的那批
+  /// 前面，而不会插进手动顺序的中间。
+  Future<void> reorderNotes(List<String> idsInOrder) {
+    return transaction(() async {
+      for (var i = 0; i < idsInOrder.length; i++) {
+        await (update(notes)..where((t) => t.id.equals(idsInOrder[i]))).write(
+          NotesCompanion(sortOrder: Value(i + 1)),
+        );
+      }
+    });
+  }
+
+  /// 按给定的 id 顺序重编号笔记库的 `sort_order`（规则同上）。
+  Future<void> reorderNotebooks(List<String> idsInOrder) {
+    return transaction(() async {
+      for (var i = 0; i < idsInOrder.length; i++) {
+        await (update(notebooks)..where((t) => t.id.equals(idsInOrder[i])))
+            .write(NotebooksCompanion(sortOrder: Value(i + 1)));
+      }
+    });
+  }
+
   Stream<List<Note>> watchNotesInNotebook(String notebookId) {
     return (select(notes)
           ..where((t) => t.deletedAt.isNull() & t.notebookId.equals(notebookId))
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
-            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ]))
+          ..orderBy(_noteListOrder))
         .watch();
   }
 
@@ -585,10 +661,7 @@ class AppDatabase extends _$AppDatabase {
   Stream<List<Note>> watchNotes() {
     return (select(notes)
           ..where((t) => t.deletedAt.isNull())
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
-            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ]))
+          ..orderBy(_noteListOrder))
         .watch();
   }
 
@@ -864,7 +937,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// 撤销逻辑删除。
   ///
-  /// 左滑删除走的是"乐观删除 + 撤销"（见 [SwipeToDelete] 的说明），
+  /// 左滑删除走的是"乐观删除 + 撤销"（见 [SwipeActions] 的说明），
   /// 所以必须有恢复入口。逻辑删除的好处正在这里：`deletedAt` 清空即可，
   /// 笔记内容与关联（卡片流摘要）都还在。
   Future<void> restoreNote(String id) {
@@ -934,6 +1007,15 @@ class AppDatabase extends _$AppDatabase {
   ///
   /// 用 `EXISTS` 子查询而不是"先查会话、再逐个查消息"：
   /// 后者是 N+1 次查询，会话一多就明显。
+  /// 设置某条会话的置顶标记。
+  ///
+  /// 排序在 SQL 里（见 [watchConversations]），所以这里只翻字段。
+  Future<void> setConversationPinned(String id, bool pinned) {
+    return (update(aiConversations)..where((t) => t.id.equals(id))).write(
+      AiConversationsCompanion(pinned: Value(pinned)),
+    );
+  }
+
   Stream<List<AiConversation>> watchConversations() {
     final hasMessages = existsQuery(
       select(aiMessages)
@@ -942,6 +1024,12 @@ class AppDatabase extends _$AppDatabase {
     return (select(aiConversations)
           ..where((t) => hasMessages)
           ..orderBy([
+            // 置顶的钉在最上面，其余按最近聊过排。
+            //
+            // 和笔记那边的`sort_order`不是一回事：会话没有手动拖出来的顺序
+            //（`updated_at` 每聊一句就变），所以置顶在这里就是字面意思 ——
+            // 钉住。多条置顶时它们之间仍按最近聊过排。
+            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
             (t) => OrderingTerm(
                 expression: t.updatedAt, mode: OrderingMode.desc),
           ]))
@@ -999,6 +1087,16 @@ class AppDatabase extends _$AppDatabase {
   Future<void> setMessageInterrupt(String id, String? reason) {
     return (update(aiMessages)..where((t) => t.id.equals(id))).write(
       AiMessagesCompanion(interruptReason: Value(reason)),
+    );
+  }
+
+  /// 写入某条消息的**思维链**（`ai_messages.reasoning`）。
+  ///
+  /// 流式过程中会被反复调用（每来一段思维链就写一次累计文本），和正文那条
+  /// `updateAiMessage` 同一套路数。传 null 就是清掉。
+  Future<void> setMessageReasoning(String id, String? reasoning) {
+    return (update(aiMessages)..where((t) => t.id.equals(id))).write(
+      AiMessagesCompanion(reasoning: Value(reasoning)),
     );
   }
 

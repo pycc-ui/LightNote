@@ -9,7 +9,7 @@ import '../data/note_repository.dart';
 import 'note_editor_page.dart';
 import 'search_page.dart';
 import 'widgets/notebook_picker.dart';
-import 'widgets/swipe_to_delete.dart';
+import 'widgets/swipe_actions.dart';
 
 /// 笔记库详情页
 class NotebookDetailPage extends StatefulWidget {
@@ -168,6 +168,29 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
   }
 
   /// 单条删除（左滑）。乐观删除 + 撤销，不弹确认。
+  /// 置顶 / 取消置顶。
+  ///
+  /// **置顶 = 挪到最前 + 打个标记**（不是"以后一直压着别人"）：
+  ///   · 置顶：把这篇排到当前顺序的第一位，`pinned` 置位（列表里显示个图钉）；
+  ///   · 取消置顶：只把标记清掉，**位置不动** —— 它就在你上次放的地方。
+  ///
+  /// [order] 是**当前列表的完整顺序**（调用方手里就有，见 `list`）。
+  /// 重编号需要完整顺序，漏了谁谁就会掉回"没排过"那组跑到最前面去。
+  Future<void> _togglePin(Note note, List<String> order) async {
+    final repo = context.read<NoteRepository>();
+    final title = note.title.trim().isEmpty ? '无标题' : note.title.trim();
+    if (note.pinned) {
+      await repo.setPinned(note.id, false);
+      if (!mounted) return;
+      LogBar.success(context, '已取消置顶「$title」');
+      return;
+    }
+    await repo.setPinned(note.id, true);
+    await repo.moveToFront(order, note.id);
+    if (!mounted) return;
+    LogBar.success(context, '已置顶「$title」');
+  }
+
   Future<void> _deleteNote(Note note) async {
     final repo = context.read<NoteRepository>();
     await repo.softDelete(note.id);
@@ -181,6 +204,21 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
       onAction: () => repo.restore(note.id),
     );
   }
+
+  /// 正在调整顺序（拖动排序模式）。
+  ///
+  /// 和多选互斥：两种模式下点击/长按的含义完全不同，同时开着必然打架。
+  bool _reordering = false;
+
+  void _enterReordering() {
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+      _reordering = true;
+    });
+  }
+
+  void _exitReordering() => setState(() => _reordering = false);
 
   @override
   void initState() {
@@ -201,7 +239,9 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
 
     return Scaffold(
       appBar: _selecting ? _selectAppBar() : _normalAppBar(name, context),
-      floatingActionButton: _selecting
+      // 多选 / 调整顺序时都不给这个按钮：那两个模式下用户要做的不是新建，
+      // 浮在那儿只会占地方、还可能挡住列表最后一行
+      floatingActionButton: _selecting || _reordering
           ? null
           : FloatingActionButton(
               tooltip: '在此笔记库新建笔记',
@@ -244,42 +284,123 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
             );
           }
 
-          return ListView.separated(
-            padding: EdgeInsets.only(
-              bottom: _selecting ? 120 : 96,
-            ),
-            itemCount: list.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, i) {
-              final n = list[i];
-              return SwipeToDelete(
-                itemKey: ValueKey(n.id),
-                onDelete: () => _deleteNote(n),
-                child: NoteListTile(
-                  note: n,
-                  selectable: _selecting,
-                  selected: _selected.contains(n.id),
-                  onTap: () {
-                    if (_selecting) {
-                      _toggle(n.id);
-                      return;
-                    }
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => NoteEditorPage(
-                          noteId: n.id,
-                          startInReading: true,
+          // ---- 调整顺序模式：整个列表交给拖动手柄 ----
+          //
+          // 这个模式下**不套 SwipeActions**：左滑手势和拖动会抢，
+          // 而且此刻用户的意图只有一个 —— 挪位置。
+          if (_reordering) {
+            return Column(
+              children: [
+                _reorderHint(list.length),
+                Expanded(
+                  child: ReorderableListView.builder(
+                    padding: const EdgeInsets.only(bottom: 96),
+                    itemCount: list.length,
+                    // 顺序的**持久化**：把拖完的新顺序整份写回去
+                    //（重编号是密集的，必须给完整顺序，见 `reorderNotes`）
+                    // 用 `onReorderItem`（而不是老的 `onReorder`）：它给的
+                    // newIndex **已经**替算好"移除原位置之后"的下标 ——
+                    // 老回调那个"自己减一"的坑它内置处理了。
+                    onReorderItem: (oldIndex, newIndex) {
+                      final ids = [for (final n in list) n.id];
+                      final moved = ids.removeAt(oldIndex);
+                      ids.insert(newIndex, moved);
+                      context.read<NoteRepository>().reorder(ids);
+                    },
+                    itemBuilder: (context, i) {
+                      final n = list[i];
+                      return NoteListTile(
+                        key: ValueKey('reorder-${n.id}'),
+                        note: n,
+                        // 拖动模式下不响应点击（点一下跳到编辑页会很突兀），
+                        // 手柄才是这一行唯一的作用点
+                        onTap: () {},
+                        trailing: ReorderableDragStartListener(
+                          index: i,
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: AppSpacing.md),
+                            child: Icon(Icons.drag_handle),
+                          ),
                         ),
-                      ),
-                    );
-                  },
-                  onLongPress:
-                      _selecting ? () => _toggle(n.id) : () => _noteActions(n),
+                      );
+                    },
+                  ),
                 ),
-              );
-            },
+              ],
+            );
+          }
+
+          // 套一层：划开一行时自动收起其它行（不然可能好几行同时敞着）
+          return SwipeActionsScope(
+            child: ListView.separated(
+              padding: EdgeInsets.only(
+                bottom: _selecting ? 120 : 96,
+              ),
+              itemCount: list.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, i) {
+                final n = list[i];
+                return SwipeActions(
+                  itemKey: ValueKey(n.id),
+                  // 置顶：字段（`notes.pinned`）和排序（`pinned DESC, updated_at DESC`）
+                  // 一直都是现成的，只是一直没有入口 —— 这是第一个。
+                  pinned: n.pinned,
+                  onTogglePin: () =>
+                    _togglePin(n, [for (final x in list) x.id]),
+                  onDelete: () => _deleteNote(n),
+                  child: NoteListTile(
+                    note: n,
+                    selectable: _selecting,
+                    selected: _selected.contains(n.id),
+                    onTap: () {
+                      if (_selecting) {
+                        _toggle(n.id);
+                        return;
+                      }
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => NoteEditorPage(
+                            noteId: n.id,
+                            startInReading: true,
+                          ),
+                        ),
+                      );
+                    },
+                    onLongPress:
+                        _selecting ? () => _toggle(n.id) : () => _noteActions(n),
+                  ),
+                );
+              },
+            ),
           );
         },
+      ),
+    );
+  }
+
+  /// 调整顺序时顶部那条说明。
+  ///
+  /// 必须有：不然用户面对一个"点不动、只有手柄能用"的列表会不知所措，
+  /// 也不知道怎么退出。
+  Widget _reorderHint(int count) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md, AppSpacing.xs, AppSpacing.xs, AppSpacing.xs),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '拖动右边的 ≡ 调整顺序（共 $count 篇）',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+            TextButton(onPressed: _exitReordering, child: const Text('完成')),
+          ],
+        ),
       ),
     );
   }
@@ -309,11 +430,22 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
           onSelected: (v) {
             if (v == 'select') {
               _enterSelecting();
+            } else if (v == 'reorder') {
+              _enterReordering();
             } else {
               _onMenu(v);
             }
           },
           itemBuilder: (_) => const [
+            PopupMenuItem(
+              value: 'reorder',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.swap_vert),
+                title: Text('调整顺序'),
+              ),
+            ),
             PopupMenuItem(
               value: 'select',
               child: ListTile(

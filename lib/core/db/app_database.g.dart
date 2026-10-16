@@ -514,6 +514,18 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, Note> {
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _sortOrderMeta = const VerificationMeta(
+    'sortOrder',
+  );
+  @override
+  late final GeneratedColumn<int> sortOrder = GeneratedColumn<int>(
+    'sort_order',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   static const VerificationMeta _wordCountMeta = const VerificationMeta(
     'wordCount',
   );
@@ -580,6 +592,7 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, Note> {
     source,
     isInbox,
     pinned,
+    sortOrder,
     wordCount,
     lastAiAt,
     createdAt,
@@ -643,6 +656,12 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, Note> {
       context.handle(
         _pinnedMeta,
         pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
+    if (data.containsKey('sort_order')) {
+      context.handle(
+        _sortOrderMeta,
+        sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
       );
     }
     if (data.containsKey('word_count')) {
@@ -720,6 +739,10 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, Note> {
         DriftSqlType.bool,
         data['${effectivePrefix}pinned'],
       )!,
+      sortOrder: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sort_order'],
+      )!,
       wordCount: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}word_count'],
@@ -768,6 +791,20 @@ class Note extends DataClass implements Insertable<Note> {
   /// false = 已归档到某个笔记库
   final bool isInbox;
   final bool pinned;
+
+  /// **手动拖出来的顺序**（v17 新增）。
+  ///
+  /// `0 = 没排过` —— 这是个刻意的约定，不是"排在第一个"：
+  ///   · 没排过的笔记全是 0，它们之间靠 `updated_at` 决定先后（改造前的行为）；
+  ///   · 用户在界面上拖动之后，参与排序的那批从 **1** 开始重编号
+  ///     （见 `AppDatabase.reorderNotes`）；
+  ///   · 于是**新建的笔记（0）永远落在已排过的那批前面**，
+  ///     不会插进用户手动排好的顺序中间。
+  ///
+  /// 排序只有两层：`sort_order → updated_at DESC`（见 `AppDatabase._noteListOrder`）。
+  /// **`pinned` 不参与排序** —— "置顶"在这个 App 里的意思是「把它挪到最前」
+  /// （一次性动作 + 一个标记），不是"永远压过别人"。理由写在那边的注释里。
+  final int sortOrder;
   final int wordCount;
   final DateTime? lastAiAt;
   final DateTime createdAt;
@@ -784,6 +821,7 @@ class Note extends DataClass implements Insertable<Note> {
     required this.source,
     required this.isInbox,
     required this.pinned,
+    required this.sortOrder,
     required this.wordCount,
     this.lastAiAt,
     required this.createdAt,
@@ -803,6 +841,7 @@ class Note extends DataClass implements Insertable<Note> {
     map['source'] = Variable<String>(source);
     map['is_inbox'] = Variable<bool>(isInbox);
     map['pinned'] = Variable<bool>(pinned);
+    map['sort_order'] = Variable<int>(sortOrder);
     map['word_count'] = Variable<int>(wordCount);
     if (!nullToAbsent || lastAiAt != null) {
       map['last_ai_at'] = Variable<DateTime>(lastAiAt);
@@ -827,6 +866,7 @@ class Note extends DataClass implements Insertable<Note> {
       source: Value(source),
       isInbox: Value(isInbox),
       pinned: Value(pinned),
+      sortOrder: Value(sortOrder),
       wordCount: Value(wordCount),
       lastAiAt: lastAiAt == null && nullToAbsent
           ? const Value.absent()
@@ -853,6 +893,7 @@ class Note extends DataClass implements Insertable<Note> {
       source: serializer.fromJson<String>(json['source']),
       isInbox: serializer.fromJson<bool>(json['isInbox']),
       pinned: serializer.fromJson<bool>(json['pinned']),
+      sortOrder: serializer.fromJson<int>(json['sortOrder']),
       wordCount: serializer.fromJson<int>(json['wordCount']),
       lastAiAt: serializer.fromJson<DateTime?>(json['lastAiAt']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
@@ -872,6 +913,7 @@ class Note extends DataClass implements Insertable<Note> {
       'source': serializer.toJson<String>(source),
       'isInbox': serializer.toJson<bool>(isInbox),
       'pinned': serializer.toJson<bool>(pinned),
+      'sortOrder': serializer.toJson<int>(sortOrder),
       'wordCount': serializer.toJson<int>(wordCount),
       'lastAiAt': serializer.toJson<DateTime?>(lastAiAt),
       'createdAt': serializer.toJson<DateTime>(createdAt),
@@ -889,6 +931,7 @@ class Note extends DataClass implements Insertable<Note> {
     String? source,
     bool? isInbox,
     bool? pinned,
+    int? sortOrder,
     int? wordCount,
     Value<DateTime?> lastAiAt = const Value.absent(),
     DateTime? createdAt,
@@ -903,6 +946,7 @@ class Note extends DataClass implements Insertable<Note> {
     source: source ?? this.source,
     isInbox: isInbox ?? this.isInbox,
     pinned: pinned ?? this.pinned,
+    sortOrder: sortOrder ?? this.sortOrder,
     wordCount: wordCount ?? this.wordCount,
     lastAiAt: lastAiAt.present ? lastAiAt.value : this.lastAiAt,
     createdAt: createdAt ?? this.createdAt,
@@ -921,6 +965,7 @@ class Note extends DataClass implements Insertable<Note> {
       source: data.source.present ? data.source.value : this.source,
       isInbox: data.isInbox.present ? data.isInbox.value : this.isInbox,
       pinned: data.pinned.present ? data.pinned.value : this.pinned,
+      sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
       wordCount: data.wordCount.present ? data.wordCount.value : this.wordCount,
       lastAiAt: data.lastAiAt.present ? data.lastAiAt.value : this.lastAiAt,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
@@ -940,6 +985,7 @@ class Note extends DataClass implements Insertable<Note> {
           ..write('source: $source, ')
           ..write('isInbox: $isInbox, ')
           ..write('pinned: $pinned, ')
+          ..write('sortOrder: $sortOrder, ')
           ..write('wordCount: $wordCount, ')
           ..write('lastAiAt: $lastAiAt, ')
           ..write('createdAt: $createdAt, ')
@@ -959,6 +1005,7 @@ class Note extends DataClass implements Insertable<Note> {
     source,
     isInbox,
     pinned,
+    sortOrder,
     wordCount,
     lastAiAt,
     createdAt,
@@ -977,6 +1024,7 @@ class Note extends DataClass implements Insertable<Note> {
           other.source == this.source &&
           other.isInbox == this.isInbox &&
           other.pinned == this.pinned &&
+          other.sortOrder == this.sortOrder &&
           other.wordCount == this.wordCount &&
           other.lastAiAt == this.lastAiAt &&
           other.createdAt == this.createdAt &&
@@ -993,6 +1041,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
   final Value<String> source;
   final Value<bool> isInbox;
   final Value<bool> pinned;
+  final Value<int> sortOrder;
   final Value<int> wordCount;
   final Value<DateTime?> lastAiAt;
   final Value<DateTime> createdAt;
@@ -1008,6 +1057,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
     this.source = const Value.absent(),
     this.isInbox = const Value.absent(),
     this.pinned = const Value.absent(),
+    this.sortOrder = const Value.absent(),
     this.wordCount = const Value.absent(),
     this.lastAiAt = const Value.absent(),
     this.createdAt = const Value.absent(),
@@ -1024,6 +1074,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
     this.source = const Value.absent(),
     this.isInbox = const Value.absent(),
     this.pinned = const Value.absent(),
+    this.sortOrder = const Value.absent(),
     this.wordCount = const Value.absent(),
     this.lastAiAt = const Value.absent(),
     required DateTime createdAt,
@@ -1042,6 +1093,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
     Expression<String>? source,
     Expression<bool>? isInbox,
     Expression<bool>? pinned,
+    Expression<int>? sortOrder,
     Expression<int>? wordCount,
     Expression<DateTime>? lastAiAt,
     Expression<DateTime>? createdAt,
@@ -1058,6 +1110,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
       if (source != null) 'source': source,
       if (isInbox != null) 'is_inbox': isInbox,
       if (pinned != null) 'pinned': pinned,
+      if (sortOrder != null) 'sort_order': sortOrder,
       if (wordCount != null) 'word_count': wordCount,
       if (lastAiAt != null) 'last_ai_at': lastAiAt,
       if (createdAt != null) 'created_at': createdAt,
@@ -1076,6 +1129,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
     Value<String>? source,
     Value<bool>? isInbox,
     Value<bool>? pinned,
+    Value<int>? sortOrder,
     Value<int>? wordCount,
     Value<DateTime?>? lastAiAt,
     Value<DateTime>? createdAt,
@@ -1092,6 +1146,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
       source: source ?? this.source,
       isInbox: isInbox ?? this.isInbox,
       pinned: pinned ?? this.pinned,
+      sortOrder: sortOrder ?? this.sortOrder,
       wordCount: wordCount ?? this.wordCount,
       lastAiAt: lastAiAt ?? this.lastAiAt,
       createdAt: createdAt ?? this.createdAt,
@@ -1128,6 +1183,9 @@ class NotesCompanion extends UpdateCompanion<Note> {
     if (pinned.present) {
       map['pinned'] = Variable<bool>(pinned.value);
     }
+    if (sortOrder.present) {
+      map['sort_order'] = Variable<int>(sortOrder.value);
+    }
     if (wordCount.present) {
       map['word_count'] = Variable<int>(wordCount.value);
     }
@@ -1160,6 +1218,7 @@ class NotesCompanion extends UpdateCompanion<Note> {
           ..write('source: $source, ')
           ..write('isInbox: $isInbox, ')
           ..write('pinned: $pinned, ')
+          ..write('sortOrder: $sortOrder, ')
           ..write('wordCount: $wordCount, ')
           ..write('lastAiAt: $lastAiAt, ')
           ..write('createdAt: $createdAt, ')
@@ -1932,6 +1991,19 @@ class $AiConversationsTable extends AiConversations
     requiredDuringInsert: false,
     defaultValue: const Constant(''),
   );
+  static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
+  @override
+  late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
+    'pinned',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("pinned" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -1960,6 +2032,7 @@ class $AiConversationsTable extends AiConversations
     workspaceScope,
     thinkingEffort,
     title,
+    pinned,
     createdAt,
     updatedAt,
   ];
@@ -2004,6 +2077,12 @@ class $AiConversationsTable extends AiConversations
         title.isAcceptableOrUnknown(data['title']!, _titleMeta),
       );
     }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -2045,6 +2124,10 @@ class $AiConversationsTable extends AiConversations
         DriftSqlType.string,
         data['${effectivePrefix}title'],
       )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
+      )!,
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -2081,6 +2164,17 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
   /// 思考强度：low / medium / high
   final String thinkingEffort;
   final String title;
+
+  /// **钉在最上面**（v18 新增）。
+  ///
+  /// ⚠️ 会话的置顶和笔记的置顶**不是同一个东西**，别照着那边改：
+  ///
+  /// · 笔记有"手动拖出来的顺序"，所以那边的置顶只能是"**挪到最前一次** + 标记"
+  ///   （否则会出现"拖上去又被顶回来"的吸附，见 `AppDatabase._noteListOrder`）；
+  /// · 会话列表本质是**按时间排**的（`updated_at` 一直在变），根本没有手动顺序
+  ///   这回事，所以不存在冲突 —— 这里就按字面意思来：**钉住，一直在最上面**
+  ///   （微信那种）。多条置顶时它们之间仍按最近聊过排。
+  final bool pinned;
   final DateTime createdAt;
   final DateTime updatedAt;
   const AiConversation({
@@ -2088,6 +2182,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
     required this.workspaceScope,
     required this.thinkingEffort,
     required this.title,
+    required this.pinned,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -2098,6 +2193,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
     map['workspace_scope'] = Variable<String>(workspaceScope);
     map['thinking_effort'] = Variable<String>(thinkingEffort);
     map['title'] = Variable<String>(title);
+    map['pinned'] = Variable<bool>(pinned);
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
     return map;
@@ -2109,6 +2205,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
       workspaceScope: Value(workspaceScope),
       thinkingEffort: Value(thinkingEffort),
       title: Value(title),
+      pinned: Value(pinned),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
     );
@@ -2124,6 +2221,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
       workspaceScope: serializer.fromJson<String>(json['workspaceScope']),
       thinkingEffort: serializer.fromJson<String>(json['thinkingEffort']),
       title: serializer.fromJson<String>(json['title']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
     );
@@ -2136,6 +2234,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
       'workspaceScope': serializer.toJson<String>(workspaceScope),
       'thinkingEffort': serializer.toJson<String>(thinkingEffort),
       'title': serializer.toJson<String>(title),
+      'pinned': serializer.toJson<bool>(pinned),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
     };
@@ -2146,6 +2245,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
     String? workspaceScope,
     String? thinkingEffort,
     String? title,
+    bool? pinned,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) => AiConversation(
@@ -2153,6 +2253,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
     workspaceScope: workspaceScope ?? this.workspaceScope,
     thinkingEffort: thinkingEffort ?? this.thinkingEffort,
     title: title ?? this.title,
+    pinned: pinned ?? this.pinned,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );
@@ -2166,6 +2267,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
           ? data.thinkingEffort.value
           : this.thinkingEffort,
       title: data.title.present ? data.title.value : this.title,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
@@ -2178,6 +2280,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
           ..write('workspaceScope: $workspaceScope, ')
           ..write('thinkingEffort: $thinkingEffort, ')
           ..write('title: $title, ')
+          ..write('pinned: $pinned, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
@@ -2190,6 +2293,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
     workspaceScope,
     thinkingEffort,
     title,
+    pinned,
     createdAt,
     updatedAt,
   );
@@ -2201,6 +2305,7 @@ class AiConversation extends DataClass implements Insertable<AiConversation> {
           other.workspaceScope == this.workspaceScope &&
           other.thinkingEffort == this.thinkingEffort &&
           other.title == this.title &&
+          other.pinned == this.pinned &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt);
 }
@@ -2210,6 +2315,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
   final Value<String> workspaceScope;
   final Value<String> thinkingEffort;
   final Value<String> title;
+  final Value<bool> pinned;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
   final Value<int> rowid;
@@ -2218,6 +2324,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
     this.workspaceScope = const Value.absent(),
     this.thinkingEffort = const Value.absent(),
     this.title = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -2227,6 +2334,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
     this.workspaceScope = const Value.absent(),
     this.thinkingEffort = const Value.absent(),
     this.title = const Value.absent(),
+    this.pinned = const Value.absent(),
     required DateTime createdAt,
     required DateTime updatedAt,
     this.rowid = const Value.absent(),
@@ -2238,6 +2346,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
     Expression<String>? workspaceScope,
     Expression<String>? thinkingEffort,
     Expression<String>? title,
+    Expression<bool>? pinned,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
@@ -2247,6 +2356,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
       if (workspaceScope != null) 'workspace_scope': workspaceScope,
       if (thinkingEffort != null) 'thinking_effort': thinkingEffort,
       if (title != null) 'title': title,
+      if (pinned != null) 'pinned': pinned,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
@@ -2258,6 +2368,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
     Value<String>? workspaceScope,
     Value<String>? thinkingEffort,
     Value<String>? title,
+    Value<bool>? pinned,
     Value<DateTime>? createdAt,
     Value<DateTime>? updatedAt,
     Value<int>? rowid,
@@ -2267,6 +2378,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
       workspaceScope: workspaceScope ?? this.workspaceScope,
       thinkingEffort: thinkingEffort ?? this.thinkingEffort,
       title: title ?? this.title,
+      pinned: pinned ?? this.pinned,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
@@ -2288,6 +2400,9 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
     if (title.present) {
       map['title'] = Variable<String>(title.value);
     }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -2307,6 +2422,7 @@ class AiConversationsCompanion extends UpdateCompanion<AiConversation> {
           ..write('workspaceScope: $workspaceScope, ')
           ..write('thinkingEffort: $thinkingEffort, ')
           ..write('title: $title, ')
+          ..write('pinned: $pinned, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
@@ -2387,6 +2503,17 @@ class $AiMessagesTable extends AiMessages
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _reasoningMeta = const VerificationMeta(
+    'reasoning',
+  );
+  @override
+  late final GeneratedColumn<String> reasoning = GeneratedColumn<String>(
+    'reasoning',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -2406,6 +2533,7 @@ class $AiMessagesTable extends AiMessages
     content,
     pendingAction,
     interruptReason,
+    reasoning,
     createdAt,
   ];
   @override
@@ -2468,6 +2596,12 @@ class $AiMessagesTable extends AiMessages
         ),
       );
     }
+    if (data.containsKey('reasoning')) {
+      context.handle(
+        _reasoningMeta,
+        reasoning.isAcceptableOrUnknown(data['reasoning']!, _reasoningMeta),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -2509,6 +2643,10 @@ class $AiMessagesTable extends AiMessages
         DriftSqlType.string,
         data['${effectivePrefix}interrupt_reason'],
       ),
+      reasoning: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}reasoning'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -2549,6 +2687,27 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
   /// 界面据此显示「未完成 + 继续」。
   final String? interruptReason;
 
+  /// AI 的**思维链**（DeepSeek 的 `reasoning_content`，v16 新增）。
+  ///
+  /// ## 它和正文是两回事，别混
+  ///
+  /// · **不是正文**：不参与 `historyWindowOf`，下一轮请求也**不重发**它
+  ///  （DeepSeek 不需要把思维链发回去）。所以它只花一次输出钱；
+  /// · **不给模型看**：它纯粹是"用户想看看它在想什么"；
+  /// · 所以它单独一列，而不是拼进 `content` —— 拼进去就会被当成历史重发，
+  ///   每一轮都白烧一遍 token（思维链往往比正文还长）。
+  ///
+  /// ## 形状
+  ///
+  /// 一轮对话里可能有好几段（每次工具往返各一段）。按出现顺序拼在一起，
+  /// 段之间用 `\n\n---\n` 分隔，每段前面带一个「第 N 轮」标记
+  ///（见 `AiChatRepository._thinkingBlock`）。存的是**原始文本**，
+  /// 界面自己决定怎么折叠显示。
+  ///
+  /// 可能很长（几万字）—— 用户明确选了"存下来、事后也能回看"，
+  /// 换来的是翻回去还看得到它在想什么。
+  final String? reasoning;
+
   /// 与其他表保持一致，统一用 DateTime（UTC 存储）。
   /// 时间列在 SQL 里是 INTEGER，Drift 会自动按 Unix 时间戳存取，等价。
   final DateTime createdAt;
@@ -2559,6 +2718,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     required this.content,
     this.pendingAction,
     this.interruptReason,
+    this.reasoning,
     required this.createdAt,
   });
   @override
@@ -2573,6 +2733,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     }
     if (!nullToAbsent || interruptReason != null) {
       map['interrupt_reason'] = Variable<String>(interruptReason);
+    }
+    if (!nullToAbsent || reasoning != null) {
+      map['reasoning'] = Variable<String>(reasoning);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
     return map;
@@ -2590,6 +2753,9 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       interruptReason: interruptReason == null && nullToAbsent
           ? const Value.absent()
           : Value(interruptReason),
+      reasoning: reasoning == null && nullToAbsent
+          ? const Value.absent()
+          : Value(reasoning),
       createdAt: Value(createdAt),
     );
   }
@@ -2606,6 +2772,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       content: serializer.fromJson<String>(json['content']),
       pendingAction: serializer.fromJson<String?>(json['pendingAction']),
       interruptReason: serializer.fromJson<String?>(json['interruptReason']),
+      reasoning: serializer.fromJson<String?>(json['reasoning']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
     );
   }
@@ -2619,6 +2786,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       'content': serializer.toJson<String>(content),
       'pendingAction': serializer.toJson<String?>(pendingAction),
       'interruptReason': serializer.toJson<String?>(interruptReason),
+      'reasoning': serializer.toJson<String?>(reasoning),
       'createdAt': serializer.toJson<DateTime>(createdAt),
     };
   }
@@ -2630,6 +2798,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     String? content,
     Value<String?> pendingAction = const Value.absent(),
     Value<String?> interruptReason = const Value.absent(),
+    Value<String?> reasoning = const Value.absent(),
     DateTime? createdAt,
   }) => AiMessage(
     id: id ?? this.id,
@@ -2642,6 +2811,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     interruptReason: interruptReason.present
         ? interruptReason.value
         : this.interruptReason,
+    reasoning: reasoning.present ? reasoning.value : this.reasoning,
     createdAt: createdAt ?? this.createdAt,
   );
   AiMessage copyWithCompanion(AiMessagesCompanion data) {
@@ -2658,6 +2828,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
       interruptReason: data.interruptReason.present
           ? data.interruptReason.value
           : this.interruptReason,
+      reasoning: data.reasoning.present ? data.reasoning.value : this.reasoning,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
     );
   }
@@ -2671,6 +2842,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
           ..write('content: $content, ')
           ..write('pendingAction: $pendingAction, ')
           ..write('interruptReason: $interruptReason, ')
+          ..write('reasoning: $reasoning, ')
           ..write('createdAt: $createdAt')
           ..write(')'))
         .toString();
@@ -2684,6 +2856,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
     content,
     pendingAction,
     interruptReason,
+    reasoning,
     createdAt,
   );
   @override
@@ -2696,6 +2869,7 @@ class AiMessage extends DataClass implements Insertable<AiMessage> {
           other.content == this.content &&
           other.pendingAction == this.pendingAction &&
           other.interruptReason == this.interruptReason &&
+          other.reasoning == this.reasoning &&
           other.createdAt == this.createdAt);
 }
 
@@ -2706,6 +2880,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
   final Value<String> content;
   final Value<String?> pendingAction;
   final Value<String?> interruptReason;
+  final Value<String?> reasoning;
   final Value<DateTime> createdAt;
   final Value<int> rowid;
   const AiMessagesCompanion({
@@ -2715,6 +2890,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     this.content = const Value.absent(),
     this.pendingAction = const Value.absent(),
     this.interruptReason = const Value.absent(),
+    this.reasoning = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -2725,6 +2901,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     this.content = const Value.absent(),
     this.pendingAction = const Value.absent(),
     this.interruptReason = const Value.absent(),
+    this.reasoning = const Value.absent(),
     required DateTime createdAt,
     this.rowid = const Value.absent(),
   }) : id = Value(id),
@@ -2738,6 +2915,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     Expression<String>? content,
     Expression<String>? pendingAction,
     Expression<String>? interruptReason,
+    Expression<String>? reasoning,
     Expression<DateTime>? createdAt,
     Expression<int>? rowid,
   }) {
@@ -2748,6 +2926,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
       if (content != null) 'content': content,
       if (pendingAction != null) 'pending_action': pendingAction,
       if (interruptReason != null) 'interrupt_reason': interruptReason,
+      if (reasoning != null) 'reasoning': reasoning,
       if (createdAt != null) 'created_at': createdAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -2760,6 +2939,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     Value<String>? content,
     Value<String?>? pendingAction,
     Value<String?>? interruptReason,
+    Value<String?>? reasoning,
     Value<DateTime>? createdAt,
     Value<int>? rowid,
   }) {
@@ -2770,6 +2950,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
       content: content ?? this.content,
       pendingAction: pendingAction ?? this.pendingAction,
       interruptReason: interruptReason ?? this.interruptReason,
+      reasoning: reasoning ?? this.reasoning,
       createdAt: createdAt ?? this.createdAt,
       rowid: rowid ?? this.rowid,
     );
@@ -2796,6 +2977,9 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
     if (interruptReason.present) {
       map['interrupt_reason'] = Variable<String>(interruptReason.value);
     }
+    if (reasoning.present) {
+      map['reasoning'] = Variable<String>(reasoning.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -2814,6 +2998,7 @@ class AiMessagesCompanion extends UpdateCompanion<AiMessage> {
           ..write('content: $content, ')
           ..write('pendingAction: $pendingAction, ')
           ..write('interruptReason: $interruptReason, ')
+          ..write('reasoning: $reasoning, ')
           ..write('createdAt: $createdAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -5381,6 +5566,7 @@ typedef $$NotesTableCreateCompanionBuilder =
       Value<String> source,
       Value<bool> isInbox,
       Value<bool> pinned,
+      Value<int> sortOrder,
       Value<int> wordCount,
       Value<DateTime?> lastAiAt,
       required DateTime createdAt,
@@ -5398,6 +5584,7 @@ typedef $$NotesTableUpdateCompanionBuilder =
       Value<String> source,
       Value<bool> isInbox,
       Value<bool> pinned,
+      Value<int> sortOrder,
       Value<int> wordCount,
       Value<DateTime?> lastAiAt,
       Value<DateTime> createdAt,
@@ -5504,6 +5691,11 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
 
   ColumnFilters<bool> get pinned => $composableBuilder(
     column: $table.pinned,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -5650,6 +5842,11 @@ class $$NotesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get sortOrder => $composableBuilder(
+    column: $table.sortOrder,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get wordCount => $composableBuilder(
     column: $table.wordCount,
     builder: (column) => ColumnOrderings(column),
@@ -5728,6 +5925,9 @@ class $$NotesTableAnnotationComposer
 
   GeneratedColumn<bool> get pinned =>
       $composableBuilder(column: $table.pinned, builder: (column) => column);
+
+  GeneratedColumn<int> get sortOrder =>
+      $composableBuilder(column: $table.sortOrder, builder: (column) => column);
 
   GeneratedColumn<int> get wordCount =>
       $composableBuilder(column: $table.wordCount, builder: (column) => column);
@@ -5858,6 +6058,7 @@ class $$NotesTableTableManager
                 Value<String> source = const Value.absent(),
                 Value<bool> isInbox = const Value.absent(),
                 Value<bool> pinned = const Value.absent(),
+                Value<int> sortOrder = const Value.absent(),
                 Value<int> wordCount = const Value.absent(),
                 Value<DateTime?> lastAiAt = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
@@ -5873,6 +6074,7 @@ class $$NotesTableTableManager
                 source: source,
                 isInbox: isInbox,
                 pinned: pinned,
+                sortOrder: sortOrder,
                 wordCount: wordCount,
                 lastAiAt: lastAiAt,
                 createdAt: createdAt,
@@ -5890,6 +6092,7 @@ class $$NotesTableTableManager
                 Value<String> source = const Value.absent(),
                 Value<bool> isInbox = const Value.absent(),
                 Value<bool> pinned = const Value.absent(),
+                Value<int> sortOrder = const Value.absent(),
                 Value<int> wordCount = const Value.absent(),
                 Value<DateTime?> lastAiAt = const Value.absent(),
                 required DateTime createdAt,
@@ -5905,6 +6108,7 @@ class $$NotesTableTableManager
                 source: source,
                 isInbox: isInbox,
                 pinned: pinned,
+                sortOrder: sortOrder,
                 wordCount: wordCount,
                 lastAiAt: lastAiAt,
                 createdAt: createdAt,
@@ -6382,6 +6586,7 @@ typedef $$AiConversationsTableCreateCompanionBuilder =
       Value<String> workspaceScope,
       Value<String> thinkingEffort,
       Value<String> title,
+      Value<bool> pinned,
       required DateTime createdAt,
       required DateTime updatedAt,
       Value<int> rowid,
@@ -6392,6 +6597,7 @@ typedef $$AiConversationsTableUpdateCompanionBuilder =
       Value<String> workspaceScope,
       Value<String> thinkingEffort,
       Value<String> title,
+      Value<bool> pinned,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
       Value<int> rowid,
@@ -6451,6 +6657,11 @@ class $$AiConversationsTableFilterComposer
 
   ColumnFilters<String> get title => $composableBuilder(
     column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6519,6 +6730,11 @@ class $$AiConversationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -6554,6 +6770,9 @@ class $$AiConversationsTableAnnotationComposer
 
   GeneratedColumn<String> get title =>
       $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -6621,6 +6840,7 @@ class $$AiConversationsTableTableManager
                 Value<String> workspaceScope = const Value.absent(),
                 Value<String> thinkingEffort = const Value.absent(),
                 Value<String> title = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -6629,6 +6849,7 @@ class $$AiConversationsTableTableManager
                 workspaceScope: workspaceScope,
                 thinkingEffort: thinkingEffort,
                 title: title,
+                pinned: pinned,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -6639,6 +6860,7 @@ class $$AiConversationsTableTableManager
                 Value<String> workspaceScope = const Value.absent(),
                 Value<String> thinkingEffort = const Value.absent(),
                 Value<String> title = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 required DateTime createdAt,
                 required DateTime updatedAt,
                 Value<int> rowid = const Value.absent(),
@@ -6647,6 +6869,7 @@ class $$AiConversationsTableTableManager
                 workspaceScope: workspaceScope,
                 thinkingEffort: thinkingEffort,
                 title: title,
+                pinned: pinned,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -6717,6 +6940,7 @@ typedef $$AiMessagesTableCreateCompanionBuilder =
       Value<String> content,
       Value<String?> pendingAction,
       Value<String?> interruptReason,
+      Value<String?> reasoning,
       required DateTime createdAt,
       Value<int> rowid,
     });
@@ -6728,6 +6952,7 @@ typedef $$AiMessagesTableUpdateCompanionBuilder =
       Value<String> content,
       Value<String?> pendingAction,
       Value<String?> interruptReason,
+      Value<String?> reasoning,
       Value<DateTime> createdAt,
       Value<int> rowid,
     });
@@ -6786,6 +7011,11 @@ class $$AiMessagesTableFilterComposer
 
   ColumnFilters<String> get interruptReason => $composableBuilder(
     column: $table.interruptReason,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get reasoning => $composableBuilder(
+    column: $table.reasoning,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -6852,6 +7082,11 @@ class $$AiMessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get reasoning => $composableBuilder(
+    column: $table.reasoning,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -6908,6 +7143,9 @@ class $$AiMessagesTableAnnotationComposer
     column: $table.interruptReason,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get reasoning =>
+      $composableBuilder(column: $table.reasoning, builder: (column) => column);
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -6970,6 +7208,7 @@ class $$AiMessagesTableTableManager
                 Value<String> content = const Value.absent(),
                 Value<String?> pendingAction = const Value.absent(),
                 Value<String?> interruptReason = const Value.absent(),
+                Value<String?> reasoning = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => AiMessagesCompanion(
@@ -6979,6 +7218,7 @@ class $$AiMessagesTableTableManager
                 content: content,
                 pendingAction: pendingAction,
                 interruptReason: interruptReason,
+                reasoning: reasoning,
                 createdAt: createdAt,
                 rowid: rowid,
               ),
@@ -6990,6 +7230,7 @@ class $$AiMessagesTableTableManager
                 Value<String> content = const Value.absent(),
                 Value<String?> pendingAction = const Value.absent(),
                 Value<String?> interruptReason = const Value.absent(),
+                Value<String?> reasoning = const Value.absent(),
                 required DateTime createdAt,
                 Value<int> rowid = const Value.absent(),
               }) => AiMessagesCompanion.insert(
@@ -6999,6 +7240,7 @@ class $$AiMessagesTableTableManager
                 content: content,
                 pendingAction: pendingAction,
                 interruptReason: interruptReason,
+                reasoning: reasoning,
                 createdAt: createdAt,
                 rowid: rowid,
               ),

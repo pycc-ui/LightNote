@@ -11,7 +11,7 @@ import 'notebook_detail_page.dart';
 import 'note_editor_page.dart';
 import 'search_page.dart';
 import 'widgets/notebook_picker.dart';
-import 'widgets/swipe_to_delete.dart';
+import 'widgets/swipe_actions.dart';
 import 'widgets/section_header.dart';
 
 /// 笔记库页。
@@ -117,74 +117,122 @@ class _LibraryPageState extends State<LibraryPage> {
               }
               final notebookList = folderSnap.data!;
 
-              return ListView(
-                padding: const EdgeInsets.fromLTRB(0, AppSpacing.sm, 0, 96),
-                children: [
-                  const SectionHeader(title: '笔记库'),
-                  if (notebookList.isEmpty)
-                    _EmptyNotebooks(
-                      onCreate: () => _createNotebook(context),
-                    )
-                  else
-                    _NotebookList(
-                      notebooks: notebookList,
-                      onOpen: (f) => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => NotebookDetailPage(notebookId: f.id),
-                        ),
+              // ---- 调整笔记库顺序：这一屏只留库 ----
+              //
+              // 单独一屏而不是"在原来的列表里拖"：原来那个 ListView 里混着
+              // 两个区块（笔记库 + 我的轻笔记）和两个分组标题，拖动会在
+              // "哪些能拖、能拖到哪"上产生一堆边界情况；这里只列库，
+              // 拖动的含义就没有歧义。
+              if (_reordering) {
+                return Column(
+                  children: [
+                    _reorderHint(notebookList.length),
+                    Expanded(
+                      child: ReorderableListView.builder(
+                        padding: const EdgeInsets.only(bottom: 96),
+                        itemCount: notebookList.length,
+                        // `onReorderItem` 给的 newIndex 已经替算好"移除原位置
+                        // 之后"的下标（老 `onReorder` 要自己减一）
+                        onReorderItem: (oldIndex, newIndex) {
+                          final ids = [for (final f in notebookList) f.id];
+                          final moved = ids.removeAt(oldIndex);
+                          ids.insert(newIndex, moved);
+                          context.read<NotebookRepository>().reorder(ids);
+                        },
+                        itemBuilder: (context, i) {
+                          final f = notebookList[i];
+                          return ListTile(
+                            key: ValueKey('reorder-${f.id}'),
+                            leading: const Icon(Icons.library_books_outlined),
+                            title: Text(f.name),
+                            trailing: ReorderableDragStartListener(
+                              index: i,
+                              child: const Icon(Icons.drag_handle),
+                            ),
+                            // 这个模式下点一下不该跳进去（那会很突兀），
+                            // 手柄才是唯一作用点
+                            onTap: () {},
+                          );
+                        },
                       ),
-                      onDelete: (f) => _deleteNotebook(context, f),
                     ),
-                  const SizedBox(height: AppSpacing.sm),
-                  const SectionHeader(title: '我的轻笔记'),
-                  if (unfiled.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: AppSpacing.md,
-                        vertical: AppSpacing.lg,
-                      ),
-                      child: Text(
-                        '还没有轻笔记。\n'
-                        '点右下角 + 「新建笔记」随手记一句，'
-                        '之后再归档到上面的笔记库。',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          height: 1.6,
+                  ],
+                );
+              }
+
+              return SwipeActionsScope(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(0, AppSpacing.sm, 0, 96),
+                  children: [
+                    const SectionHeader(title: '笔记库'),
+                    if (notebookList.isEmpty)
+                      _EmptyNotebooks(
+                        onCreate: () => _createNotebook(context),
+                      )
+                    else
+                      _NotebookList(
+                        notebooks: notebookList,
+                        onOpen: (f) => Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => NotebookDetailPage(notebookId: f.id),
+                          ),
                         ),
+                        onDelete: (f) => _deleteNotebook(context, f),
                       ),
-                    )
-                  else
-                    for (final n in unfiled)
-                      SwipeToDelete(
-                        itemKey: ValueKey(n.id),
-                        onDelete: () => _deleteNote(context, n),
-                        child: NoteListTile(
-                          note: n,
-                          showNotebookHint: false,
-                          selectable: _selecting,
-                          selected: _selected.contains(n.id),
-                          onTap: () {
-                            if (_selecting) {
-                              _toggle(n.id);
-                              return;
-                            }
-                            Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => NoteEditorPage(
-                                  noteId: n.id,
-                                  startInReading: true,
+                    const SizedBox(height: AppSpacing.sm),
+                    const SectionHeader(title: '我的轻笔记'),
+                    if (unfiled.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.md,
+                          vertical: AppSpacing.lg,
+                        ),
+                        child: Text(
+                          '还没有轻笔记。\n'
+                          '点右下角 + 「新建笔记」随手记一句，'
+                          '之后再归档到上面的笔记库。',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                            height: 1.6,
+                          ),
+                        ),
+                      )
+                    else
+                      for (final n in unfiled)
+                        SwipeActions(
+                          itemKey: ValueKey(n.id),
+                          pinned: n.pinned,
+                          onTogglePin: () =>
+                            _togglePin(context, n, [for (final x in unfiled) x.id]),
+                          onDelete: () => _deleteNote(context, n),
+                          child: NoteListTile(
+                            note: n,
+                            showNotebookHint: false,
+                            selectable: _selecting,
+                            selected: _selected.contains(n.id),
+                            onTap: () {
+                              if (_selecting) {
+                                _toggle(n.id);
+                                return;
+                              }
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => NoteEditorPage(
+                                    noteId: n.id,
+                                    startInReading: true,
+                                  ),
                                 ),
-                              ),
-                            );
-                          },
-                          // 多选时长按也切换选中，而不是弹菜单——
-                          // 否则用户会以为长按能退出多选
-                          onLongPress: _selecting
-                              ? () => _toggle(n.id)
-                              : () => _noteActions(context, n),
+                              );
+                            },
+                            // 多选时长按也切换选中，而不是弹菜单——
+                            // 否则用户会以为长按能退出多选
+                            onLongPress: _selecting
+                                ? () => _toggle(n.id)
+                                : () => _noteActions(context, n),
+                          ),
                         ),
-                      ),
-                ],
+                  ],
+                ),
               );
             },
           );
@@ -197,6 +245,22 @@ class _LibraryPageState extends State<LibraryPage> {
   ///
   /// 「记忆卡片复习」的入口已随功能一起移除；AI 助手的入口移到了右下角
   /// 那两个 FAB（见 build）。
+  /// 正在调整**笔记库本身**的顺序。
+  ///
+  /// 只管库，不管「我的轻笔记」—— 那个列表是消费流，按你说的不做手动顺序。
+  /// 进这个模式时页面上只留库列表，别的东西一概不显示，免得看不明白在排谁。
+  bool _reordering = false;
+
+  void _enterReordering() {
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+      _reordering = true;
+    });
+  }
+
+  void _exitReordering() => setState(() => _reordering = false);
+
   PreferredSizeWidget _normalAppBar(BuildContext context) {
     return AppBar(
       title: const Text('笔记库'),
@@ -212,9 +276,22 @@ class _LibraryPageState extends State<LibraryPage> {
         PopupMenuButton<String>(
           tooltip: '更多',
           onSelected: (v) {
-            if (v == 'select') _enterSelecting();
+            if (v == 'select') {
+              _enterSelecting();
+            } else if (v == 'reorder') {
+              _enterReordering();
+            }
           },
           itemBuilder: (_) => const [
+            PopupMenuItem(
+              value: 'reorder',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.swap_vert),
+                title: Text('调整笔记库顺序'),
+              ),
+            ),
             PopupMenuItem(
               value: 'select',
               child: ListTile(
@@ -227,6 +304,29 @@ class _LibraryPageState extends State<LibraryPage> {
           ],
         ),
       ],
+    );
+  }
+
+  /// 调整顺序模式顶部那条说明（和笔记库详情页里那条一个形状）。
+  Widget _reorderHint(int count) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+            AppSpacing.md, AppSpacing.xs, AppSpacing.xs, AppSpacing.xs),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '拖动右边的 ≡ 调整笔记库顺序（共 $count 个）',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+            TextButton(onPressed: _exitReordering, child: const Text('完成')),
+          ],
+        ),
+      ),
     );
   }
 
@@ -365,6 +465,29 @@ class _LibraryPageState extends State<LibraryPage> {
   ///
   /// 用**乐观删除 + 撤销**而不是二次确认：左滑手势本身已经是明确的意图
   /// 表达，再弹对话框是多余的一步；给撤销既快又不怕手滑。
+  /// 置顶 / 取消置顶。
+  ///
+  /// **置顶 = 挪到最前 + 打个标记**；取消置顶只清标记、**位置不动**。
+  /// 详见 `notebook_detail_page.dart` 里同名方法的说明。
+  Future<void> _togglePin(
+    BuildContext context,
+    Note note,
+    List<String> order,
+  ) async {
+    final repo = context.read<NoteRepository>();
+    final title = note.title.trim().isEmpty ? '无标题' : note.title.trim();
+    if (note.pinned) {
+      await repo.setPinned(note.id, false);
+      if (!context.mounted) return;
+      LogBar.success(context, '已取消置顶「$title」');
+      return;
+    }
+    await repo.setPinned(note.id, true);
+    await repo.moveToFront(order, note.id);
+    if (!context.mounted) return;
+    LogBar.success(context, '已置顶「$title」');
+  }
+
   Future<void> _deleteNote(BuildContext context, Note note) async {
     final repo = context.read<NoteRepository>();
     await repo.softDelete(note.id);
