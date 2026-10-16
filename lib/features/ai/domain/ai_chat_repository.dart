@@ -150,6 +150,10 @@ class AiChatRepository {
   ///
   /// 和"后台被动终止"（进程被杀，下次冷启动才从 `in_flight` 残留看出来）
   /// 是**两条不同的路径**，但界面上收敛成同一种呈现 —— 见 [isStopLike]。
+  /// ⚠️ 有一个**很小的时间窗**停不掉：用户点完「发送」、第一轮的令牌还没建
+  /// 出来之前（那之前要先落两条消息、拼历史，几十到两百毫秒）。那一下点了
+  /// 等于没点，但按钮仍然是「停止」（`isRunning` 已经是 true），再点一次就行 ——
+  /// 不值得为它加一套"待取消"的排队机制。
   void stop(String conversationId) {
     _cancelTokens.remove(conversationId)?.cancel('用户点了停止');
   }
@@ -473,7 +477,7 @@ class AiChatRepository {
   /// 新一轮对话是替换，回答挂起后继续是接在后面。
   ///
   /// system prompt 由这里按轮**重拼**（[rebuildPrompt]）：AI 这一轮调
-  /// `mark_functions` 之后，下一轮就能看到刚加载的函数详情。
+  /// 现在它只负责把「更早历史的摘要」拼进去（摘要懒生成、生成完要立刻生效）。
   /// [summary] 是"更早历史"的背景摘要（见 [_olderHistorySummary]）。
   /// 给"这条用户消息"做一次前置检索，返回**要塞进请求的用户消息文本**。
   ///
@@ -1028,6 +1032,11 @@ class AiChatRepository {
   /// 文案跟着它们走，才不会出现"加了一个码、界面显示『没写完』"。
   ///
   /// 认不出来就笼统说"没写完" —— 宁可含糊，也别编一个原因。
+  ///
+  /// ⚠️ 前四个码（`cancelled` / `in_flight` / `rounds` / `interrupted`）现在
+  /// **走不到这张表**：它们被 [isStopLike] 归成"被停下来"，界面直接显示
+  /// 「已停止」、不解释原因。留着是为了让映射表本身完整（别处若直接调
+  /// [interruptLabel]，拿到的仍是一句人话，而不是 null）。
   static String interruptLabel(String? code) => switch (code) {
         'network' => '网络断开',
         'timeout' => '等待超时',

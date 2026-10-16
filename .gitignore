@@ -31,6 +31,10 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+
+# /build/ 只匹配仓库**根目录**的那个 —— Gradle 在 android/ 下也会生成一个
+# （里面有 reports/problems 这类 HTML），不写这条就会被 git add -A 顺手带进版本库。
+android/build/
 /coverage/
 
 # Symbolication related

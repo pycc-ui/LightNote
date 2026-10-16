@@ -288,10 +288,17 @@ class NoteRetriever {
   ///     里 5 条都会走到这里）。
   ///
   /// 索引还没建好时也返回 null：那时候能召回的只是"索引里仅有的几篇"，
-  /// 不是"最相关的几篇"，亮给 AI 反而是误导（见 [isUsable]）。
+  /// 不是"最相关的几篇"，亮给 AI 反而是误导（判据见 [RagIndexer.isIndexThin]）。
   Future<String?> autoInjectBlock(String query) async {
     final q = query.trim();
     if (q.isEmpty) return null;
+
+    // ⚠️ 先判"索引是不是太空"。这一步以前只是写在注释里、**没有真的接上**
+    //（`isIndexThin` 当时没有任何调用方）：索引刚建、只覆盖了寥寥几篇的时候，
+    // 检索出来的不是"最相关的几篇"，而是"索引里仅有的几篇" —— 塞给模型
+    // 反而是误导（它会以为这就是全部线索）。索引不全时的正确行为是**什么都不给**，
+    // 让模型照常去调 search_notes / outline_notes。
+    if (await _indexer.isIndexThin()) return null;
 
     final hits = await byVector(q);
     if (hits.isEmpty) return null;
@@ -346,19 +353,9 @@ class NoteRetriever {
     return out;
   }
 
-  /// 补一批索引（检索前发现索引太空时调）。返回补了几片。
-  Future<int> warmUp({int budgetChunks = RagLimits.indexChunksPerRun}) =>
-      _indexer.indexMissing(budgetChunks: budgetChunks);
-
   // ==========================================================================
   // 内部
   // ==========================================================================
-
-  /// 这一趟搜索的"信任度"够不够（索引太空或一条都没召回时为假）。
-  ///
-  /// 调用方可以据此**决定要不要把结果亮给 AI** —— 索引还没建好的时候硬塞几条
-  /// 反而误导（那不是"最相关的"，只是"索引里仅有的"）。
-  Future<bool> isUsable() async => !(await _indexer.isIndexThin());
 
   static double _rrf(int rank) => 1.0 / (RagLimits.rrfK + rank + 1);
 

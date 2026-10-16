@@ -229,8 +229,10 @@ enum AskType {
     return null;
   }
 
-  /// 这个类型是不是必须要有选项。
-  bool get needsOptions => this == singleChoice || this == multipleChoice;
+  // 这里原本有一个 `needsOptions`（判断"这个类型是不是必须有选项"）。
+  // 删掉的理由有两层：一是全项目**没有任何调用方**；二是它**语义上已经失效**——
+  // 选择题现在不"必须有选项"了：选项为空时界面会直接让用户自己写一句
+  //（见 `agent_dialogs.dart` 的 `widget.options.isEmpty` 分支）。
 }
 
 /// 一个选项。
@@ -322,9 +324,16 @@ class AskResult {
   final String status;
 
   /// 选择题的答案（单选也放这里，只有一个元素）。
+  ///
+  /// **只放选项 id**，不放用户自己写的那句话 —— 混在一起会让模型把
+  /// 一句话当成一个 id 去用。
   final List<String> selections;
 
-  /// 输入题的答案。
+  /// 输入题的答案；选择题里表示**用户自己写的那句**。
+  ///
+  /// ⚠️ 两种题都可能出现这个字段，别只当成"输入题的答案"：
+  /// 用户可能看不上任何一条选项，自己写了一句 —— 那句话才是他的真实意图。
+  /// 所以模型侧要**以 text 为准**（见 `tool_specs.dart` 里 `askUser` 的工具说明）。
   final String? text;
 
   /// 确认题的答案。
@@ -334,8 +343,15 @@ class AskResult {
   static const statusCancelled = 'cancelled';
 
   /// 用户答了（选择题）。
-  factory AskResult.choice(List<String> ids) =>
-      AskResult(status: statusAnswered, selections: List.unmodifiable(ids));
+  ///
+  /// [typed] 是**用户自己写的那句**（可能没有，也可能和选项同时有 ——
+  /// 多选时允许"选两条 + 自己再补一条"）。单选界面做了互斥，所以单选不会
+  /// 两者都有，但**模型侧不要依赖这一点**，两种情况都要能处理。
+  factory AskResult.choice(List<String> ids, {String? typed}) => AskResult(
+        status: statusAnswered,
+        selections: List.unmodifiable(ids),
+        text: typed,
+      );
 
   /// 用户答了（输入题）。
   ///

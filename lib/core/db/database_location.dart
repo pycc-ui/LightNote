@@ -52,6 +52,16 @@ const kDatabaseFileName = 'lightnote.sqlite';
 ///   14 ai_messages 新增 interrupt_reason（这条回答为什么没写完：网络断了 /
 ///      被系统杀了 / 轮数用尽……）。内容本来就一直在落库，这一列只回答
 ///      "写完了没有"，界面据此显示「未完成 + 继续」。
+///   15 新增 note_vectors（笔记切片的向量，语义检索用）。**只建空表**、
+///      不做回填：向量由 `RagIndexSchedule` 在启动/进 AI 页/保存笔记之后
+///      慢慢补（74ms/片的纯 CPU，回填会卡住升级那一刻）。
+///   16 ai_messages 新增 reasoning（AI 的思维链，给用户看的折叠块）。
+///      **它不进正文也不进历史** —— 拼进 content 就会被当成历史重发，
+///      每一轮白烧一遍 token（思维链往往比正文还长）。
+///   17 notes 新增 sort_order（手动拖出来的顺序）。`0 = 没排过`，
+///      老库升级后全是 0 → 顺序和升级前一模一样。
+///   18 ai_conversations 新增 pinned（会话置顶）。注意它和笔记的置顶
+///      **不是一回事**：会话没有手动顺序，所以这里的置顶就是"钉在最上面"。
 const kCurrentSchemaVersion = 18;
 
 /// App 私有目录下的子目录名。

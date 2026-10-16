@@ -52,12 +52,19 @@ class RagIndexSchedule {
   /// 有没有人要求"补一批老笔记"。
   bool _backfillWanted = false;
 
+  /// 有没有人要求"清一批死向量"。
+  bool _housekeepingWanted = false;
+
   /// 当前那一轮循环（非空 = 正在跑）。
   Future<void>? _running;
 
   /// 这一轮已经补了几片（给测试断言"确实干活了"用）。
   int _indexedThisRun = 0;
   int get indexedThisRun => _indexedThisRun;
+
+  /// 这一轮清掉了几行死向量。
+  int _prunedThisRun = 0;
+  int get prunedThisRun => _prunedThisRun;
 
   /// 已经报过错的种类（同一类只报一次，免得每篇笔记刷一条）。
   final _reported = <String>{};
@@ -81,6 +88,17 @@ class RagIndexSchedule {
   /// 补一批还缺向量的老笔记（启动、进 AI 页时调，**不 await**）。
   void kickBackfill() {
     _backfillWanted = true;
+    _pump();
+  }
+
+  /// 顺手清一批**死向量**（笔记改过 / 模型换过 / 笔记已软删）。
+  ///
+  /// 为什么只在启动时清、且不清干净：死行**不影响任何检索结果**
+  ///（`validVectors` 的 JOIN 就把它们过滤掉了），留着只是占地方。
+  /// 每次启动清一批（默认 500 行），跑几天自然就干净了 ——
+  /// 为这点空间加定时器、加后台任务不值得。
+  void kickHousekeeping() {
+    _housekeepingWanted = true;
     _pump();
   }
 
@@ -125,6 +143,16 @@ class RagIndexSchedule {
         } catch (e) {
           // 同上：补索引是尽力而为
           _reportOnce('批量补索引失败', e);
+        }
+      }
+
+      // ---- ③ 清死向量（放在最后：它最不重要，前面没干完就先不干）----
+      if (_housekeepingWanted) {
+        _housekeepingWanted = false;
+        try {
+          _prunedThisRun = await _indexer.pruneStale();
+        } catch (e) {
+          _reportOnce('清理死向量失败', e);
         }
       }
     } finally {

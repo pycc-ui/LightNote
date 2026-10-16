@@ -1,4 +1,4 @@
-// AI 的 SQL 通道：安全校验（SqlGuard）与 26 个 UDF 的行为。
+// AI 的 SQL 通道：安全校验（SqlGuard）与 25 个 UDF 的行为。
 //
 // 分两块测，因为它们的失败方式完全不同：
 //   · SqlGuard 是**纯逻辑**，不连库，逐条喂样例就行；
@@ -133,8 +133,8 @@ void main() {
         // 写函数可以独立调用（参数里点名改哪几篇）
         "SELECT update_notes_batch('[{\"id\":\"n1\"}]')",
         // **读**函数可以嵌在带 FROM 的查询里 —— 这正是推荐写法
-        'SELECT id, read_preview(id, 0, 200) AS p FROM notes WHERE deleted_at IS NULL',
         'SELECT n.id, read_note_batch(n.id, 0, 4) AS head FROM notes n',
+        'SELECT id, outline_notes(id) AS o FROM notes WHERE deleted_at IS NULL',
         // 参数（字符串字面量）里出现 from / join 是正常正文，剥掉字面量后不该命中
         "SELECT update_notes_batch('[{\"id\":\"n1\",\"title\":\"from join 测试\"}]')",
         'WITH x AS (SELECT 1 AS a) SELECT * FROM x',

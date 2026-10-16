@@ -33,6 +33,9 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
   void _enterSelecting() => setState(() {
         _selecting = true;
         _selected.clear();
+        // 两个模式**互斥**：多选时点一下是"选中"，调整顺序时点一下什么都不做
+        //（只有手柄能拖）。同时开着就会出现"点一下既没选上也没拖动"的怪状态。
+        _reordering = false;
       });
 
   void _exitSelecting() => setState(() {
@@ -343,8 +346,9 @@ class _FolderDetailPageState extends State<NotebookDetailPage> {
                 final n = list[i];
                 return SwipeActions(
                   itemKey: ValueKey(n.id),
-                  // 置顶：字段（`notes.pinned`）和排序（`pinned DESC, updated_at DESC`）
-                  // 一直都是现成的，只是一直没有入口 —— 这是第一个。
+                  // 置顶：`pinned` 字段一直都有，但从来没有入口 —— 这是第一个。
+                  // 它的语义是"**挪到最前一次** + 打个图钉"（不是"钉住压过别人"），
+                  // 实现见 `_togglePin`。
                   pinned: n.pinned,
                   onTogglePin: () =>
                     _togglePin(n, [for (final x in list) x.id]),

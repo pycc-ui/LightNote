@@ -1209,11 +1209,15 @@ class _TaskBarState extends State<_TaskBar> {
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
-                  Text(
-                    '第 ${p.round + 1}/${p.budget} 轮',
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                  ),
+                  // 预算为 0 = 已经登记"在跑"、但第一轮的 `AgentRoundStarted`
+                  // 还没到（那几十毫秒里 `budget` 是初始值 0）。
+                  // 不判一下就会闪一下「第 1/0 轮」这种明显不对的东西。
+                  if (p.budget > 0)
+                    Text(
+                      '第 ${p.round + 1}/${p.budget} 轮',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
                   if (hasSteps)
                     Icon(
                       _expanded ? Icons.expand_less : Icons.expand_more,

@@ -63,8 +63,12 @@ class _AskSheetState extends State<_AskSheet> {
   bool get _canSubmit {
     final t = widget.request.type;
     if (t == AskType.text) return _text.text.trim().isNotEmpty;
-    if (t == AskType.singleChoice) return _picked.length == 1;
-    if (t == AskType.multipleChoice) return _picked.isNotEmpty;
+    // ⚠️ 选择题里「自己写的那句」**也算答案**。以前只认选项，导致用户看不上
+    // 任何一条、心里有别的想法时，唯一的出路是「取消」—— 而取消在语义上是
+    // **拒绝**，模型会当成"他不做这件事"，那是两回事。
+    final typed = _text.text.trim().isNotEmpty;
+    if (t == AskType.singleChoice) return _picked.length == 1 || typed;
+    if (t == AskType.multipleChoice) return _picked.isNotEmpty || typed;
     return true; // confirm：两个按钮各自直接提交
   }
 
@@ -75,7 +79,11 @@ class _AskSheetState extends State<_AskSheet> {
         _finish(AskResult.input(_text.text.trim()));
       case AskType.singleChoice:
       case AskType.multipleChoice:
-        _finish(AskResult.choice(_picked.toList()));
+        final typed = _text.text.trim();
+        _finish(AskResult.choice(
+          _picked.toList(),
+          typed: typed.isEmpty ? null : typed,
+        ));
       case AskType.confirm:
         _finish(AskResult.confirm(true));
     }
@@ -154,19 +162,53 @@ class _AskSheetState extends State<_AskSheet> {
 
       case AskType.singleChoice:
       case AskType.multipleChoice:
-        if (widget.options.isEmpty) {
-          // 没选项时**不能**显示一个空列表让用户干瞪眼
-          return Text(
-            '没有找到可选项。可以取消，然后用一句话告诉我该怎么做。',
-            style: theme.textTheme.bodySmall
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          );
-        }
-        return ListView(
-          shrinkWrap: true,
+        final multi = req.type == AskType.multipleChoice;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            for (final o in widget.options)
-              _optionTile(theme, o, multi: req.type == AskType.multipleChoice),
+            if (widget.options.isEmpty)
+              // 没选项时**不能**显示一个空列表让用户干瞪眼 —— 直接让他写，
+              // 输入框就在下面（以前这里写的是"可以取消，然后用一句话告诉我"，
+              // 那等于逼用户先取消一次，而取消在语义上是**拒绝**）
+              Text(
+                '没有找到可选项。直接在下面写一句告诉我该怎么做。',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              )
+            else
+              // 选项区可滚（多了不至于把弹层撑爆），输入框固定在下面
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final o in widget.options)
+                      _optionTile(theme, o, multi: multi),
+                  ],
+                ),
+              ),
+            const SizedBox(height: AppSpacing.sm),
+            TextField(
+              controller: _text,
+              minLines: 1,
+              maxLines: 3,
+              decoration: InputDecoration(
+                isDense: true,
+                border: const OutlineInputBorder(),
+                hintText: multi
+                    ? '也可以自己写（一行一条）…'
+                    : '也可以不选，直接写你的答案…',
+              ),
+              // 单选：**文字与选项互斥**。单选的语义就是"一个答案"，
+              // 两个同时存在会让模型猜哪个才算数；互斥之后"确定"提交的
+              // 必然只有一种。
+              onChanged: (v) => setState(() {
+                if (!multi && v.trim().isNotEmpty) _picked.clear();
+              }),
+              onSubmitted: (_) {
+                if (_canSubmit) _submit();
+              },
+            ),
           ],
         );
 
@@ -185,6 +227,9 @@ class _AskSheetState extends State<_AskSheet> {
           _picked
             ..clear()
             ..add(o.id);
+          // 单选互斥的另一半：选了选项就把刚写的那句清掉
+          //（不清的话两者会一起提交上去，模型得猜哪个算）
+          _text.clear();
         }
       }),
       child: Padding(

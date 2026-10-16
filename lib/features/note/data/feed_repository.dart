@@ -31,7 +31,9 @@ const kFeedPullSize = FeedLimits.pullSize;
 
 /// 后台常备几张。低于这个数就在**下拉取完后**补（首屏不补，见 [takeBatch]）。
 ///
-/// 取 8 ≈ 4 屏余量：够用户连刷几次不用等生成。
+/// 取 3（= 一屏）：够"下拉一次立刻有东西出来"，再多就是白花钱 ——
+/// 池子里的卡片是**预先花钱生成好的**，用户没刷到就是纯损耗。
+/// 首屏本来就是当场生成一屏（见 [warmUpIfNeeded]），池子只负责下拉时接上。
 /// 注意它是**目标**不是下限——每次 refill 只补一批（≤ [kGenParallelism] 张），
 /// 所以池子是随着用户下拉逐步涨到这个数的。
 const kFeedPoolTarget = FeedLimits.poolTarget;
@@ -42,8 +44,9 @@ const kFeedPoolTarget = FeedLimits.poolTarget;
 /// 单路生成 1 张 ≈ 3.3s；把 N 张拆成 N 个并行单卡请求，N=5 时约 4.4s
 /// （远快于"一个请求里要 N 张"）。所以"多路并行单卡"是补池提速的关键。
 ///
-/// 取 4（3 路补池 + 1 路余量给预留/收尾）：手机上并发请求是 I/O 等待、不占 CPU，
-/// 4 路很轻；再多的收益递减，而且输入 token 会按路数重复（每路都重发一份系统提示词）。
+/// 取 3（= 一屏的张数）：手机上并发请求是 I/O 等待、不占 CPU，3 路很轻；
+/// 每多一路，输入 token 就多重复一份系统提示词（那是每张卡片成本的大头），
+/// 所以**并发的上限由"一次要几张"决定，而不是由手机扛不扛得住决定**。
 const kGenParallelism = FeedLimits.genParallelism;
 
 /// **来源冷却窗口**：最近这么多张卡片里，同一篇笔记最多出现 1 次。
@@ -60,16 +63,17 @@ const kRecentNoteKeep = FeedLimits.recentNoteKeep;
 /// 一次要取好几份素材，笔记少的时候一篇 10 块等于每批用掉一大半，两批之间必然
 /// 大量重叠，所以必须记。
 ///
-/// 取 60：笔记多的时候这层记忆自然不起作用（每篇都还有没用过的块），
-/// 只在笔记少、块被反复取的时候才兜住。
+/// 取 30：笔记多的时候这层记忆自然不起作用（每篇都还有没用过的块），
+/// 只在笔记少、块被反复取的时候才兜住。留太长没有额外收益，
+/// 而这个集合每轮都要拼进 prompt 的「别重复」那一段，长了是白花 token。
 ///
 /// 只记内存、只记键（不存块内容，省内存）：键撞了最多是少用一个块，无害。
 const kRecentChunkKeep = FeedLimits.recentChunkKeep;
 
 /// **标题记忆窗口**：最近这么多张卡片的标题算「已经生成过」。
 ///
-/// 取 40：够覆盖池子（[kFeedPoolTarget] = 15）+ 预留（6）+ 刚看过的，
-/// 又不至于让 prompt 里那串「别重复」清单太长。
+/// 取 10：够覆盖"池子（[kFeedPoolTarget] = 3）+ 刚看过的几张 + 一点余量"，
+/// 又不至于让 prompt 里那串「别重复」清单太长（它每轮都要重发）。
 const kRecentTitleKeep = FeedLimits.recentTitleKeep;
 
 // ---- app_kv 表的 key ----
@@ -151,7 +155,7 @@ class FeedRepository {
   final AppDatabase _db;
   final AiRepository _ai;
 
-  /// 笔记切片：素材取自片内的 400 字窗口。
+  /// 笔记切片：素材取自片内的**一小段窗口**（大小见 `FeedWindow.chars`）。
   ///
   /// 懒回填与自愈都在它那里 —— 老库升上来的笔记第一次被卡片流碰到时
   /// 才会现切一遍，调用方不用管。
@@ -175,7 +179,7 @@ class FeedRepository {
 
   /// **切片记忆**：最近用过的切片（存 `noteId:idx`，最新的在前）。
   ///
-  /// ⚠️ 键是 `noteId:idx` 而**不是片正文的 hash**：素材改成"片内的 400 字
+  /// ⚠️ 键是 `noteId:idx` 而**不是片正文的 hash**：素材改成"片内的一小段
   /// 窗口"之后，同一片每次取出的文字都不一样，按 text hash 去重等于完全失效。
   ///
   /// 这一份只是**一次会话内的快速过滤**；真正的保证是落库的
@@ -278,7 +282,8 @@ class FeedRepository {
 
   /// 按来源配置取素材：**每条笔记给「一块片内窗口的原文」**。
   ///
-  /// 素材就是一小段**截断的原文**（片内的 400 字窗口），没有摘要。它是原文、不失真；
+  /// 素材就是一小段**截断的原文**（片内的一段窗口，大小见 `FeedWindow.chars`），
+  /// 没有摘要。它是原文、不失真；
   /// 具体数字、具体说法、具体例子都在这段里，卡片就不会"大而空"。
   ///
   /// 切片不存库、用过的块也不记：
@@ -386,7 +391,7 @@ class FeedRepository {
         progressed = true;
 
         final chunk = cs[i];
-        // 从片里开一个 400 字的窗口（片 ≤400 就是整片）
+        // 从片里开一个窗口（片比窗口短就是整片）；大小见 `FeedWindow.chars`
         final starts = FeedWindow.starts(chunk.charCount);
         // 轮换位存的是"下次该用哪个起点"；候选变了（正文改过）就回到第一个
         final start = starts.contains(chunk.nextWindowStart)
@@ -416,7 +421,7 @@ class FeedRepository {
 
   /// 记下这个切片刚被用过（最新的排最前）。
   ///
-  /// 键是 `noteId:idx`，不是片正文的 hash —— 素材现在是片内的 400 字窗口，
+  /// 键是 `noteId:idx`，不是片正文的 hash —— 素材现在是片内的一小段窗口，
   /// 同一片每次取出的文字都不同，按 text hash 记等于没记。
   void _rememberChunk(String key) {
     _recentChunks.insert(0, key);

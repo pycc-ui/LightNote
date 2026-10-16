@@ -79,6 +79,7 @@
   "stream": true,
   "thinking": {"type": "enabled"},
   "reasoning_effort": "medium",
+  "max_tokens": 16384,
   "tools": [{"type": "function", "function": {"name": "…", "description": "…", "parameters": {"type": "object", "properties": {}}}}],
   "tool_choice": "auto"
 }
@@ -98,7 +99,7 @@
 | `thinking` | 永远显式带上 `enabled` / `disabled`，从不省略。原因见第 2 节坑 1 |
 | `reasoning_effort` | 只在 `thinking: enabled` 时带（默认 `high`；AI 页实际传 `medium` / `high`） |
 | `temperature` | 只在 `thinking: disabled` 且调用方显式传了才带。思考模式下传了不报错也不生效，所以代码干脆不传，避免误导后来者 |
-| `max_tokens` | 实际用到：卡片生成 `2048`（`AiLimits.feedMaxOutputTokens`，从 16384 收下来防跑飞）、连通性自检 `64`、`completeJson` 默认 `4096`；`streamAgent` 不传（留给模型默认） |
+| `max_tokens` | 实际用到：卡片生成 `2048`（`AiLimits.feedMaxOutputTokens`，从 16384 收下来防跑飞）、连通性自检 `64`、`completeJson` 默认 `4096`；`streamAgent` 固定 `AgentLimits.maxOutputTokens = 16384`（**必须显式设**：不设就走服务端默认 4096，模型想写一篇长笔记会被硬切断，而切断的表现是 JSON 不完整 → 解析失败 → 整轮白跑；真要写 50KB 的长文改成**分节**，每轮只写一节） |
 
 `response_format` 用的是官方 JSON Output，官方要求 prompt 里出现 "json" 字样并给出输出样例——
 `prompts.dart` 顶部把这条和「前缀稳定」一起写成两条硬性约束。
@@ -121,8 +122,13 @@
 8. 结束产出 `AiDone`：`fullText`、`promptTokens`、`completionTokens`、`costCents`、`latencyMs`、`toolCalls`。
 
 事件类型（UI 消费的就是这几个）：`AiChunk`（增量正文）、`AiReasoning`（思维链）、`AiDone`、`AiError`。
-AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished` / `AgentAwaitingUser` /
-`AgentFailed` / `AgentToolStarted` / `AgentToolDone`（思维链在 agent 路径被丢弃、不展示）。
+AI 助手页拿到的再上一层是 `AgentEvent`（`agent_loop.dart`）：`AgentText`（增量正文）、
+`AgentThinking`（增量思维链）、`AgentRoundStarted(used, budget)`（任务栏显示「第 N/M 轮」用，
+`used` 跨挂起累计）、`AgentToolStarted(name, arguments)`（**带模型给的参数 JSON 原文**，
+界面靠它把「又在做 `sql`」翻成人话，见 4.7）、`AgentToolDone`、`AgentAwaitingUser`、
+`AgentFinished`、`AgentFailed(message, code)`。
+思维链在 agent 路径**不再被丢掉**（以前那里是一个 `break;`，用户只看到转圈）：它只往上抛、
+**不进正文也不进历史**——`ai_messages.content` 与下一轮 `messages` 里都没有它（见 3.2（1））。
 
 三个容易写错的边界：
 
@@ -146,9 +152,11 @@ AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished
  "function": {"name": "sql", "description": "在用户的笔记数据库上执行一条 SQL……", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
 ```
 
-`description` 是写给模型看的：写「什么时候用它」，不是「它是干什么的」。**有哪些函数**不在 schema 里，
-而在库里的 `ai_functions` 表：AI 自己 `SELECT * FROM ai_functions` 查一次 —— 于是加一个函数
-= INSERT 一行，工具定义与 system prompt 都不用改。完整设计见 [AI操作数据库设计](AI操作数据库设计.md)。
+`description` 是写给模型看的：写「什么时候用它」，不是「它是干什么的」。**有哪些函数**也不写进 schema
+（工具定义的每轮固定开销只跟工具数量与描述长度有关）：它们由 `kAiFunctions` 清单**程序化生成**成 system
+prompt 里「可用的扩展函数」那一段、**全量常驻** —— 于是加一个函数 = 清单里加一条 + 注册一次，工具定义
+一个字都不用改（prompt 是自动跟着变的）。同一份清单还落库成 `ai_functions` 表（种子数据、按版本号对齐），
+AI 不必再去查它。完整设计见 [AI操作数据库设计](AI操作数据库设计.md)。
 
 **流式回来的 `tool_calls` 是分片的**（同一 `index` 可能来多块，后面几块只有 `arguments`）：
 
@@ -170,10 +178,17 @@ AI 助手页拿到的再上一层是 `AgentEvent`：`AgentText` / `AgentFinished
 失败也是「结果」，模型据此换方案，而不是让整轮请求崩掉。
 
 **循环**（`AgentLoop.run`，`maxRounds = 15`）：提工具 → 执行 → 回灌 → 再发一轮，直到模型不再提工具。
-三条终止条件缺一个都会挂死：没提工具（正常结束）、`askUser`（挂起等用户，对话存进数据库，重启后可续）、
-轮数预算（防「每次都提一段必然失败的调用」导致无限烧钱；15 不是"鼓励跑满"，而是让「读 → 改 → 复查」
-这种多步任务不必被硬切断）。SQL 的初衷就是**一条语句干完一批事**，多数任务 1~3 轮就够。工具的中间往来
-不落库。
+**四条终止条件**缺一个都会挂死：`finish(...)`（模型**声明完成**，当场收尾、连回灌都不做——它是「边写结论边调」
+的，按普通工具回灌的话每个任务都要多跑一轮请求）、没提工具（正常结束）、`askUser`（挂起等用户，对话存进
+数据库，重启后可续）、轮数预算（防「每次都提一段必然失败的调用」导致无限烧钱；15 不是"鼓励跑满"，
+而是让「读 → 改 → 复查」这种多步任务不必被硬切断）。SQL 的初衷就是**一条语句干完一批事**，多数任务
+1~3 轮就够。工具的中间往来不落库。
+
+> 轮数预算那条还有两个细节：**快到上限时会挂一条提醒**（挂在消息列表**末尾**，不是 system 头，
+> 见 4.7），而**工具结果超预算会被折叠成一行指针**（`AgentLimits.materialBudgetChars = 30000`，
+> 从**最旧**的开始折，折成「⟪已折叠：…（需要时用 X 取回）⟫」）——折成指针而不是墓碑，是为了让模型
+> 知道自己读过什么、怎么取回来，而不是盲目重查。写函数与 `finish` 的结果一律折成一行（正文已经进了
+> 消息末尾的「本轮执行」那段），**失败结果永不折叠**（报错是它纠正自己的唯一依据）。
 
 ---
 
@@ -257,23 +272,47 @@ uncached = promptTokens - cached
 | 单条历史截断 500 字 | `maxHistoryChars = 500`，截断处显式标「…（已截断）」，让模型知道后面还有 | 长的历史回答不原样重发 |
 | 更早的历史压成一段摘要 | 窗口之外的轮次压成一段摘要，存进 `app_kv`（键 `ai_history_summary_<会话id>`），只生成一次，之后每轮直接读；删会话时一并清掉 | 不再每轮重复支付更早历史的输入；也不再每轮多付一次「压缩」调用 |
 | 工具中间往来不重发 | assistant 的 `tool_calls` 与 `tool` 结果不落库、跨轮不带 | 不把机器中间产物当上下文反复发送 |
-| 不主动带笔记 | AI 助手只发用户这句话本身；笔记内容由 AI 用 SQL 按需读取（`search_notes` / `read_around`），读到的片段也只在**本轮**内回灌 | 没有「整库上传」这条路径 |
+| 不主动上传整库 | AI 助手只发用户这句话本身 + 最近 5 轮；笔记内容由 AI 用 SQL 按需读取（`search_notes` / `read_note_batch` / `read_around`），读到的片段也只在**本轮**内回灌 | 没有「整库上传」这条路径 |
+| 检索注入只拼在**那条用户消息**的末尾 | 每条用户消息前置检索**一次**（`NoteRetriever.autoInjectBlock`），过了门槛就拼成「【可能相关的笔记片段】」块 append 在原话后面；**不放进 system 头**——前缀缓存是逐块比对的，头一动整段上下文按全价重算（30k token 时 3~27 分） | 注入只影响这一条消息，system 前缀、历史、已读素材一起保持原样，缓存不掉 |
+| 思维链不进正文、不进历史 | `AgentThinking` 只往界面抛，按轮分段落进 `ai_messages.reasoning`（段间 `\n\n---\n\n`、每段带「第 N 轮」标题） | 思维链常常比正文还长；拼进 `content` 就会被当成历史每轮重发、重复计费 |
 
-`agentSystem` 是**常量**、不含任何每会话变化的东西（工作区已取消），所以 system 前缀永远稳定，
-上下文缓存能一直命中。
+`agentSystem` 是**常量**、不含任何每会话变化的东西（工作区已取消），函数详情由 `kAiFunctions` 清单
+程序化生成、全量常驻（角色 + 表结构 + 25 段函数文档 + 规则，固定段约 2900 token —— `prompts.dart`
+注释里的实测：从「只放目录」那版的约 1400 涨上来，但这些 token **整段命中缓存**），所以 system 前缀
+永远稳定，上下文缓存能一直命中。
 
-#### （2）读笔记按需：按关键词定位，只取那一段
+#### （2）读笔记按需：先定位（关键词 / 语义），只取那一段
 
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
 | `search_notes` / `list_notes` 只要元信息 | 返回 `{id, title, snippet}`，不给正文 | 让模型先廉价地知道「有什么」「在哪一篇」 |
-| `stat_note` 给规模 | 字数、创建/修改时间、所属库；**不含正文** | 字数决定要不要分次读，是「该不该整篇看」的判断依据 |
-| `find_in_note` 给位置 | 命中次数 + 每个命中的字符偏移 | 改之前的侦察：`replace_unique` 要求锚点唯一，先查清再改 |
+| `outline_notes` 给目录与规模 | 一次拿多篇：`{title, notebook_id, chars, excerpt, created_at, sections:[{level, heading, offset, chars}]}`，上限 50 篇，**不含正文** | 选材与「读哪一篇的哪一节」都不必先把正文拉回来；原来 `stat_note` 给的那几个字段并进了它 |
+| `find_in_note` 给位置 | 命中次数 + 每个命中的字符偏移 | 改之前的侦察：写函数要求锚点唯一，先查清再改 |
 | `read_around` 按字符读 | 命中位置**前后各 N 个字符**（默认 200、上限 500） | 长段落可能是一整行，按行取等于把半篇灌进上下文 |
-| `read_preview` 兜底 | 从第 offset 个字符起读，单次上限 500 字 | 明确要某一段时用；offset 可以直接接 `search_in_note` 的返回值 |
-| 切片**不再给 Agent** | Agent 走 SQL 自己定位；切片只服务卡片流与搜索 | 少一层 `note_chunks` 依赖 |
+| `read_note_batch` 兜底 | 从第 offset 个字符起读：单篇 `(id, offset, chars)`、批量给 JSON 数组；单条上限 **1500 字**、整批上限 **15000 字 / 20 条**（超了**整批拒绝**，不截断），被截断时返回 `next_offset` | 原来的 `read_preview` 一次只能读一篇一段（读 7 篇要 7+ 轮）；offset 可以直接接 `search_in_note` 的返回值 |
+| 切片**不再给 Agent** | Agent 走 SQL 自己定位；切片只服务卡片流、搜索与向量索引 | 少一层 `note_chunks` 依赖 |
+| 语义那一路补关键词的盲区 | `bge-small-zh-v1.5` int8（22.8MB）打进包、**不联网**；向量按 Float32 存进 `note_vectors.vec`，相似度**在 Dart 里算点积**（实测 2 万条 512 维 = 11ms/次） | 关键词是精确匹配，**用词不一样就完全找不到**（实测 `会议` 搜不到正文写"参会"的那篇）；而 SQL 那边模型得先猜到用词 |
+| 两路融合用 RRF | 语义 + 关键词各取 10 条候选，`Σ 1/(60 + 名次)` 融合后取 3 条；**同一篇最多占 1 个位置**，每条 ≤400 字、整块 ≤1200 字 | 两边分数不可比（命中次数 vs 余弦），RRF 只看名次；每篇只占一席是为了让"面"更宽（实测前三条常是同一篇的不同片） |
 
-> ⚠️ 这一条是**纪律，不是围栏**：`SELECT content FROM notes` 依然能把整篇拿走。
+> ⚠️ **及格线 0.45 是扫出来的，不是估的**（全套数据在 `test/rag_eval_test.dart`，纯本地、不花 API 钱）：
+> 0.35 那版在 60 条候选上**误报 5/5**（候选一多，从"全都不相关"里挑最大值总有冒上线的），0.50 会漏 5/15；
+> **自动注入**用更严的 `RagLimits.injectMinScore = 0.50` —— 两者的代价不同：0.45 只是"进候选池排个序"，
+> 注入却是**每轮都塞进上下文**，所以宁可少给一条（AI 手里还有 `search_notes` / `outline_notes` 兜）。
+> ⚠️ **没有用 `sqlite-vec`**：Android 上要自己 FFI 调 `sqlite3_load_extension`（`package:sqlite3` 没有
+> 公开 API），而且必须有真机才能验证；而 Dart 里算点积已经够快（见上表）。
+> ⚠️ 分词**必须把中文逐字空格隔开**（BERT 官方的 `tokenize_chinese_chars`）：不拆的话「会议记录」会被
+> 当成一个词切成 `会/##议/##记/##录`，实测它与「牛肉面」的相似度（0.689）反而高于与真正相关的
+> 「参会/目标」（0.680）—— 向量是错的。
+> 离线评测（15 条有答案 + 5 条本该无结果）：关键词找到 4 条 → 融合后 **11 条**；「字面必然搜不到」的
+> 5 条，关键词 0 → **4 条**；本该无结果的误报 **1 条**。
+> 索引由 `RagIndexSchedule` 后台补（启动时、进 AI 页时、笔记保存后——保存路径**不 await**），按篇调度
+> （`RagIndexer.indexMissing` 先补片、再补向量；顺序反了会永远挑到空）；嵌入跑在一个**常驻后台 isolate**
+> （单条 333 字实测 74ms 纯 CPU，放主 isolate 上会掉帧，顺带保证模型只加载一份）。
+> 不确定就**什么都不给**：一条都没过注入线（或库里一条有效向量都没有）就返回 null —— **这是常态，不是异常**。
+> （`NoteRetriever.isUsable` / `RagIndexer.isIndexThin` 那套"索引太空就别亮给 AI"的判断**目前没有调用方**，
+> 留在那里是为了以后接线。）
+>
+> ⚠️ 上面这一整块（按需读 + 检索）都是**纪律，不是围栏**：`SELECT content FROM notes` 依然能把整篇拿走。
 > 上限只约束「用函数读」这条路（见 [AI操作数据库设计](AI操作数据库设计.md) 第 14 节）。
 
 #### （3）工具：1 个 `sql` + 1 个 `askUser`
@@ -286,7 +325,9 @@ uncached = promptTokens - cached
 | `sql` | 参数是一条 SQL，可以查表、调用 `ai_functions` 里的 25 个扩展函数、用子查询 / CTE / JOIN / 窗口函数 | App 只放行**一条** `SELECT` / `WITH`（`SqlGuard`）；写操作只能走 UDF，约束在函数实现里 |
 | `askUser` | 信息不足时问用户，会**挂起**，用户回答后继续 | 不碰数据 |
 
-- 工具定义每轮固定开销从约 3000–5000 token 降到约 200；函数清单不占任何固定开销（落库、AI 自己查）。
+- 工具定义每轮固定开销从约 3000–5000 token 降到约 200；函数清单**不占工具定义**（它落库成 `ai_functions`
+  表，而 AI 实际看到的是由 `kAiFunctions` 程序化生成、常驻 system prompt 的那 25 段文档 —— 它每次请求
+  都在，但**整段命中缓存**，见 3.2（1））。
 - 没有分层、没有 `requestTools`、没有工具目录 —— 只有两个工具，全部完整下发。
 - 工具的执行侧约定（放行规则、结果截断、执行上限）见第 4 节。
 
@@ -294,8 +335,8 @@ uncached = promptTokens - cached
 
 | 机制 | 具体做法 | 省在哪 |
 |---|---|---|
-| 卡片流并发单卡 | 一路一个请求、只要 1 张（`kGenParallelism = 4` 路），各分配不同素材 | 实测一个请求要 N 张是 O(N)（N=5 约 12s），而并行单卡只要 ~4s；额度从 `16384` 收到 `AiLimits.feedMaxOutputTokens = 2048`（正常远用不到，纯防跑飞——一次跑飞就是几千 token）。无预留时首屏只先生成 3 张（`kFeedFirstScreenCount`），其余后台补 |
-| 素材是 400 字的窗口 | 每份素材 400 字（`FeedWindow.chars` = `FeedLimits.windowChars`），一次最多 4 份 → 4 × 400 = 1600 ≤ `FeedWindow.batchBudget = 4000`（= `FeedLimits.windowBatchBudget`） | 提示词长度、成本估算都围绕「一份素材 400 字」设计 |
+| 卡片流并发单卡 | 一路一个请求、只要 1 张（`kGenParallelism = 3` 路），各分配不同素材 | 实测一个请求要 N 张是 O(N)（N=5 约 12s），而并行单卡只要 ~4s；额度从 `16384` 收到 `AiLimits.feedMaxOutputTokens = 2048`（正常远用不到，纯防跑飞——一次跑飞就是几千 token）。无预留时首屏只先生成 3 张（`kFeedFirstScreenCount`），其余后台补 |
+| 素材是 250 字的窗口 | 每份素材 250 字（`FeedWindow.chars` = `FeedLimits.windowChars`），一次最多 3 份 → 3 × 250 = 750 ≤ `FeedWindow.batchBudget = 4000`（= `FeedLimits.windowBatchBudget`） | 提示词长度、成本估算都围绕「一份素材 250 字」设计 |
 | 标签只在输出侧约束 | 每张卡 1 个标签，≤5 个汉字 / ≤12 个英文字母 | 控制输出 token，顺带保证卡片显示不炸 |
 | 卡片上只有标题，不单独生成摘要 | 提示词只要求标题是「有钩子的一句话」（早先试过单独生成卡片摘要，模型不守字数：要求 45–60 字稳定返回 116–160 字） | 每张卡少一次摘要生成，也少一个要维护的内容字段 |
 | 素材不重复 | 笔记级冷却：最近 `kRecentNoteKeep = 15` 张卡片里同一篇笔记最多出现 1 次（内存，不落库） | 连着拿同一篇素材会生成高度雷同的卡片，等于白烧 |
@@ -314,22 +355,27 @@ uncached = promptTokens - cached
 | 单次 SQL 的字符数上限 | `maxStatementChars = 20000` |
 | 回灌给模型的结果：行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000`（截断会明说） |
 | 单次读的字符数 / 查找位置数 | `maxReadChars = 500` / `maxFindPositions = 200` |
+| 一次读一批笔记 / 一次拿目录 | 单条 ≤1500 字、整批 ≤15000 字 / 20 条（超了整批拒绝）；`outline_notes` 一次 ≤50 篇 |
 | `search_notes` / `search_in_note` 的条数上限 | 50 / 20 |
 | 生成类调用的重试次数 | 2 次尝试（即最多重试 1 次），不无限重试 |
 
 另外，写笔记侧的上限也间接保护了 AI 成本：标题超 200 字截断（标题会进 prompt）；笔记正文按 UTF-8 字节
-分档 80KB / 90KB / 100KB，到 100KB 拒绝落盘（见 `app_params.dart`、`note_editor_page.dart`）。
+分档 **30KB / 40KB / 50KB**（软上限 / 警告线 / 硬上限），到 50KB 拒绝落盘（见 `app_params.dart`、
+`note_editor_page.dart`）。
 
 > **AI 的写入走的是同一套上限**（`core/db/ai_udfs.dart`）：标题超 200 字截断（`safeTruncate`）、
-> 正文到 100 KB 硬上限**拒绝**（不是截断——截断等于悄悄删字，而 AI 可以拆成多篇）、
-> 派生字段（`excerpt` / `word_count`）用同一个 `TextUtils` 算。`create_note` / `replace_unique` /
-> `append_to_note` 这些都过这一关。早先 AI 写路径完全不受约束（编辑页拦住的东西它全能绕过）。
+> 正文到 50 KB 硬上限**拒绝**（不是截断——截断等于悄悄删字，而 AI 可以拆成多篇）、
+> 派生字段（`excerpt` / `word_count`）用同一个 `TextUtils` 算。`create_notes_batch` / `update_notes_batch` /
+> `append_notes_batch` 这些都过这一关。早先 AI 写路径完全不受约束（编辑页拦住的东西它全能绕过）。
+>
+> ⚠️ 硬上限**只管"增长"，不管"存在"**：判定是 `新字节数 ≤ max(原字节数, 50KB)` 才放行——老库里
+> 60~90KB 的笔记（按旧上限写下的）不会被卡死，但也不能再变长。
 
 ### 3.3 没落地的省钱手段（别当成已有）
 
-- ~~取消在途请求~~ → 决定不接：AI 的回答会写进已经保存的会话，用户切页再回来还能看到它；中途取消等于把
-  已经付过钱的那半段扔掉，下回还得重问。所以 `CancelToken` 保持"能力就位、没有调用方"。真要接，
-  应当是用户主动点"停止"，而不是切页就自动取消。
+- ~~取消在途请求~~ → **已经落地**：现在有「停止」按钮（`AiChatRepository.stop()` → 取消 `CancelToken`），
+  见 4.7。它只接"用户主动点"这一种，**切页仍然不自动取消**——AI 的回答会写进已经保存的会话，用户切页
+  再回来还能看到它，切页就取消等于把已经付过钱的那半段扔掉、下回还得重问。
 - **用户在设置页覆盖价格**：config 注释写着「如需精确对账请在设置页允许用户覆盖」——设置页没有这个入口。
 - **空闲时段执行**：[软件理念设计](软件理念设计.md) 的省钱要义、以及原文档提的「建议在空闲时段执行批量任务」，
   代码里只有用量页一段静态文案（「批量整理放周末或晚上更便宜」），没有调度或提示交互。
@@ -339,11 +385,12 @@ uncached = promptTokens - cached
 ## 4. AI Agent：工具约定、挂起与安全
 
 > 出处：`tool_specs.dart`（清单）、`tool_executor.dart`（执行 / 结果截断）、`sql_guard.dart`（放行判定）、
-> `core/db/ai_udfs.dart`（26 个函数与业务约束）、`agent_loop.dart`（循环 / 上限 / 事件）、
-> `ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、`ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库）、
+> `core/db/ai_udfs.dart`（25 个函数与业务约束）、`agent_loop.dart`（循环 / 上限 / 事件）、
+> `ask_user.dart` + `ask_resolver.dart`（挂起 / 选项）、`ai_chat_repository.dart`（窗口 / 摘要 / 挂起落库 /
+> 停止 / 进度）、`agent_progress.dart`（任务栏的人话标签）、`result_applier.dart`（A 类的 json 产出块）、
 > `history_chunker.dart`（会话切片）。
 > 协议报文（`tools` / `tool_calls` / `role: tool`）见 1.4，事件类型见 1.3，省 token 的角度见 3.2（3）。
-> 数据库操作那一层（26 个函数、函数清单、安全判定）另有专文：[AI操作数据库设计](AI操作数据库设计.md)。
+> 数据库操作那一层（25 个函数、函数清单、安全判定）另有专文：[AI操作数据库设计](AI操作数据库设计.md)。
 
 ### 4.1 工具清单与调用约定
 
@@ -357,9 +404,16 @@ uncached = promptTokens - cached
   正文硬上限、删库不删笔记）在函数实现里，模型绕不过去。
 - **被拒绝也是「结果」**：拒绝理由写给模型看（"不允许直接写表，请调用 ai_functions 里的函数"），它据此换写法，
   而不是把整轮请求打断。
-- **参数只有一条 SQL**：不需要把参数做成 JSON Schema 的字段（函数的签名与例子在库里，AI 自己查）。
+- **参数只有一条 SQL**：不需要把参数做成 JSON Schema 的字段（25 个函数的签名与例子已经在 system prompt 里，见 3.2（1））。
 - **结果形状统一**（`ToolResult.encode()`）：成功 `{"ok":true,"data":{rows:[…],row_count,note?}}`、失败
   `{"ok":false,"error":"…"}`。结果集按行数与字符数**截断并说明**（不说明的话模型会拿半截数据下结论）。
+- **A 类任务（整理 / 生成）的产出走回答末尾的 ` ```json ` 块**：模型只写内容，App 解析后落库
+  （`AiResultApplier`，键是 `notes` / `updates` / `deletes`）——**逐条**落库，所以某一条失败不影响其他条，
+  失败项带着原因 + **已落库的 id** 回灌回去，最多再修 2 轮（`maxRepairRounds`）。为什么不塞进 SQL：
+  单条语句只有 2 万字符上限，而且正文要先转义进单引号里。提示词规则 11 写死了「**没有 json 产出块
+  = 什么都没落库**」，App 还会自己抓一次"只说不做"（模型说了"已经整理成三篇"却一个块都没给）。
+  ⚠️ 产出块**在流式过程中就要切掉**（`stripForStreaming`）：它装的是整篇笔记正文，只在结尾切的话，
+  模型写笔记那十几秒里用户就看着一大坨原始 JSON（含笔记全文）在气泡里滚出来。
 - **不再有工作区**：一条 SQL 就能查遍整个库（`AiChatRepository` 建执行器时不再传范围）。
   这也意味着 `system prompt` 是常量、前缀永远稳定，上下文缓存一直能命中。
 - **参数一律宽松接受**：`parseArgs` 在 `arguments` 是坏 JSON 时返回空 map，让「缺 `query`」这类具体抱怨
@@ -374,7 +428,7 @@ uncached = promptTokens - cached
 ```sql
 SELECT find_in_note('n1', '主要风险是时间紧');            -- 先确认它只出现 1 次
 SELECT read_around('n1', '主要风险是时间紧', 200);        -- 看清上下文
-SELECT replace_unique('n1', '主要风险是时间紧', '风险已识别');  -- 唯一才改，改完返回 {"ok":true}
+SELECT update_notes_batch('[{"id":"n1","old":"主要风险是时间紧","new":"风险已识别"}]');  -- 唯一才改，改完返回 {"ok":true}
 ```
 
 - **锚点必须唯一**：出现 0 次或多次都**拒绝**，并把次数写在错误里（"出现 2 次，把锚点写长一点"）。
@@ -385,21 +439,26 @@ SELECT replace_unique('n1', '主要风险是时间紧', '风险已识别');  -- 
   也不要静默改错。
 - **正文与派生字段同一条 UPDATE**：`excerpt` / `word_count` 用 `TextUtils` 算好一起写；
   切片由触发器清掉（见 [AI操作数据库设计](AI操作数据库设计.md) 第 5 节）。
-- **超 100KB 拒绝**：不是截断（截断等于悄悄删字），错误里让模型拆成多篇。
+- **超 50KB 拒绝**：不是截断（截断等于悄悄删字），错误里让模型拆成多篇。判定是**只管增长**：
+  `新字节数 ≤ max(原字节数, 50KB)` 就放行，老库里按旧上限写下的超限笔记不会被卡死。
 
 ### 4.3 执行上限（App 强制，不靠模型自觉）
 
-数值都在 `SqlLimits`（`app_params.dart`），分两类：**函数层的默认值与硬上限**、**回灌给模型的行李限额**。
+数值都在 `app_params.dart` 的 `SqlLimits` / `AgentLimits`，分两类：**函数层的默认值与硬上限**、
+**回灌给模型的行李限额**。
 
 | 上限 | 值 | 出处 |
 |---|---|---|
 | 一次用户输入的工具往返轮数（软上限 / 每次续 / 硬上限） | `15` / `+15` / `45` | `app_params.dart`、`agent_loop.dart` |
 | 单条 SQL 的字符数 | `maxStatementChars = 20000` | `sql_guard.dart` |
 | 回灌给模型的行数 / 字符数 | `maxResultRows = 200` / `maxResultChars = 8000` | `tool_executor.dart` |
-| 一次读的字符数 | `maxReadChars = 500`（默认 200） | `ai_udfs.dart` |
+| `read_around` 一次读的字符数 | `maxReadChars = 500`（默认 200） | `ai_udfs.dart` |
+| `read_note_batch` 单条 / 整批 / 条数 | 1500 字 / 15000 字 / 20 条（超了**整批拒绝**，截断会让人以为整批都读到了） | `ai_udfs.dart` |
+| `outline_notes` 一次几篇 | 50（回的是目录不是正文，所以比 20 大得多） | `ai_udfs.dart` |
+| 批量写函数一次几条 | `maxBatchSize = 10`（超了**拒绝**，不截断） | `ai_udfs.dart` |
 | `search_notes` / `search_in_note` 条数 | 50 / 20 | `ai_udfs.dart` |
 | `find_in_note` 返回的位置数 | 200（`count` 仍是真实次数） | `ai_udfs.dart` |
-| 笔记正文硬上限 | 100 KB，**拒绝**不截断 | `ai_udfs.dart` |
+| 笔记正文硬上限 | 50 KB，**拒绝**不截断，且**只管增长**（`新 ≤ max(原, 50KB)`） | `ai_udfs.dart` |
 | `askUser` 每轮次数 | `maxAsksPerTurn = 5`（跨恢复累计） | `agent_loop.dart` |
 | 模型自带 `askUser.options` | 取前 10 条；`limit` 默认 10、`clamp(1,10)` | `agent_loop.dart` |
 
@@ -469,7 +528,8 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
   挂起期间用户删了笔记、改了库，他看到的也是最新清单；
 - 模型直接给 `options` 仍允许（不用 `source` 时的兜底）：丢掉没有 `id` 的项，取前 `limit` 条；
 - 单选 / 多选在语义上"必须要有选项"，但解析层没有强制这一条（`AskType.needsOptions` 定义了却没有调用点）；
-  选项为空时答题层显示「没有找到可选项。可以取消，然后用一句话告诉我该怎么做。」
+  一条都没查到（或模型没给）时不再叫用户去"取消"——答题层显示「没有找到可选项。**直接在下面写一句**告诉我
+  该怎么做。」，输入框就在下面（以前那句是"可以取消，然后用一句话告诉我"，等于逼用户先拒绝一次）。
 
 **结果形状固定成一种**（`AskResult.encode()`）：`status` / `selections` / `text` / `confirmed`，
 用不到的给 `null`——形状多变最容易让模型解析出错。另外：
@@ -477,6 +537,24 @@ answerAsk(...)       → history = pending.messages + 一条 role: tool 的结�
 - **空串也算"答了"**（要不要重问交给模型判断，而不是 App 替它决定）；
 - **取消 = 拒绝**；确认题取消时会补 `confirmed: false`，让模型少做一次推断；
 - `allowCancel` 永远是 `true`：一是"拒绝"本身就是合法回答，二是禁掉之后用户直接关掉 App 会让对话永久挂起。
+
+**用户可以在选项之外自己写一句**（这一版新加）：
+
+- **界面**（`agent_dialogs.dart`）：单选 / 多选弹层在选项**下面**多了一个输入框。**单选是互斥的**——
+  打字就清掉已选项、点选项就清掉刚写的那句（单选的语义就是"一个答案"，两个同时存在会让模型猜哪个算数）；
+  **多选允许"选两条 + 自己再补一条"**（提示语是「也可以自己写（一行一条）…」）。
+- **数据**（`ask_user.dart`）：`AskResult` 的形状**没变**（还是那四个 key），自己写的那句进 **`text`**
+  （`text` 不只是"输入题的答案"——两种题都可能带它），`selections` **只放选项 id** ——
+  混进自由文本的话模型会把一句话当成一个 id 去用。工厂方法变成
+  `AskResult.choice(ids, {typed})`（`typed` 可选）。
+- **模型侧的行为约定**（`tool_specs.dart` 里 `askUser` 的工具说明新增了一句）：用户可能**不选你给的选项、
+  而是自己写一句**，结果里的 `text` 就是那句，**以它为准，别硬套回选项**。这句是这次改动的关键 ——
+  不写清的话模型会无视用户那句话，硬把他的意思套回某个选项上。
+- **"写了字就算有答案"**（`_canSubmit`）：选择题的「确定」在**选了选项 或 写了字**时可用。以前只认选项，
+  用户看不上任何一条、心里有别的想法时唯一的出路是「取消」，而取消在语义上是**拒绝**（模型会理解成
+  "他不做这件事"）——那和"我另有主张"完全是两回事。
+- ⚠️ **互斥只是界面上的约定，模型侧别依赖它**：`AskResult` 层面「选项 + 自己写」可以同时存在（多选就是），
+  所以 `text` 与 `selections` 都要看，冲突时以 `text` 为准。
 
 三条实现时踩到的坑：
 
@@ -547,6 +625,29 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
   错误码（`network` / `timeout` / `rate_limited` / …）、`rounds`（轮数用尽）。
 - **冷启动还看到 `in_flight`，就是上次被系统杀了或 App 崩了** —— 那是唯一能观测到「进程没了」
   的办法（没有任何回调会告诉我们 `foreground_killed`）。Android 前台服务要不要上，就看这个数量。
+- **「在不在跑」不由界面判断**：唯一真相是 `AiChatRepository` 内存里的 `_running`
+  （`isRunning` / `runningMessageId` / `runningChanges`）。以前用页面自己的 `_sending`，而 `send()` 的
+  Future 不绑在 widget 上：用户退出 AI 页（路由 pop）时 State 销毁、`_sending` 归 false，**可那一轮还在
+  正常跑**；再进来是一个新 State，看到消息上留着 `in_flight` 又没有"正在生成"，就弹出「App 被系统中断」。
+  两件事都错：任务根本没中断；而这时点「继续」会在同一条消息上**再起一轮**，两轮并发写同一条回答。
+  分工是：内存里在 = 正在生成；内存里不在、库里却是 `in_flight` = 上次进程没了。`send()` 也据此对同一
+  会话**防重**（已有 run 在跑就抛 `StateError`，且拦在落用户消息之前，被拒的那次不留半条记录）。
+- **「停止」是另一条路径**：`stop(conversationId)` 取消这一轮的 `CancelToken`（**每轮换一个新令牌**——
+  dio 的令牌用过不能复用，拿旧的去 cancel 的表现是"点了停止没反应"），客户端给出
+  `AiError('已取消', code: 'cancelled')`，循环把它当一次失败收尾。**不往回答里写 ⚠️**（那不是错误，
+  是用户让它停的）、已生成的内容一个字都不删，`interrupt_reason` 记 `cancelled`。
+- **两类终止呈现必须分开**（`AiChatRepository.isStopLike`）：**被停下来**（`cancelled` / `in_flight` /
+  `rounds` / `interrupted`）→ 一句「已停止 · 继续」就够，不用解释；**出错**（`network` / `timeout` /
+  `rate_limited` / `insufficient_balance` / `unauthorized` …）→ 一定要把原因说出来，否则用户会一直盯着
+  "已停止"重试，而问题根本不在那儿。
+- **任务栏（进度）**：内存里的 `AgentProgress`（`round` / `budget` / `current` / `steps`，步骤最多留 12 条；
+  不落库——进程没了它就没意义，跨启动要留的是**结果**：正文 + 思维链），由 `AgentRoundStarted` /
+  `AgentToolStarted` / `AgentToolDone` 更新。显示的是 `ToolLabels.describe(name, arguments)` 翻出来的
+  **人话**（「读正文（3 篇）」）：AI 干活几乎全走 `sql` 这一个工具（那些函数是嵌在 SQL 里的），
+  光有工具名永远是 `'sql'`，等于什么都没说。`AgentToolDone` 带 UDF 的 `description` 时优先用它。
+- **思维链落 `ai_messages.reasoning`**（v16）：按轮分段（段间 `\n\n---\n\n`、每段带「第 N 轮」标题），
+  **每攒够 200 字**才写一次库（`_thinkingFlushChars`）—— 它动辄几万字，每个分片都把完整累计文本重写一遍
+  是 O(n²) 的字节量。它**不进正文、不进历史**（见 3.2（1））。
 - 界面：气泡下面显示「上次生成中断（网络断开）」+「继续」「知道了」。「继续」= 把一句话放进输入框再发出去
   （复用 `_send` 的整条路径，所以没有第二条发送分支）。
 - ⚠️ **为什么「继续」要强调「不要重复做」**：工具往来**不落库**，模型只看得见自己写过的那段文字。
@@ -555,7 +656,8 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 **轮数预算**：软上限 15 轮、用户同意后每次 +15、硬上限 45。
 
-- 快到上限（还剩 ≤2 轮）时，`AgentLoop` 往**每轮重拼的 system prompt 末尾**追加一段提醒，
+- 快到上限（还剩 ≤2 轮）时，`AgentLoop` 会往**消息列表末尾**挂一段提醒（作为最后一条 `system` 消息，
+  每轮替换、不累积；**绝不碰 system 前缀**——缓存是逐块比对的，头一动后面整段上下文都要按全价重算），
   让模型自己决定：没做完就 `askUser` 问用户要不要继续（**要说清继续会再发生一次调用费用**），
   做完了就 `finish` 收尾。
 - **为什么不由 App 直接弹问题**：App 发起的提问没有对应的 assistant `tool_calls`，而挂起恢复是把答案当
@@ -568,14 +670,25 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 
 **可断言的验收口径**（这些点都有对应测试文件：`agent_loop_test` / `agent_dialogs_test` /
 `deepseek_tool_calling_test` / `ask_user_test` / `ask_flow_test` / `history_window_test` /
-`history_summary_test` / `history_chunker_test`；是否全绿以 `flutter test` 为准）：
+`history_summary_test` / `history_chunker_test` / `ai_result_applier_test` / `ai_interrupt_test` /
+`ai_reenter_test` / `ai_retrieval_wiring_test` / `rag_eval_test` / `text_embedder_test`）：
 
-- [x] `sql` 能读能写：26 个函数可被 AI 调用，也能嵌在 SQL 里（`test/ai_sql_test.dart`）
+- [x] `sql` 能读能写：25 个函数可被 AI 调用，也能嵌在 SQL 里（`test/ai_sql_test.dart`）
 - [x] 只放行单条 `SELECT` / `WITH`：写表 / DDL / `PRAGMA` / 多语句一律拒绝
 - [x] 锚点不唯一时拒绝，且**一个字都不动**；错误信息告诉模型把锚点写长一点
 - [x] 正文与派生字段一起写（`excerpt` / `word_count` 与 `TextUtils` 同口径）、切片由触发器清掉
 - [x] 历史自动 5 轮、单条 ≤500 字；更早历史压缩摘要只生成一次（用调用次数验证）
 - [x] `askUser` ≤5（跨恢复累计）、轮数上限 15
+- [x] A 类产出走尾部 json 块：解析 / 逐条落库 / 失败最多修 2 轮 / **流式与展示都要把块切掉**
+- [x] 检索注入拼在**用户消息末尾**、库里那条消息一个字节没改、检索抛异常也不影响 AI 干活
+  （`test/ai_retrieval_wiring_test.dart`，**不加载模型**）
+- [x] 同 App 内换页再回来不会被当成中断；同一会话同时只能有一轮（`test/ai_reenter_test.dart`）
+
+> 跑测试用 `tool/test.sh`，别直接 `flutter test`：`package:onnxruntime` 是按名字
+> `DynamicLibrary.open('libonnxruntime.so')` 找原生库的，而 pub 包把它放在
+> `~/.pub-cache/.../onnxruntime-*/linux/libonnxruntime.so.1.15.1`（名字还差一截）；脚本在临时目录里
+> 做软链 + 设 `LD_LIBRARY_PATH`（环境变量必须在**进程启动前**设好，Dart 里改不了）。没配好时碰模型的
+> 用例**跳过而不是失败**（`test/ort_gate.dart`）——所以"全绿"不等于"模型那几条真的跑过了"。
 
 > 旧的验收项（`listChunks` / `readChunk` 预算、`requestTools`、批量工具、写命令逐条确认、撤销栈）
 > 已随方案更替作废；对应的旧测试文件（`tool_specs_test` / `tool_executor_test` / `tool_delete_test` /
@@ -593,9 +706,10 @@ HistoryChunker.slice(indexes)    // 正文：≤3 片、≤1500 字；越界 ind
 | 工具调用的 token 占比 | `ai_calls` 的 `prompt_tokens`（不含缓存命中量，见 5.4） | SQL 没省下来，或缓存没命中 |
 | `askUser` 触发频率 | 数一轮对话里的次数 | 太高 → `askUser` 工具描述里的"能推断的就别问"没生效 |
 | 挂起未恢复的会话 | `ai_messages.pendingAction` 长期非空的条数 | 恢复逻辑有 bug |
-| SQL 被拒率 | 工具结果里 `error` 含「不允许直接写表」的比例 | 太高 → prompt 里「写操作走函数」说得不够，或函数清单没被查 |
-| 锚点失败率 | `replace_unique` / `insert_*` 返回 `ok:false` 的比例 | 太高 → 模型不爱先 `find_in_note` 侦察，prompt 第 6 条要加强 |
+| SQL 被拒率 | 工具结果里 `error` 含「不允许直接写表」的比例 | 太高 → prompt 里「写操作走函数」说得不够（函数文档已经常驻 prompt，不是"没看到清单"的问题） |
+| 锚点失败率 | `update_notes_batch` / `insert_after` / `insert_before` 返回 `ok:false` 的比例 | 太高 → 模型不爱先 `find_in_note` 侦察，prompt 规则 4 要加强 |
 | 单条 SQL 失败率 | 执行结果里 `ok:false` 的比例 | 太高 → 错误信息没有教会模型怎么改 |
+| 语义索引的覆盖率 | `note_vectors` 的有效向量数对切片总数（`validVectorCount` / `chunkTotalCount`） | 长期上不去 → 索引调度没跑起来（原生库加载失败只有 `RagIndexSchedule` 那行 `debugPrint` 能看出来） |
 | 崩溃 / 未捕获异步错误 | 现有 `_StartupGate` + 日志 | 工具执行器里的 async 边界（每个 `await` 之后都要查 `mounted`） |
 
 ---

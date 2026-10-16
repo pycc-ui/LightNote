@@ -208,9 +208,10 @@ class AgentLoop {
   /// 跑一轮。 [history] 必须**已经包含**本轮的用户输入。
   ///
   /// [rebuildPrompt]：**每轮请求前重新拼一次 system prompt**。
-  /// 动态函数标记（`mark_functions`）就靠它生效 —— 标记是这一轮的工具调用，
-  /// 只有下一轮重新拼过，刚加载的函数详情才会出现在 prompt 末尾；
-  /// 不传就用固定的 [systemPrompt]（测试与不需要动态详情的路径）。
+  /// 现在它的用途只剩一个：**把「更早历史的摘要」拼进去**（那份摘要是懒生成的，
+  /// 生成出来之后要立刻生效）。函数详情已经是固定段的一部分，不再需要按轮重拼
+  ///（见 `prompts.dart`：那样做前缀缓存才能整轮、整会话都命中）。
+  /// 不传就用固定的 [systemPrompt]（测试与不需要动态内容的路径）。
   Stream<AgentEvent> run({
     required String systemPrompt,
     required List<AgentMessage> history,

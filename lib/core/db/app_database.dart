@@ -388,7 +388,7 @@ class AppDatabase extends _$AppDatabase {
 
           // AI 操作层的两件启动活（见 core/db/ai_udfs.dart 与 ai_functions.dart）：
           //   · 触发器 —— 正文一变就清切片
-          //   · 函数清单 —— 26 条种子数据，按版本号对齐
+          //   · 函数清单 —— 25 条种子数据，按版本号对齐
           //
           // 放在 beforeOpen 而不是 onCreate/onUpgrade：这两件事都是**每次打开
           // 对齐一次**的幂等动作，「新库建了、老库漏了」这种分叉在这里不会发生。
@@ -569,20 +569,7 @@ class AppDatabase extends _$AppDatabase {
               t.deletedAt.isNull() &
               t.isInbox.equals(true) &
               t.notebookId.isNull())
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
-            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ]))
-        .watch();
-  }
-
-  /// 笔记库「最近笔记」：已归档的全部笔记
-  Stream<List<Note>> watchLibraryNotes() {
-    return (select(notes)
-          ..where((t) => t.deletedAt.isNull() & t.isInbox.equals(false))
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ]))
+          ..orderBy(_noteListOrder))
         .watch();
   }
 
@@ -594,10 +581,11 @@ class AppDatabase extends _$AppDatabase {
   Stream<List<Note>> watchUnfiledNotes() {
     return (select(notes)
           ..where((t) => t.deletedAt.isNull() & t.isInbox.equals(true))
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.pinned, mode: OrderingMode.desc),
-            (t) => OrderingTerm(expression: t.updatedAt, mode: OrderingMode.desc),
-          ]))
+          // ⚠️ 和库内笔记**必须用同一套排序**（`_noteListOrder`）。
+          // 这里曾经单独写着 `pinned DESC` —— 那是"置顶 = 钉住"时代的写法，
+          // 置顶改成"挪到最前一次"之后它就和库内列表行为不一致了：
+          // 同一个动作在两个页面里靠两套机制生效，改一处忘一处就会分叉。
+          ..orderBy(_noteListOrder))
         .watch();
   }
 
@@ -1262,11 +1250,6 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
-  /// 清掉某篇笔记的全部向量（软删笔记时调）。
-  Future<void> clearNoteVectors(String noteId) {
-    return (delete(noteVectors)..where((t) => t.noteId.equals(noteId))).go();
-  }
-
   /// 检索的**第一趟**：把当前模型下所有「仍然对得上」的向量读出来。
   ///
   /// 只取 (id, idx, hash, 字节)，**不取正文** —— 候选可能上千条，把正文一起
@@ -1364,7 +1347,13 @@ class AppDatabase extends _$AppDatabase {
     return row.read(c) ?? 0;
   }
 
-  /// 死向量的主键：模型换了（`model <> ?`），或者那片已经不存在 / hash 对不上。
+  /// 死向量的主键。三种都算"死"：
+  ///   · 模型换了（`v.model <> ?`）；
+  ///   · 那片已经不存在、或 `content_hash` 对不上（笔记改过）；
+  ///   · **笔记已经软删了**（软删不触发外键级联，向量行会留着）。
+  ///
+  /// 前两种只是"查不出来"，第三种是纯占地方 —— 但**都不影响检索结果**
+  ///（[validVectors] 的 JOIN 就把它们过滤掉了）。清理只是让表别无限长大。
   ///
   /// 返回 `(note_id, idx)` —— 这张表的主键就是这两列，够定位了。
   Future<List<(String, int)>> staleVectorIds(
@@ -1375,10 +1364,11 @@ class AppDatabase extends _$AppDatabase {
       'SELECT v.note_id AS note_id, v.idx AS idx FROM note_vectors v '
       'LEFT JOIN note_chunks c ON c.note_id = v.note_id AND c.idx = v.idx '
       '  AND c.content_hash = v.content_hash '
-      'WHERE v.model <> ? OR c.note_id IS NULL '
+      'LEFT JOIN notes n ON n.id = v.note_id '
+      'WHERE v.model <> ? OR c.note_id IS NULL OR n.deleted_at IS NOT NULL '
       'LIMIT ?',
       variables: [Variable<String>(currentModel), Variable<int>(limit)],
-      readsFrom: {noteVectors, noteChunks},
+      readsFrom: {noteVectors, noteChunks, notes},
     ).map((r) => (r.read<String>('note_id'), r.read<int>('idx'))).get();
   }
 

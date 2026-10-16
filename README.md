@@ -28,21 +28,28 @@ Flutter + Dart + SQLite(Drift) + DeepSeek API。核心链路：**速记 → 笔�
 
 - **纯本地存储**：所有笔记存在手机 SQLite，无云同步，隐私安全。
 - **AI 增删改查**：对勾选的笔记下指令，AI 帮你整理、改写、问答。
+- **本地语义检索**：笔记在本地算成向量，「会议记录」也能命中标题里没有这两个字的笔记；模型随包发布，不联网。
 - **轻笔记卡片流**：AI 从笔记库抽素材生成卡片，滑动阅读，收下喜欢的。
 - **Markdown 渲染**：支持数学公式（LaTeX）、代码块、表格、任务列表。
 - **流式输出**：AI 回答逐字显示，不用等整个回复。
 
 ## 🛠️ 自己编译
 
+需要 Flutter stable（Dart ≥ 3.10，即 Flutter ≥ 3.35，见 `pubspec.yaml` 的 `environment`）。
+
 ```powershell
 flutter build apk --release --target-platform android-arm64
 ```
 
-产物在 `build\app\outputs\flutter-apk\`。
+产物在 `build\app\outputs\flutter-apk\`。arm64 的 release 包约 **56MB** —— 大的是打进包的嵌入模型
+（23.9MB，压缩后 13.6MB）与 `libonnxruntime.so`（13.6MB），它们都在 `assets/models/` 里随仓库走，
+clone 下来就带着，不用另外下载。
 
 Windows 桌面版：`flutter build windows --release`，产物在 `build\windows\x64\runner\Release\`。
 
-开发调试、静态检查、测试等其他命令见 [架构和功能开发流程设计](docs/架构和功能开发流程设计.md)。
+跑测试用 `tool/test.sh`（**别直接敲 `flutter test`**：嵌入模型的原生库要 `LD_LIBRARY_PATH`，脚本负责配好，
+不配的话碰模型的用例会跳过而不是失败）。开发调试、静态检查等其他命令见
+[架构和功能开发流程设计](docs/架构和功能开发流程设计.md)。
 
 ## 📚 开发者文档
 

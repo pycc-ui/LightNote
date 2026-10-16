@@ -267,7 +267,10 @@ class _StartupGateState extends State<_StartupGate> {
     //
     // 放在启动而不是"第一次检索前"：补索引是纯 CPU 的慢活（74ms/片），
     // 等用户开口了才开始补，第一条消息就赶不上。启动后后台慢慢补更合适。
-    RagIndexSchedule.start(db).kickBackfill();
+    RagIndexSchedule.start(db)
+      ..kickBackfill()
+      // 顺手清一批死向量（不影响检索结果，纯粹是别让表无限长大）
+      ..kickHousekeeping();
   }
 
   @override

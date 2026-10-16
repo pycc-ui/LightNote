@@ -1,4 +1,4 @@
-// 阶段 3：卡片流的素材改成「片内的 400 字窗口」。
+// 阶段 3：卡片流的素材改成「片内的一小段窗口」（大小见 `FeedWindow.chars`）。
 //
 // 要盯住的三件事：
 //   · 窗口候选起点的算法（含"最后一个窗口尾部对齐"）
@@ -67,7 +67,7 @@ void main() {
       expect(FeedWindow.textOf(content, chunk, 0), 'cdefghij');
     });
 
-    test('从起点取 400 字，且**不越出片**', () {
+    test('从起点取一整段窗口，且**不越出片**', () {
       // 片只有 8 个字，起点 3 → 只剩 5 个字，不能越到片外
       expect(FeedWindow.textOf(content, chunk, 3), 'fghij');
     });
@@ -85,7 +85,7 @@ void main() {
 
   });
 
-  group('集成：素材是 400 字窗口', () {
+  group('集成：素材是一小段窗口', () {
     late AppDatabase db;
     late NoteRepository notes;
     late FeedRepository feed;
@@ -106,7 +106,7 @@ void main() {
     String manyChunks(int n) =>
         List.generate(n, (i) => '第$i段。${'内容' * 180}').join('\n\n');
 
-    test('每份素材都 ≤400 字，一批总量 ≤4000 字', () async {
+    test('每份素材都 ≤FeedWindow.chars，一批总量 ≤batchBudget', () async {
       await notes.createInbox(title: '长', content: manyChunks(30));
 
       final materials = await feed.gatherSources(source, limit: 9);
@@ -115,11 +115,11 @@ void main() {
       var total = 0;
       for (final m in materials) {
         expect(m.chunk.length, lessThanOrEqualTo(FeedWindow.chars),
-            reason: '素材超过 400 字会打破卡片流的成本估算');
+            reason: '素材超过窗口大小会打破卡片流的成本估算');
         total += m.chunk.length;
       }
       expect(total, lessThanOrEqualTo(FeedWindow.batchBudget),
-          reason: '单批输入预算 4000 字（9 × 400 = 3600 本来就有余量）');
+          reason: '单批输入预算是给足余量的（份数 × 窗口大小 远小于它）');
     });
 
     test('片数不再被"笔记数"卡死：1 篇长笔记也能凑够 9 份', () async {
@@ -149,9 +149,10 @@ void main() {
 
       // 每片的轮换位必须是**合法候选起点**。
       //
-      // ⚠️ 这里不能断言"一定大于 0"：这些片只有约 370 字（< 400），
-      // 只有 `[0]` 一个候选，轮换位本来就该是 0。要验"推进"得用更长的片，
-      // 见下面「窗口轮换」那组。
+      // ⚠️ 这里不能断言"轮换位一定大于 0"：片长与窗口大小的关系一变，
+      // 候选起点的个数就跟着变（片只有几百字时可能就一两个候选）。
+      // 所以只验"它是个**合法候选**"。要验"推进"得用更长的片，
+      // 见下面「窗口轮换」那组 —— 两边都不写死数字。
       for (final r in used) {
         final starts = FeedWindow.starts(r.endOffset - r.startOffset);
         expect(starts, contains(r.nextWindowStart),

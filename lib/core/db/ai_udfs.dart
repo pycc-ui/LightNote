@@ -49,7 +49,7 @@ Database? _udfDb;
 
 const _uuid = Uuid();
 
-/// 把 26 个函数注册到一条连接上。**开库时调用一次**（见 AppDatabase 的 _openConnection）。
+/// 把 25 个函数注册到一条连接上。**开库时调用一次**（见 AppDatabase 的 _openConnection）。
 ///
 /// ⚠️ 这个函数会被 drift 送到**背景 isolate** 里执行，所以它必须是顶层函数，
 /// 不能写成闭包：闭包捕获的对象在 Dart 里不允许跨 isolate 传。
@@ -285,7 +285,7 @@ String _iso(Object? v) {
 bool _isLowSurrogate(int c) => c >= 0xDC00 && c <= 0xDFFF;
 
 /// 按**字符**切一段，不切坏代理对（emoji 这类字符由两个码元组成，
-/// 切一半会渲染成方框）。偏移按 Dart 的 UTF-16 码元算，与 read_preview
+/// 切一半会渲染成方框）。偏移按 Dart 的 UTF-16 码元算，与 read_note_batch
 /// 的 offset 口径一致。
 String _slice(String text, int start, int end) {
   var s = start.clamp(0, text.length).toInt();
@@ -402,7 +402,7 @@ String? _writeContent(String noteId, String content) {
 ///（`ESCAPE '\\'` 在 Dart 里要写四个），最容易数错的就是这里。
 const _likeEscape = r" ESCAPE '\'";
 
-/// 列表页用的三列：不带正文（正文按需用 read_preview / read_around 拿）。
+/// 列表页用的三列：不带正文（正文按需用 read_note_batch / read_around 拿）。
 Map<String, Object?> _brief(Row r) => {
   'id': r['id'],
   'title': r['title'],
@@ -813,7 +813,7 @@ Object? _searchNotes(SqliteArguments c) {
   return _ok(out, description: '搜索「${_short(keyword)}」（返回 ${out.length} 条）');
 }
 
-/// 在一篇笔记里找全部命中。offset 可以直接喂给 read_preview。
+/// 在一篇笔记里找全部命中。offset 可以直接喂给 read_note_batch。
 Object? _searchInNote(SqliteArguments c) {
   if (_dbOf() == null) return _err(_noDb);
   final id = _str(c, 0);

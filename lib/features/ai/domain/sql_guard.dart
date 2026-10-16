@@ -95,7 +95,7 @@ class SqlGuard {
       '写操作一次只作用于参数里点名的那几篇：'
       'SELECT update_notes_batch(\'[…] JSON 数组 …\')；'
       '要挑对象就先用读函数查 id，再拿 id 去调写函数。'
-      '读函数（read_preview / stat_note / search_notes …）可以嵌在查询里。';
+      '读函数（read_note_batch / outline_notes / search_notes …）可以嵌在查询里。';
 
   /// 校验一条 SQL。
   static SqlCheck check(String raw) {
@@ -127,12 +127,12 @@ class SqlGuard {
       return SqlCheck.reject(_reasonOf('REPLACE INTO'));
     }
 
-    // 写函数（含 mark_functions）不能嵌进带 FROM / JOIN 的语句：那会**逐行**调一次。
+    // 写函数不能嵌进带 FROM / JOIN 的语句：那会**逐行**调一次。
     //
     // 这条不是洁癖，是数据事故：`SELECT update_notes_batch(...) FROM notes`
     // 在有 200 篇笔记的库上会改 200 轮，而 AI 的本意通常只是「改那一篇」。
     // 读函数不受限制 —— 它们本来就是拿来嵌在查询里的
-    //（SELECT id, read_preview(id, 0, 200) FROM notes 是推荐写法）。
+    //（SELECT id, read_note_batch(id, 0, 200) FROM notes 是推荐写法）。
     if (_nonReadCall.hasMatch(code) && _hasFrom.hasMatch(upper)) {
       return SqlCheck.reject(_writeWithFromReason);
     }

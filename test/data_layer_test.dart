@@ -257,7 +257,8 @@ void main() {
       expect(formal.notebookId, folder.id);
 
       expect((await notes.watchInbox().first).map((n) => n.id), [quick.id]);
-      expect((await notes.watchLibrary().first).map((n) => n.id), [formal.id]);
+      expect((await notes.watchNotesInNotebook(folder.id).first).map((n) => n.id),
+          [formal.id]);
     });
 
     test('加入笔记库：isInbox 变 false 且归属目录', () async {
@@ -299,7 +300,7 @@ void main() {
       await notes.softDelete(note.id);
 
       expect(await notes.watchInbox().first, isEmpty);
-      expect(await notes.watchLibrary().first, isEmpty);
+      expect(await notes.watchUnfiled().first, isEmpty);
       final raw = await notes.byId(note.id);
       expect(raw, isNotNull);
       expect(raw!.deletedAt, isNotNull);

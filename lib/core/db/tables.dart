@@ -193,9 +193,9 @@ class AiMessages extends Table {
   /// ## 形状
   ///
   /// 一轮对话里可能有好几段（每次工具往返各一段）。按出现顺序拼在一起，
-  /// 段之间用 `\n\n---\n` 分隔，每段前面带一个「第 N 轮」标记
-  ///（见 `AiChatRepository._thinkingBlock`）。存的是**原始文本**，
-  /// 界面自己决定怎么折叠显示。
+  /// 段之间用 `\n\n---\n\n` 分隔，每段前面带一个「第 N 轮」标记
+  ///（分段逻辑在 `AiChatRepository._consume` 里、跟着 `AgentRoundStarted`
+  /// 事件走）。存的是**原始文本**，界面自己决定怎么折叠显示。
   ///
   /// 可能很长（几万字）—— 用户明确选了"存下来、事后也能回看"，
   /// 换来的是翻回去还看得到它在想什么。
@@ -236,13 +236,17 @@ class AppKv extends Table {
 
 /// 轻笔记的**跨启动预留**：几张已生成好的卡片，下次打开先拿出来当屏。
 ///
-/// 用户希望每次打开卡片流都秒出，不能等一次 AI 生成（那要几秒）。做法是后台
-/// **单独生成**最多 `kFeedReserveSize`（6）张存进这张表；下次启动先把表里的取出来
-/// 当首屏（秒出），再后台生成新的一批、重新写回来。上一批被取出后就从表里删掉
-/// （消费即清）。
+/// 用户希望每次打开卡片流都秒出，不能等一次 AI 生成（那要几秒）。做法是把
+/// **用户刚看过的那一屏**抄一份存进这张表（`FeedRepository.stashReserve`）；
+/// 下次启动先 `takeFeedReserve()` 取出来当首屏（秒出），下一批留给下拉刷新。
+/// 取出即清（消费即清）。
 ///
-/// （相关常量在 `feed_repository.dart` 顶部：`kFeedReserveSize` / `kFeedFirstScreenCount` /
-/// `kFeedPullSize` / `kGenParallelism` / `kFeedPoolTarget`，改那里就要改这里。）
+/// ⚠️ 以前这里是"后台**单独生成** N 张存起来" —— 那等于每次开屏都白烧一屏的钱
+///（用户可能压根没看）。改成"抄一屏"之后**一次生成都不多花**。
+///
+/// （相关常量在 `feed_repository.dart` 顶部：`kFeedBatchSize` / `kFeedFirstScreenCount` /
+/// `kFeedPullSize` / `kGenParallelism` / `kFeedPoolTarget`；值都在 `FeedLimits` 里。
+/// 改那里就要改这里。）
 ///
 /// 这些是真正的卡片内容，该有自己的表（而不是塞进 `app_kv` 的 JSON）：
 ///   · 能单独查询 / 清理，不跟配置混在一起
@@ -250,7 +254,9 @@ class AppKv extends Table {
 ///
 /// ## 这张表不影响列表是替换还是追加
 ///
-/// 它只影响"进来时先拿哪 **6** 张"。列表行为在 UI 层
+/// 它只影响"进来时先拿哪几张"（现在是抄下来的**那一屏**，
+/// 见 `FeedRepository.stashReserve` —— 不是"另外再生成几张"）。
+/// 列表行为在 UI 层
 /// （`InboxPage._loadBatch`）：**首次进入是替换，下拉刷新是前向追加**。
 /// 所以这里无论有多少张，都不会让列表自己往后长。
 class FeedReserve extends Table {
@@ -298,7 +304,8 @@ class FeedReserve extends Table {
 ///
 /// [lastUsedAt] / [nextWindowStart] 服务卡片流的取素材：
 ///
-///   · 卡片流用的是**片内 400 字窗口**（片本身可以到 700 字），
+///   · 卡片流用的是**片内的一小段窗口**（比片的硬上限短得多，大小见
+///     `FeedWindow.chars`），
 ///     窗口位置**轮换**，[nextWindowStart] 就是下次该从哪个偏移开窗口；
 ///   · [lastUsedAt] 记这片上次被用掉的时间，取片时
 ///     `ORDER BY last_used_at ASC NULLS FIRST` —— 把"用过的片"持久化下来。
@@ -357,11 +364,10 @@ class NoteChunks extends Table {
 /// AI 的**函数清单**：AI 用 SQL 操作笔记库，先得知道有哪些函数可调。
 ///
 /// 每行描述一个 SQLite UDF：名字 / 分类 / 签名 / 一句说明 / 一个能照抄的例子。
-/// AI 需要的函数不在 system prompt 的「已加载函数详情」里时，查一次这张表拿目录
-///（`SELECT name, signature FROM ai_functions`），再用 `mark_functions` 把
-/// 会反复用的标记为常驻 —— 于是 **加一个函数 = INSERT 一行**，
-/// system prompt 里只写"去查这张表"，不用跟着函数清单一起变长
-///（本版省 token 的关键就在这）。
+/// 它同时是 system prompt 里那段函数文档的**唯一来源**（由 `prompts.dart` 现生成），
+/// 于是：**加一个函数 = INSERT 一行**，prompt 不用手抄、也就不会和实现对不上。
+///（曾经有过 `mark_functions`：让 AI 自己把几个函数"钉"成常驻、按需加载详情。
+/// 详情改成全量常驻之后它彻底多余，已删 —— 见 `ai_functions.dart` 的版本史。）
 ///
 /// 名字的来历：它原先是 `ai_capabilities`（v1 那 22 个 function calling 工具
 /// 时代的遗留表，从建表起就没有任何读写方，见《数据库设计》v7→v8 的"死表"一节）。

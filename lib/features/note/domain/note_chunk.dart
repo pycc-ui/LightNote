@@ -53,8 +53,8 @@ class NoteChunk {
   /// 在 `note_chunks` 里的唯一标识（一片 = 一篇笔记 + 一个片号）。
   ///
   /// 卡片流记"用过哪些片"用的是它，而不是片正文的 hash ——
-  /// 正文改成 400 字窗口之后，同一片每次取出的文字都不一样，按 text hash
-  /// 去重等于完全失效。
+  /// 正文改成"片内的一小段窗口"之后，同一片每次取出的文字都不一样，按 text hash
+  /// 去重等于完全失效（窗口大小见 `FeedWindow.chars`）。
   String keyOf(String noteId) => '$noteId:$index';
 
   /// 从**原文**里取出这一片的正文。

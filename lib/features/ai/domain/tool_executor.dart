@@ -156,7 +156,7 @@ class ToolExecutor {
   /// 假阳性（名字出现在字符串里）只会多刷新一次，无害；
   /// 假阴性不可能出现 —— 没调写函数就没写数据。
   ///
-  /// 两类分开：改笔记的函数通知三张笔记表；`mark_functions` 只动 `app_kv`
+  /// 两类分开：改笔记的函数通知三张笔记表；`system` 类（动 `app_kv` 的那些）
   /// （它改的是"加载哪几个函数详情"，与笔记无关，通知笔记表是白刷）。
   /// 返回**这次 SQL 有没有改笔记数据**（`kAiWriteFunctions` 里出现过名字）。
   bool _notifyIfWrite(String sql) {

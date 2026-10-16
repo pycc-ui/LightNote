@@ -144,17 +144,14 @@ class RagIndexer {
     return done;
   }
 
-  /// 软删笔记时清掉向量。
-  ///
-  /// 外键带 `ON DELETE CASCADE` 但项目用软删除（行还在），级联不触发 ——
-  /// 和 `note_chunks` 是同一个坑，所以要显式清（检索那边也有一道
-  /// `deleted_at IS NULL` 兜底，两道都留着）。
-  Future<void> clearFor(String noteId) => _db.clearNoteVectors(noteId);
-
-  /// 清掉死行（`content_hash` 已经对不上、或者模型已经换了）。
+  /// 清掉死行：`content_hash` 对不上、模型换了、或者**笔记已经软删**
+  ///（三种的判据见 `AppDatabase.staleVectorIds`）。
   ///
   /// **不是必须的**：留着不影响任何结果（检索时 JOIN 就把它们过滤掉了）。
   /// 只是让表别无限长大 —— 顺带释放那些 BLOB（每片 2KB）。
+  ///
+  /// 由 `RagIndexSchedule.kickHousekeeping` 在**启动时**调一次
+  ///（每次启动清一批，跑几天就清干净了；不值得为它加定时器）。
   Future<int> pruneStale({int limit = 500}) async {
     final rows = await _db.staleVectorIds(modelId, limit: limit);
     if (rows.isEmpty) return 0;

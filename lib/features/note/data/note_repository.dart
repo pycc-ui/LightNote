@@ -38,9 +38,6 @@ class NoteRepository {
   /// 未归档笔记（笔记库页的「轻笔记」区块）
   Stream<List<Note>> watchUnfiled() => _db.watchUnfiledNotes();
 
-  /// 笔记库「最近笔记」：已归档的全部笔记
-  Stream<List<Note>> watchLibrary() => _db.watchLibraryNotes();
-
   /// 某笔记库下的笔记
   Stream<List<Note>> watchNotesInNotebook(String notebookId) =>
       _db.watchNotesInNotebook(notebookId);

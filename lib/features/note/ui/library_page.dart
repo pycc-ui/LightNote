@@ -47,6 +47,9 @@ class _LibraryPageState extends State<LibraryPage> {
   void _enterSelecting() => setState(() {
         _selecting = true;
         _selected.clear();
+        // 两个模式**互斥**：多选时点一下是"选中"，调整顺序时点一下什么都不做
+        //（只有手柄能拖）。同时开着就会出现"点一下既没选上也没拖动"的怪状态。
+        _reordering = false;
       });
 
   void _exitSelecting() => setState(() {

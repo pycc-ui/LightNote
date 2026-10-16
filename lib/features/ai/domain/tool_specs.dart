@@ -21,11 +21,10 @@ final kSqlToolSpec = ToolSpec(
   name: 'sql',
   description: '在用户的笔记数据库上执行一条 SQL。可以查询 notes / notebooks / note_chunks，'
       '调用 ai_functions 里登记的扩展函数，用子查询 / CTE / JOIN / 窗口函数。'
-      '扩展函数可以直接嵌在 SELECT 里（例如 SELECT id, read_preview(id, 0, 200) FROM notes）。'
+      '扩展函数可以直接嵌在 SELECT 里（例如 SELECT id, read_note_batch(id, 0, 200) FROM notes）。'
       '新建 / 修改 / 删除**必须**调用扩展函数，直接写表会被拒绝。'
-      '需要的函数不在 System Prompt 末尾的「已加载函数详情」里时，先 '
-      'SELECT name, signature FROM ai_functions 查目录，再用 mark_functions 把'
-      '会反复用的标记为常驻。',
+      '函数详情**全部常驻在 System Prompt 里**（不再需要按需加载）；'
+      '万一要核对签名，可以 SELECT name, signature FROM ai_functions。',
   parameters: {
     'type': 'object',
     'properties': {
@@ -43,7 +42,12 @@ final kAskUserToolSpec = ToolSpec(
   name: 'askUser',
   description: '**信息不足时问用户**：不确定是哪一篇、要起什么名字、要不要继续。'
       '优先用 source 让 App 现查选项，不要把清单塞进参数里。'
-      '不要问已经知道的信息，能推断的就别问。',
+      '不要问已经知道的信息，能推断的就别问。'
+      // ⚠️ 这一句是给模型的行为约定：用户**可以在选项之外自己写一句**
+      //（界面里选择题下面就有输入框）。不写清的话模型会硬把答案套回选项，
+      // 而用户写的那句往往才是他真正想要的。
+      '**用户可能不选你给的选项，而是自己写一句** —— 结果里的 `text` 就是那句，'
+      '以它为准，别硬套回选项。',
   parameters: {
     'type': 'object',
     'properties': {
